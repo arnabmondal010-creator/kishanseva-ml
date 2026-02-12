@@ -10,7 +10,7 @@ import os
 import subprocess
 
 if not os.path.exists("model/plant_disease.h5") or not os.path.exists("model/rice_disease.h5"):
-    subprocess.run(["python", "download_models.py"], check=True)
+    subprocess.run([sys.executable,"python", "download_models.py"], check=True)
 
 
 MODELS = {
