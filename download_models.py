@@ -1,27 +1,21 @@
 import os
 import requests
 
-BASE_URL = "https://huggingface.co/kishanseva-chatbot/kishanseva-plant-disease/resolve/main"
-
 MODELS = {
-    "plant_disease.h5": f"{BASE_URL}/plant_disease.h5",
-    "rice_disease.h5": f"{BASE_URL}/rice_disease.h5",
+    "plant_disease.tflite": "https://huggingface.co/kishanseva-chatbot/kishanseva-tflite-models/resolve/main/plant_disease.tflite",
+    "rice_disease.tflite": "https://huggingface.co/kishanseva-chatbot/kishanseva-tflite-models/resolve/main/rice_disease.tflite",
 }
 
 os.makedirs("model", exist_ok=True)
 
 for name, url in MODELS.items():
-    out_path = os.path.join("model", name)
-    if os.path.exists(out_path):
-        print(f"[SKIP] {name} already exists")
-        continue
-
-    print(f"[INFO] Downloading {name}")
-    r = requests.get(url, stream=True)
-    r.raise_for_status()
-
-    with open(out_path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            f.write(chunk)
-
-    print(f"[OK] Saved {name}")
+    path = os.path.join("model", name)
+    if not os.path.exists(path):
+        print("[INFO] Downloading", name)
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        with open(path, "wb") as f:
+            f.write(r.content)
+        print("[OK] Saved", name)
+    else:
+        print("[SKIP]", name, "already exists")

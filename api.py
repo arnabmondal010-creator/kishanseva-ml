@@ -1,57 +1,25 @@
-from fastapi import FastAPI, UploadFile, File, Form
 import tensorflow as tf
 import numpy as np
-from PIL import Image
-import io
-import os
-
-app = FastAPI()
 
 MODELS = {}
-CLASS_NAMES = {
-    "tomato_potato_pepper": [
-        "Pepper__bell___Bacterial_spot",
-        "Pepper__bell___healthy",
-        "Potato___Early_blight",
-        "Potato___Late_blight",
-        "Potato___healthy",
-        "Tomato_Bacterial_spot",
-        "Tomato_Early_blight",
-        "Tomato_Late_blight",
-        "Tomato_Leaf_Mold",
-        "Tomato_Septoria_leaf_spot",
-        "Tomato_Spider_mites_Two_spotted_spider_mite",
-        "Tomato__Target_Spot",
-        "Tomato__Tomato_YellowLeaf__Curl_Virus",
-        "Tomato__Tomato_mosaic_virus",
-        "Tomato_healthy"
-    ],
-    "rice": ["Bacterial leaf blight", "Brown spot", "Leaf smut"]
-}
+
+def load_tflite(path):
+    interpreter = tf.lite.Interpreter(model_path=path)
+    interpreter.allocate_tensors()
+    return interpreter
+
+def predict(interpreter, input_array):
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    interpreter.set_tensor(input_details[0]['index'], input_array.astype(np.float32))
+    interpreter.invoke()
+    output = interpreter.get_tensor(output_details[0]['index'])
+    return output
 
 @app.on_event("startup")
 def load_models():
-    print("[INFO] Loading models...")
-    MODELS["tomato_potato_pepper"] = tf.keras.models.load_model("model/plant_disease.h5")
-    MODELS["rice"] = tf.keras.models.load_model("model/rice_disease.h5")
+    print("[INFO] Loading TFLite models...")
+    MODELS["plant"] = load_tflite("model/plant_disease.tflite")
+    MODELS["rice"] = load_tflite("model/rice_disease.tflite")
     print("[OK] Models loaded")
-
-@app.post("/predict")
-async def predict(crop: str = Form(...), file: UploadFile = File(...)):
-    model = MODELS[crop]
-    labels = CLASS_NAMES[crop]
-
-    image = Image.open(io.BytesIO(await file.read())).convert("RGB")
-    image = image.resize((224,224))
-    arr = np.array(image) / 255.0
-    arr = np.expand_dims(arr, 0)
-
-    preds = model.predict(arr)
-    idx = int(np.argmax(preds))
-    conf = float(np.max(preds))
-
-    return {
-        "crop": crop,
-        "disease": labels[idx],
-        "confidence": round(conf, 4)
-    }
