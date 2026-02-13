@@ -7,11 +7,7 @@ import os
 
 app = FastAPI()
 
-MODELS = {
-    "tomato_potato_pepper": tf.keras.models.load_model("model/plant_disease.h5"),
-    "rice": tf.keras.models.load_model("model/rice_disease.h5"),
-}
-
+MODELS = {}
 CLASS_NAMES = {
     "tomato_potato_pepper": [
         "Pepper__bell___Bacterial_spot",
@@ -32,6 +28,13 @@ CLASS_NAMES = {
     ],
     "rice": ["Bacterial leaf blight", "Brown spot", "Leaf smut"]
 }
+
+@app.on_event("startup")
+def load_models():
+    print("[INFO] Loading models...")
+    MODELS["tomato_potato_pepper"] = tf.keras.models.load_model("model/plant_disease.h5")
+    MODELS["rice"] = tf.keras.models.load_model("model/rice_disease.h5")
+    print("[OK] Models loaded")
 
 @app.post("/predict")
 async def predict(crop: str = Form(...), file: UploadFile = File(...)):
