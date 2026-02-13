@@ -6,8 +6,7 @@ from fastapi import FastAPI
 app = FastAPI()
 
 if os.getenv("RENDER"):
-    try:
-        print("[INFO] Downloading models...")
-        subprocess.run([sys.executable, "download_models.py"], check=True)
-    except Exception as e:
-        print("[ERROR] Model download failed:", e)
+    print("[INFO] Downloading models on startup...")
+    result = subprocess.run([sys.executable, "download_models.py"])
+    if result.returncode != 0:
+        raise RuntimeError("Model download failed. Stopping server.")
