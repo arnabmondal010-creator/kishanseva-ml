@@ -1,5 +1,8 @@
+from fastapi import FastAPI
 import tensorflow as tf
 import numpy as np
+
+app = FastAPI()
 
 MODELS = {}
 
