@@ -1,7 +1,8 @@
 venv/
-model/*.h5
+*.h5
 PlantVillage/
 rice_dataset/
 __pycache__/
 *.log
 .env
+model2/
