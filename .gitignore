@@ -25,7 +25,7 @@ pip-wheel-metadata/
 *.onnx
 *.pkl
 model/
-models/
+
 model2/
 
 # =========================
