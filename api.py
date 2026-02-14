@@ -1,85 +1,90 @@
-# api.py
+# -*- coding: utf-8 -*-
 import os
-import numpy as np
+import razorpay
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from PIL import Image
-import tensorflow as tf
+from limits import can_use
+from ai_service import analyze_image
 
+# -----------------------------
+# App
+# -----------------------------
 app = FastAPI()
 
-MODELS = {}
-CLASS_NAMES = {
-    "tomato": ["Bacterial_spot", "Early_blight", "Late_blight", "Leaf_Mold", "Healthy"],
-    "rice": ["Bacterial_leaf_blight", "Brown_spot", "Leaf_smut", "Healthy"]
+# -----------------------------
+# Razorpay Setup (ENV VARS)
+# -----------------------------
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+
+if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+    raise RuntimeError("Razorpay keys not set in environment variables")
+
+razorpay_client = razorpay.Client(
+    auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
+)
+
+PLANS = {
+    "basic": 7900,   # ₹79
+    "pro": 14900     # ₹149
 }
 
-MODEL_PATHS = {
-    "tomato": "model/plant_disease.tflite",
-    "rice": "model/rice_disease.tflite"
-}
+# -----------------------------
+# Create Payment Order
+# -----------------------------
+@app.post("/create-order")
+def create_payment_order(plan: str = Form(...)):
+    if plan not in PLANS:
+        raise HTTPException(status_code=400, detail="Invalid plan")
 
-INPUT_SIZE = 224
+    order = razorpay_client.order.create({
+        "amount": PLANS[plan],
+        "currency": "INR",
+        "payment_capture": 1
+    })
 
+    return {
+        "order_id": order["id"],
+        "amount": order["amount"],
+        "currency": "INR",
+        "key": RAZORPAY_KEY_ID
+    }
 
-def load_tflite_model(path):
-    interpreter = tf.lite.Interpreter(model_path=path)
-    interpreter.allocate_tensors()
-    return interpreter
+# -----------------------------
+# Confirm Upgrade (TEMP)
+# -----------------------------
+@app.post("/confirm-upgrade")
+def confirm_upgrade(plan: str = Form(...), user_id: str = Form(...)):
+    # TODO: Save user plan in DB
+    return {
+        "status": "success",
+        "plan": plan,
+        "user_id": user_id
+    }
 
-
-@app.on_event("startup")
-def load_models():
-    print("[INFO] Loading TFLite models...")
-    for crop, path in MODEL_PATHS.items():
-        if not os.path.exists(path):
-            raise RuntimeError(f"Model file missing: {path}")
-        MODELS[crop] = load_tflite_model(path)
-    print("[OK] Models loaded")
-
-
-def preprocess_image(image: Image.Image):
-    image = image.convert("RGB")
-    image = image.resize((INPUT_SIZE, INPUT_SIZE))
-    img_array = np.array(image, dtype=np.float32) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-    return img_array
-
-
-def run_inference(interpreter, input_data):
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-
-    interpreter.set_tensor(input_details[0]["index"], input_data)
-    interpreter.invoke()
-
-    output = interpreter.get_tensor(output_details[0]["index"])[0]
-    return output
-
-
-@app.get("/")
-def root():
-    return {"status": "KishanSeva ML API running"}
-
-
+# -----------------------------
+# Prediction API (OpenAI ONLY)
+# -----------------------------
 @app.post("/predict")
 async def predict(
+    user_id: str = Form(None),
     crop: str = Form(...),
     file: UploadFile = File(...)
 ):
-    crop = crop.lower()
+    print("🔥 user_id:", user_id)
 
-    if crop not in MODELS:
-        raise HTTPException(status_code=400, detail="Invalid crop type")
+    if not can_use(user_id):
+        raise HTTPException(status_code=402, detail="Free limit exceeded. Please upgrade.")
 
-    image = Image.open(file.file)
-    input_tensor = preprocess_image(image)
-
-    probs = run_inference(MODELS[crop], input_tensor)
-    idx = int(np.argmax(probs))
-    confidence = float(np.max(probs))
+    image_bytes = await file.read()
+    result = await analyze_image(crop, image_bytes)
 
     return {
-        "crop": crop,
-        "disease": CLASS_NAMES[crop][idx],
-        "confidence": round(confidence, 4)
+        "disease": result.get("disease", "Unknown disease"),
+        "confidence": float(result.get("confidence", 0.0)),
+        "advice": result.get(
+            "advice",
+            "No specific advice available. Please try a clearer photo or consult a local agriculture officer."
+        )
     }
+print("🔥 user_id:", user_id)
+print("🔥 crop:", crop)
