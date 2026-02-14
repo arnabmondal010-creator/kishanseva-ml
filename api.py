@@ -89,3 +89,48 @@ async def predict(
             "No specific advice available. Please try a clearer photo or consult a local agriculture officer."
         )
     }
+
+
+# -----------------------------
+# Yield Prediction API
+# -----------------------------
+from joblib import load
+import pandas as pd
+
+yield_model = load("models/yield_model.joblib")
+
+@app.post("/predict-yield")
+async def predict_yield(
+    soil_type: str = Form(...),
+    fertilizer_type: str = Form(...),
+    crop_stage: str = Form(...),
+    stress_level: str = Form(...),
+    fertilizer_kg: float = Form(...),
+    irrigation_count: int = Form(...),
+    pesticide_sprays: int = Form(...),
+    avg_temp: float = Form(...),
+    rainfall: float = Form(...),
+    humidity: float = Form(...),
+    wind_speed: float = Form(...),
+    ndvi: float = Form(...)
+):
+    X = pd.DataFrame([{
+        "soil_type": soil_type,
+        "fertilizer_type": fertilizer_type,
+        "crop_stage": crop_stage,
+        "stress_level": stress_level,
+        "fertilizer_kg": fertilizer_kg,
+        "irrigation_count": irrigation_count,
+        "pesticide_sprays": pesticide_sprays,
+        "avg_temp": avg_temp,
+        "rainfall": rainfall,
+        "humidity": humidity,
+        "wind_speed": wind_speed,
+        "ndvi": ndvi,
+    }])
+
+    y_pred = yield_model.predict(X)[0]
+
+    return {
+        "predicted_yield_kg_per_hectare": float(y_pred)
+    }
