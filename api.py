@@ -70,7 +70,6 @@ async def predict(
     crop: str = Form(...),
     file: UploadFile = File(...)
 ):
-    print("🔥 user_id:", user_id)
 
     if not can_use(user_id):
         raise HTTPException(status_code=402, detail="Free limit exceeded. Please upgrade.")
