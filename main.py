@@ -1,11 +1,7 @@
 from fastapi import FastAPI
-from api import app
+from api import app 
 
-app = FastAPI()
+app = FastAPI(title="KishanSeva AI")
 
-# Mount all API routes from api.py
-
-
-@app.get("/")
-def root():
-    return {"status": "KishanSeva AI backend running"}
+# Mount all API routes
+app.mount("/", api_app)

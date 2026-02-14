@@ -65,3 +65,8 @@ secrets.json
 *.zip
 *.tar.gz
 *.7z
+
+# =========================
+# Tooling (optional)
+# =========================
+.ruff_cache/

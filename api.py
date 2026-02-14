@@ -5,10 +5,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from limits import can_use
 from ai_service import analyze_image
 
-# -----------------------------
-# App
-# -----------------------------
-app = FastAPI()
+app = FastAPI(title="KishanSeva AI API")
 
 # -----------------------------
 # Razorpay Setup (ENV VARS)
@@ -17,7 +14,7 @@ RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
-    raise RuntimeError("Razorpay keys not set in environment variables")
+    print("⚠ Razorpay keys not set (payments will fail)")
 
 razorpay_client = razorpay.Client(
     auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
@@ -27,6 +24,13 @@ PLANS = {
     "basic": 7900,   # ₹79
     "pro": 14900     # ₹149
 }
+
+# -----------------------------
+# Root
+# -----------------------------
+@app.get("/")
+def root():
+    return {"status": "KishanSeva AI running"}
 
 # -----------------------------
 # Create Payment Order
@@ -54,7 +58,6 @@ def create_payment_order(plan: str = Form(...)):
 # -----------------------------
 @app.post("/confirm-upgrade")
 def confirm_upgrade(plan: str = Form(...), user_id: str = Form(...)):
-    # TODO: Save user plan in DB
     return {
         "status": "success",
         "plan": plan,
@@ -70,6 +73,7 @@ async def predict(
     crop: str = Form(...),
     file: UploadFile = File(...)
 ):
+    user_id = user_id or "guest_user"
 
     if not can_use(user_id):
         raise HTTPException(status_code=402, detail="Free limit exceeded. Please upgrade.")
@@ -85,4 +89,3 @@ async def predict(
             "No specific advice available. Please try a clearer photo or consult a local agriculture officer."
         )
     }
-

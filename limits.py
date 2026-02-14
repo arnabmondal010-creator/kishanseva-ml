@@ -1,16 +1,13 @@
-from datetime import datetime, timedelta
+USAGE = {}
 
-FREE_LIMIT = 5  # free uploads per day
-_usage = {}     # {user_id: {"count": int, "date": date}}
+FREE_LIMIT = 5
 
-def can_use(user_id: str):
-    today = datetime.utcnow().date()
+def can_use(user_id: str) -> bool:
+    if user_id not in USAGE:
+        USAGE[user_id] = 0
 
-    if user_id not in _usage or _usage[user_id]["date"] != today:
-        _usage[user_id] = {"count": 0, "date": today}
-
-    if _usage[user_id]["count"] >= FREE_LIMIT:
+    if USAGE[user_id] >= FREE_LIMIT:
         return False
 
-    _usage[user_id]["count"] += 1
+    USAGE[user_id] += 1
     return True
