@@ -85,5 +85,4 @@ async def predict(
             "No specific advice available. Please try a clearer photo or consult a local agriculture officer."
         )
     }
-print("🔥 user_id:", user_id)
-print("🔥 crop:", crop)
+
