@@ -1,8 +1,67 @@
-venv/
-*.h5
-PlantVillage/
-rice_dataset/
+# =========================
+# Python / FastAPI
+# =========================
 __pycache__/
-*.log
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
 .env
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.log
+
+# =========================
+# AI / Models (BLOCK THESE)
+# =========================
+*.h5
+*.tflite
+*.pt
+*.onnx
+*.pkl
+model/
+models/
 model2/
+
+# =========================
+# Flutter / Dart
+# =========================
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+build/
+ios/Flutter/Flutter.framework
+ios/Flutter/App.framework
+android/.gradle/
+android/local.properties
+
+# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# =========================
+# Git / Secrets
+# =========================
+.env*
+secrets.json
+*.pem
+*.key
+
+# =========================
+# Misc
+# =========================
+*.zip
+*.tar.gz
+*.7z
