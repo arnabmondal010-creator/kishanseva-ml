@@ -1,0 +1,4 @@
+functions-framework==3.* 
+flask
+earthengine-api==0.1.395 
+google-cloud-storage

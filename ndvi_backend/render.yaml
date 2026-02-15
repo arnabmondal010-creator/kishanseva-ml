@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: kishanseva-ndvi
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m functions_framework --target=field_ndvi --port $PORT
