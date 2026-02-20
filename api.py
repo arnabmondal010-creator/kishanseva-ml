@@ -121,6 +121,8 @@ def predict_yield(data: YieldInput):
 # -----------------------------
 # NDVI (Live)
 # -----------------------------
+# api.py (ADD BELOW YOUR /ndvi-history OR ABOVE)
+
 @app.post("/ndvi")
 def field_ndvi(req: NDVIRequest):
     try:
@@ -129,7 +131,7 @@ def field_ndvi(req: NDVIRequest):
         if isinstance(boundary, str):
             boundary = json.loads(boundary)
 
-        if boundary and isinstance(boundary, list) and len(boundary) >= 3:
+        if boundary and isinstance(boundary, list) and len(boundary) > 2:
             coords = [[p["lon"], p["lat"]] for p in boundary if "lat" in p and "lon" in p]
             geom = ee.Geometry.Polygon([coords])
         else:
@@ -138,16 +140,15 @@ def field_ndvi(req: NDVIRequest):
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(geom)
-            .filterDate("2024-01-01", "2026-12-31")
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+            .filterDate("2024-01-01", "2025-12-31")
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
             .map(add_ndvi)
-            .select("NDVI")
         )
 
         if collection.size().getInfo() == 0:
-            return {"ndvi_mean": None, "status": "No data"}
+            return {"ndvi_mean": None, "status": "No data", "source": "Sentinel-2"}
 
-        ndvi_img = collection.mean()
+        ndvi_img = collection.select("NDVI").mean()
 
         stats = ndvi_img.reduceRegion(
             reducer=ee.Reducer.mean(),
@@ -159,17 +160,16 @@ def field_ndvi(req: NDVIRequest):
         ndvi_value = stats.get("NDVI").getInfo()
 
         if ndvi_value is None:
-            return {"ndvi_mean": None, "status": "No NDVI pixels"}
+            return {"ndvi_mean": None, "status": "No NDVI", "source": "Sentinel-2"}
 
         return {
             "ndvi_mean": round(float(ndvi_value), 3),
             "status": "OK",
-            "source": "Sentinel-2 (GEE)"
+            "source": "Sentinel-2 (GEE)",
         }
 
     except Exception as e:
-        return {"ndvi_mean": None, "status": "error", "error": str(e)}
-
+        raise HTTPException(status_code=500, detail=str(e))
 # -----------------------------
 # NDVI Time-Series
 # -----------------------------
