@@ -36,12 +36,19 @@ yield_model = load("models/yield_model.joblib")
 # -----------------------------
 # Earth Engine Init (Render-safe)
 # -----------------------------
-KEY_PATH = os.path.join(os.path.dirname(__file__), "ndvi_backend", "gee-key.json")
+import json
+
+service_account = os.getenv("GEE_SERVICE_ACCOUNT")
+key_json = os.getenv("GEE_KEY_JSON")
+
+if not service_account or not key_json:
+    raise Exception("GEE credentials not configured")
 
 credentials = ee.ServiceAccountCredentials(
-    "arnabmondal010@gmail.com",
-    KEY_PATH,
+    service_account,
+    key_data=json.loads(key_json),
 )
+
 ee.Initialize(credentials)
 print("✅ Earth Engine initialized")
 
