@@ -46,7 +46,7 @@ if not service_account or not key_json:
 
 credentials = ee.ServiceAccountCredentials(
     service_account,
-    key_data=json.loads(key_json),
+    key_data=key_json,
 )
 
 ee.Initialize(credentials)
