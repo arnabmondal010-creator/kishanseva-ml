@@ -226,3 +226,25 @@ from fastapi import Response
 def root_head():
     return Response(status_code=200)
 
+import joblib
+import pandas as pd
+from fastapi import APIRouter
+
+router = APIRouter()
+
+# Load ML model
+model = joblib.load("irrigation_model.pkl")
+
+
+@router.post("/predict_irrigation")
+def predict_irrigation(data: dict):
+
+    df = pd.DataFrame([data])
+
+    prediction = model.predict(df)[0]
+
+    return {
+        "irrigation_mm": round(prediction, 2)
+    }
+
+
