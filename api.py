@@ -226,25 +226,35 @@ from fastapi import Response
 def root_head():
     return Response(status_code=200)
 
+# -----------------------------
+# Irrigation ML Prediction
+# -----------------------------
 import joblib
 import pandas as pd
-from fastapi import APIRouter
-
-router = APIRouter()
+from pydantic import BaseModel
 
 # Load ML model
-model = joblib.load("irrigation_model.pkl")
+irrigation_model = joblib.load("irrigation_model.pkl")
 
 
-@router.post("/predict_irrigation")
-def predict_irrigation(data: dict):
+class IrrigationInput(BaseModel):
+    soil: str
+    crop: str
+    temperature: float
+    humidity: float
+    rainfall: float
+    ndvi: float
+    infiltration: float
 
-    df = pd.DataFrame([data])
 
-    prediction = model.predict(df)[0]
+@app.post("/predict-irrigation")
+def predict_irrigation(data: IrrigationInput):
+
+    df = pd.DataFrame([data.dict()])
+
+    prediction = irrigation_model.predict(df)[0]
 
     return {
-        "irrigation_mm": round(prediction, 2)
+        "irrigation_mm": round(float(prediction), 2)
     }
-
 
