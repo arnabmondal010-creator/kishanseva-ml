@@ -1,11 +1,15 @@
 # api.py
 # -*- coding: utf-8 -*-
 
-import os, json, ee, pandas as pd
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import os
+import json
+import ee
+import pandas as pd
+import joblib
+
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from joblib import load
 
 from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
@@ -15,10 +19,10 @@ from services.yield_history_service import add_yield_record, get_history
 # App
 # -----------------------------
 app = FastAPI(title="KishanSeva AI API")
+
 @app.get("/")
 def root():
     return {"status": "KishanSeva AI running"}
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,8 +33,32 @@ app.add_middleware(
 )
 
 # -----------------------------
+# Load ML Models
+# -----------------------------
+yield_model = joblib.load("models/yield_model.joblib")
+irrigation_model = joblib.load("irrigation_model.pkl")
+
+# -----------------------------
+# Earth Engine Init
+# -----------------------------
+service_account = os.getenv("GEE_SERVICE_ACCOUNT")
+key_json = os.getenv("GEE_KEY_JSON")
+
+if not service_account or not key_json:
+    raise Exception("GEE credentials not configured")
+
+credentials = ee.ServiceAccountCredentials(
+    service_account,
+    key_data=key_json,
+)
+
+ee.Initialize(credentials)
+print("Earth Engine initialized")
+
+# -----------------------------
 # Models
 # -----------------------------
+
 class YieldInput(BaseModel):
     soil_type: str = "loamy"
     fertilizer_type: str = "urea"
@@ -48,10 +76,33 @@ class YieldInput(BaseModel):
     field_id: str = "default"
 
 
+class NDVIRequest(BaseModel):
+    lat: float
+    lon: float
+    boundary: list | None = None
+
+
+class IrrigationInput(BaseModel):
+    soil: str
+    crop: str
+    temperature: float
+    humidity: float
+    rainfall: float
+    ndvi: float
+    infiltration: float
+
+
+# -----------------------------
+# Helper
+# -----------------------------
+def add_ndvi(image):
+    return image.addBands(
+        image.normalizedDifference(["B8", "B4"]).rename("NDVI")
+    )
+
 # -----------------------------
 # Yield Prediction
 # -----------------------------
-
 @app.post("/predict-yield")
 def predict_yield(data: YieldInput):
 
@@ -95,20 +146,28 @@ def predict_yield(data: YieldInput):
 # -----------------------------
 # NDVI (Live)
 # -----------------------------
-# api.py (ADD BELOW YOUR /ndvi-history OR ABOVE)
-
 @app.post("/ndvi")
 def field_ndvi(req: NDVIRequest):
+
     try:
+
         boundary = req.boundary
 
         if isinstance(boundary, str):
             boundary = json.loads(boundary)
 
         if boundary and isinstance(boundary, list) and len(boundary) > 2:
-            coords = [[p["lon"], p["lat"]] for p in boundary if "lat" in p and "lon" in p]
+
+            coords = [
+                [p["lon"], p["lat"]]
+                for p in boundary
+                if "lat" in p and "lon" in p
+            ]
+
             geom = ee.Geometry.Polygon([coords])
+
         else:
+
             geom = ee.Geometry.Point([req.lon, req.lat]).buffer(100)
 
         collection = (
@@ -120,7 +179,7 @@ def field_ndvi(req: NDVIRequest):
         )
 
         if collection.size().getInfo() == 0:
-            return {"ndvi_mean": None, "status": "No data", "source": "Sentinel-2"}
+            return {"ndvi_mean": None, "status": "No data"}
 
         ndvi_img = collection.select("NDVI").mean()
 
@@ -133,23 +192,24 @@ def field_ndvi(req: NDVIRequest):
 
         ndvi_value = stats.get("NDVI").getInfo()
 
-        if ndvi_value is None:
-            return {"ndvi_mean": None, "status": "No NDVI", "source": "Sentinel-2"}
-
         return {
             "ndvi_mean": round(float(ndvi_value), 3),
             "status": "OK",
-            "source": "Sentinel-2 (GEE)",
+            "source": "Sentinel-2 (GEE)"
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 # -----------------------------
 # NDVI Time-Series
 # -----------------------------
 @app.post("/ndvi-history")
 def ndvi_history(req: NDVIRequest):
+
     try:
+
         geom = ee.Geometry.Point([req.lon, req.lat]).buffer(100)
 
         collection = (
@@ -161,10 +221,8 @@ def ndvi_history(req: NDVIRequest):
             .select("NDVI")
         )
 
-        if collection.size().getInfo() == 0:
-            return {"ndvi_trend": []}
-
         def to_feature(img):
+
             mean = img.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=geom,
@@ -172,48 +230,39 @@ def ndvi_history(req: NDVIRequest):
                 maxPixels=1e9,
             ).get("NDVI")
 
-            return ee.Feature(None, {
-                "date": ee.Date(img.get("system:time_start")).format("YYYY-MM-dd"),
-                "ndvi": mean,
-            })
+            return ee.Feature(
+                None,
+                {
+                    "date": ee.Date(
+                        img.get("system:time_start")
+                    ).format("YYYY-MM-dd"),
+                    "ndvi": mean,
+                },
+            )
 
-        fc = collection.map(to_feature).filter(ee.Filter.notNull(["ndvi"]))
-        data = fc.aggregate_array("date").zip(fc.aggregate_array("ndvi")).getInfo()
+        fc = collection.map(to_feature).filter(
+            ee.Filter.notNull(["ndvi"])
+        )
 
-        history = [{"date": d, "ndvi": round(float(v), 3)} for d, v in data]
+        data = fc.aggregate_array("date").zip(
+            fc.aggregate_array("ndvi")
+        ).getInfo()
+
+        history = [
+            {"date": d, "ndvi": round(float(v), 3)}
+            for d, v in data
+        ]
 
         return {"ndvi_trend": history}
 
     except Exception as e:
+
         return {"ndvi_trend": [], "error": str(e)}
 
-from fastapi import Response
-
-@app.head("/")
-def root_head():
-    return Response(status_code=200)
 
 # -----------------------------
-# Irrigation ML Prediction
+# Irrigation Prediction
 # -----------------------------
-import joblib
-import pandas as pd
-from pydantic import BaseModel
-
-# Load ML model
-irrigation_model = joblib.load("irrigation_model.pkl")
-
-
-class IrrigationInput(BaseModel):
-    soil: str
-    crop: str
-    temperature: float
-    humidity: float
-    rainfall: float
-    ndvi: float
-    infiltration: float
-
-
 @app.post("/predict-irrigation")
 def predict_irrigation(data: IrrigationInput):
 
@@ -225,3 +274,10 @@ def predict_irrigation(data: IrrigationInput):
         "irrigation_mm": round(float(prediction), 2)
     }
 
+
+# -----------------------------
+# HEAD health check
+# -----------------------------
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
