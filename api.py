@@ -57,9 +57,6 @@ def predict_yield(data: YieldInput):
 
     user_id = data.user_id or "guest_user"
 
-    if not can_use(user_id):
-        raise HTTPException(status_code=402, detail="Free limit exceeded")
-
     df = pd.DataFrame([{
         "soil_type": data.soil_type,
         "fertilizer_type": data.fertilizer_type,
@@ -75,7 +72,6 @@ def predict_yield(data: YieldInput):
         "ndvi": data.ndvi
     }])
 
-    # ML prediction
     y = float(yield_model.predict(df)[0])
 
     confidence = 70
@@ -88,23 +84,12 @@ def predict_yield(data: YieldInput):
 
     confidence = min(confidence, 95)
 
-    # Save history
     add_yield_record(user_id, data.field_id, y)
 
     return {
         "predicted_yield": round(y, 2),
         "confidence": confidence,
-        "history": get_history(user_id, data.field_id) or [
-            {"year": 2021, "yield": 2.1},
-            {"year": 2022, "yield": 2.6},
-            {"year": 2023, "yield": 2.9}
-        ],
-        "ndvi_trend": [
-            {"date": "2024-06-01", "ndvi": 0.42},
-            {"date": "2024-07-01", "ndvi": 0.51},
-            {"date": "2024-08-01", "ndvi": 0.58}
-        ],
-        "plan": get_user_plan(user_id)
+        "history": get_history(user_id, data.field_id)
     }
 
 # -----------------------------
