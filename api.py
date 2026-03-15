@@ -29,81 +29,46 @@ app.add_middleware(
 )
 
 # -----------------------------
-# ML Model
-# -----------------------------
-yield_model = load("models/yield_model.joblib")
-
-# -----------------------------
-# Earth Engine Init (Render-safe)
-# -----------------------------
-import json
-
-service_account = os.getenv("GEE_SERVICE_ACCOUNT")
-key_json = os.getenv("GEE_KEY_JSON")
-
-if not service_account or not key_json:
-    raise Exception("GEE credentials not configured")
-
-credentials = ee.ServiceAccountCredentials(
-    service_account,
-    key_data=key_json,
-)
-
-ee.Initialize(credentials)
-print("✅ Earth Engine initialized")
-
-# -----------------------------
-# Models
-# -----------------------------
-class YieldInput(BaseModel):
-    soil_type: str = "loamy"
-    fertilizer_type: str = "urea"
-    crop_stage: str = "vegetative"
-    stress_level: str = "low"
-    fertilizer_kg: float = 40
-    irrigation_count: int = 2
-    pesticide_sprays: int = 1
-    avg_temp: float = 28
-    rainfall: float = 0
-    humidity: float = 60
-    wind_speed: float = 1.5
-    ndvi: float = 0.5
-    user_id: str | None = "guest_user"
-    field_id: str = "default"
-
-class NDVIRequest(BaseModel):
-    lat: float
-    lon: float
-    boundary: list | None = None
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def add_ndvi(image):
-    return image.addBands(image.normalizedDifference(["B8", "B4"]).rename("NDVI"))
-
-# -----------------------------
-# Routes
-# -----------------------------
-
-
-# -----------------------------
 # Yield Prediction
 # -----------------------------
-y = float(yield_model.predict(df)[0])
+@app.post("/predict-yield")
+def predict_yield(data: YieldInput):
 
-confidence = 70
+    user_id = data.user_id or "guest_user"
 
-if data.ndvi > 0.6:
-    confidence += 10
+    if not can_use(user_id):
+        raise HTTPException(status_code=402, detail="Free limit exceeded")
 
-if data.humidity > 60:
-    confidence += 5
+    df = pd.DataFrame([{
+        "soil_type": data.soil_type,
+        "fertilizer_type": data.fertilizer_type,
+        "crop_stage": data.crop_stage,
+        "stress_level": data.stress_level,
+        "fertilizer_kg": data.fertilizer_kg,
+        "irrigation_count": data.irrigation_count,
+        "pesticide_sprays": data.pesticide_sprays,
+        "avg_temp": data.avg_temp,
+        "rainfall": data.rainfall,
+        "humidity": data.humidity,
+        "wind_speed": data.wind_speed,
+        "ndvi": data.ndvi
+    }])
 
-confidence = min(confidence, 95)
+    # ML prediction
+    y = float(yield_model.predict(df)[0])
 
-add_yield_record(user_id, data.field_id, y)
+    confidence = 70
 
+    if data.ndvi > 0.6:
+        confidence += 10
+
+    if data.humidity > 60:
+        confidence += 5
+
+    confidence = min(confidence, 95)
+
+    # Save history
+    add_yield_record(user_id, data.field_id, y)
 
     return {
         "predicted_yield": round(y, 2),
