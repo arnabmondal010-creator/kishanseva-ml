@@ -90,24 +90,20 @@ def add_ndvi(image):
 # -----------------------------
 # Yield Prediction
 # -----------------------------
-@app.post("/predict-yield")
-def predict_yield(data: YieldInput):
-    user_id = data.user_id or "guest_user"
+y = float(yield_model.predict(df)[0])
 
-    if not can_use(user_id):
-        raise HTTPException(status_code=402, detail="Free limit exceeded")
+confidence = 70
 
-    df = pd.DataFrame([data.dict(exclude={"user_id", "field_id"})])
-    y = float(yield_model.predict(df)[0])
+if data.ndvi > 0.6:
+    confidence += 10
 
-    confidence = 70
-    if data.ndvi > 0.6:
-        confidence += 10
-    if data.humidity > 60:
-        confidence += 5
-    confidence = min(confidence, 95)
+if data.humidity > 60:
+    confidence += 5
 
-    add_yield_record(user_id=user_id, field_id=data.field_id, y)
+confidence = min(confidence, 95)
+
+add_yield_record(user_id, data.field_id, y)
+
 
     return {
         "predicted_yield": round(y, 2),
