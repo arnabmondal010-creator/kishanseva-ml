@@ -29,8 +29,29 @@ app.add_middleware(
 )
 
 # -----------------------------
+# Models
+# -----------------------------
+class YieldInput(BaseModel):
+    soil_type: str = "loamy"
+    fertilizer_type: str = "urea"
+    crop_stage: str = "vegetative"
+    stress_level: str = "low"
+    fertilizer_kg: float = 40
+    irrigation_count: int = 2
+    pesticide_sprays: int = 1
+    avg_temp: float = 28
+    rainfall: float = 0
+    humidity: float = 60
+    wind_speed: float = 1.5
+    ndvi: float = 0.5
+    user_id: str | None = "guest_user"
+    field_id: str = "default"
+
+
+# -----------------------------
 # Yield Prediction
 # -----------------------------
+
 @app.post("/predict-yield")
 def predict_yield(data: YieldInput):
 
