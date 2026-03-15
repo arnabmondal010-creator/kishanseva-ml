@@ -107,7 +107,7 @@ def predict_yield(data: YieldInput):
         confidence += 5
     confidence = min(confidence, 95)
 
-    add_yield_record(user_id=user_id, field_id=data.field_id, predicted=y)
+    add_yield_record(user_id=user_id, field_id=data.field_id, y)
 
     return {
         "predicted_yield": round(y, 2),
