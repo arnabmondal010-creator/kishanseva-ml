@@ -363,23 +363,13 @@ async def predict_disease(
 
         contents = await file.read()
 
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-        image = image.resize((224, 224))
-
-        img = np.array(image) / 255.0
-        img = np.expand_dims(img, axis=0)
-
-        # TEMP prediction (replace later with real model)
-        disease = "Leaf Blight"
-        confidence = 0.90
-
-        advice = "Apply copper fungicide and remove infected leaves."
+        result = await analyze_image(contents, crop)
 
         return {
             "crop": crop,
-            "disease": disease,
-            "confidence": confidence,
-            "advice": advice
+            "disease": result["disease"],
+            "confidence": result["confidence"],
+            "advice": result["advice"]
         }
 
     except Exception as e:
