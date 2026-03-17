@@ -146,8 +146,11 @@ def predict_yield(data: YieldInput):
 # -----------------------------
 # NDVI (Live)
 # -----------------------------
-@app.post("/ndvi")
-def field_ndvi(req: NDVIRequest):
+# -----------------------------
+# Satellite Analysis API
+# -----------------------------
+@app.post("/satellite-analysis")
+def satellite_analysis(req: NDVIRequest):
 
     try:
 
@@ -170,60 +173,76 @@ def field_ndvi(req: NDVIRequest):
 
             geom = ee.Geometry.Point([req.lon, req.lat]).buffer(100)
 
+        # -----------------------------
+        # Sentinel Collection
+        # -----------------------------
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(geom)
-            .filterDate("2024-01-01", "2025-12-31")
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
-            .map(add_ndvi)
+            .filterDate("2024-01-01", "2026-12-31")
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
         )
 
+        def add_indices(img):
+
+            nir = img.select("B8")
+            red = img.select("B4")
+            swir = img.select("B11")
+
+            ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
+
+            ndwi = nir.subtract(swir).divide(nir.add(swir)).rename("NDWI")
+
+            savi = (
+                nir.subtract(red)
+                .divide(nir.add(red).add(0.5))
+                .multiply(1.5)
+                .rename("SAVI")
+            )
+
+            return img.addBands([ndvi, ndwi, savi])
+
+        collection = collection.map(add_indices)
+
         if collection.size().getInfo() == 0:
-            return {"ndvi_mean": None, "status": "No data"}
 
-        ndvi_img = collection.select("NDVI").mean()
+            return {
+                "status": "No satellite data",
+                "latest": None,
+                "history": [],
+                "trend": None
+            }
 
-        stats = ndvi_img.reduceRegion(
+        # -----------------------------
+        # Latest Vegetation Snapshot
+        # -----------------------------
+        latest_img = collection.sort(
+            "system:time_start", False
+        ).first()
+
+        stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
             scale=10,
             maxPixels=1e9,
         )
 
-        ndvi_value = stats.get("NDVI").getInfo()
+        latest = {
+            "date": ee.Date(
+                latest_img.get("system:time_start")
+            ).format("YYYY-MM-dd").getInfo(),
 
-        return {
-            "ndvi_mean": round(float(ndvi_value), 3),
-            "status": "OK",
-            "source": "Sentinel-2 (GEE)"
+            "ndvi": round(float(stats.get("NDVI").getInfo()),3),
+            "ndwi": round(float(stats.get("NDWI").getInfo()),3),
+            "savi": round(float(stats.get("SAVI").getInfo()),3),
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# -----------------------------
-# NDVI Time-Series
-# -----------------------------
-@app.post("/ndvi-history")
-def ndvi_history(req: NDVIRequest):
-
-    try:
-
-        geom = ee.Geometry.Point([req.lon, req.lat]).buffer(100)
-
-        collection = (
-            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-            .filterBounds(geom)
-            .filterDate("2024-01-01", "2026-12-31")
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-            .map(add_ndvi)
-            .select("NDVI")
-        )
-
+        # -----------------------------
+        # NDVI Time Series
+        # -----------------------------
         def to_feature(img):
 
-            mean = img.reduceRegion(
+            mean = img.select("NDVI").reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=geom,
                 scale=10,
@@ -249,17 +268,59 @@ def ndvi_history(req: NDVIRequest):
         ).getInfo()
 
         history = [
-            {"date": d, "ndvi": round(float(v), 3)}
+            {"date": d, "ndvi": round(float(v),3)}
             for d, v in data
         ]
 
-        return {"ndvi_trend": history}
+        # -----------------------------
+        # NDVI Trend Analysis
+        # -----------------------------
+        trend = None
+
+        if len(history) >= 2:
+
+            start = history[0]["ndvi"]
+            end = history[-1]["ndvi"]
+
+            change = round(end - start,3)
+
+            change_percent = round((change/start)*100,2)
+
+            if change > 0.03:
+                trend_type = "improving"
+            elif change < -0.03:
+                trend_type = "declining"
+            else:
+                trend_type = "stable"
+
+            trend = {
+                "start_ndvi": start,
+                "current_ndvi": end,
+                "change": change,
+                "change_percent": change_percent,
+                "trend": trend_type
+            }
+
+        return {
+
+            "status":"OK",
+
+            "latest": latest,
+
+            "history": history[-12:],   # last 12 observations
+
+            "trend": trend,
+
+            "source":"Sentinel-2 (Google Earth Engine)"
+
+        }
 
     except Exception as e:
 
-        return {"ndvi_trend": [], "error": str(e)}
-
-
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 # -----------------------------
 # Irrigation Prediction
 # -----------------------------
@@ -281,3 +342,49 @@ def predict_irrigation(data: IrrigationInput):
 @app.head("/")
 def root_head():
     return Response(status_code=200)
+
+# -----------------------------------
+# CROP DISEASE
+# -----------------------------------
+
+from fastapi import UploadFile, File, Form
+from PIL import Image
+import numpy as np
+import io
+
+@app.post("/predict-disease")
+async def predict_disease(
+    crop: str = Form(...),
+    user_id: str = Form(...),
+    file: UploadFile = File(...)
+):
+
+    try:
+
+        contents = await file.read()
+
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        image = image.resize((224, 224))
+
+        img = np.array(image) / 255.0
+        img = np.expand_dims(img, axis=0)
+
+        # TEMP prediction (replace later with real model)
+        disease = "Leaf Blight"
+        confidence = 0.90
+
+        advice = "Apply copper fungicide and remove infected leaves."
+
+        return {
+            "crop": crop,
+            "disease": disease,
+            "confidence": confidence,
+            "advice": advice
+        }
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
