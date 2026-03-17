@@ -145,4 +145,4 @@ Rules:
             "confidence": 0.0,
             "advice": "Image analysis failed. Try again with a clearer leaf photo."
         }
-```
+
