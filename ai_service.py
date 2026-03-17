@@ -1,4 +1,3 @@
-```python
 # ai_service.py
 
 import base64
