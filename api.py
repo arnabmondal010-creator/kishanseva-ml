@@ -41,32 +41,21 @@ irrigation_model = joblib.load("irrigation_model.pkl")
 # -----------------------------
 # Earth Engine Init
 # -----------------------------
-import os
-import ee
 
-def init_gee():
-    try:
-        gee_json = os.getenv("GEE_KEY_JSON")
+service_account = os.getenv("GEE_SERVICE_ACCOUNT")
+key_json = os.getenv("GEE_KEY_JSON")
 
-        if gee_json:
-            import json
-            from google.oauth2 import service_account
+if not service_account or not key_json:
+    raise Exception("GEE credentials not configured")
 
-            credentials = service_account.Credentials.from_service_account_info(
-                json.loads(gee_json)
-            )
+credentials = ee.ServiceAccountCredentials(
+    service_account,
+    key_data=key_json,
+)
 
-            ee.Initialize(credentials)
-            print("✅ GEE initialized")
+ee.Initialize(credentials)
 
-        else:
-            print("⚠️ GEE not configured, skipping...")
-
-    except Exception as e:
-        print("⚠️ GEE init failed:", e)
-
-# CALL IT
-init_gee()
+print("Earth Engine initialized")
 
 # -----------------------------
 # Models
