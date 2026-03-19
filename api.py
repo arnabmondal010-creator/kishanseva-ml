@@ -361,20 +361,21 @@ async def predict_disease(
 
     try:
 
+       
         contents = await file.read()
+
+print("Uploaded image size:", len(contents))
+
+result = await analyze_image(contents, crop)
 
         result = await analyze_image(contents, crop)
 
         return {
             "crop": crop,
-            "disease": result["disease"],
-            "confidence": result["confidence"],
-            "advice": result["advice"]
+            "disease": result.get("disease"),
+            "confidence": result.get("confidence"),
+            "advice": result.get("advice")
         }
 
     except Exception as e:
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=500, detail=str(e))
