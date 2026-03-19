@@ -81,7 +81,7 @@ Return JSON:
         except:
             return {
                 "disease": raw,
-                "confidence": 0.5,
+                "confidence": 0.0,
                 "advice": "Parsed from raw response"
             }
 

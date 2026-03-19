@@ -41,19 +41,32 @@ irrigation_model = joblib.load("irrigation_model.pkl")
 # -----------------------------
 # Earth Engine Init
 # -----------------------------
-service_account = os.getenv("GEE_SERVICE_ACCOUNT")
-key_json = os.getenv("GEE_KEY_JSON")
+import os
+import ee
 
-if not service_account or not key_json:
-    raise Exception("GEE credentials not configured")
+def init_gee():
+    try:
+        gee_json = os.getenv("GEE_KEY_JSON")
 
-credentials = ee.ServiceAccountCredentials(
-    service_account,
-    key_data=key_json,
-)
+        if gee_json:
+            import json
+            from google.oauth2 import service_account
 
-ee.Initialize(credentials)
-print("Earth Engine initialized")
+            credentials = service_account.Credentials.from_service_account_info(
+                json.loads(gee_json)
+            )
+
+            ee.Initialize(credentials)
+            print("✅ GEE initialized")
+
+        else:
+            print("⚠️ GEE not configured, skipping...")
+
+    except Exception as e:
+        print("⚠️ GEE init failed:", e)
+
+# CALL IT
+init_gee()
 
 # -----------------------------
 # Models
@@ -380,3 +393,51 @@ async def predict_disease(
             status_code=500,
             detail=str(e)
         )
+
+from sqlalchemy import create_engine, text
+from fastapi import Query
+
+# 🔴 USE SAME DB URL
+engine = create_engine("postgresql://kishanseva_db_user:rQCe3oRP6FtrAVZ6349iWLJZfLLMRtBQ@dpg-d6u33jjuibrs73er47fg-a.singapore-postgres.render.com/kishanseva_db")
+
+
+@app.get("/market-prices")
+def get_prices(
+    crop: str = Query(default=None),
+    district: str = Query(default=None),
+):
+
+    query = """
+    SELECT commodity, district, market, price, date
+    FROM market_prices
+    WHERE 1=1
+    """
+
+    params = {}
+
+    if crop:
+        query += " AND LOWER(commodity) LIKE LOWER(:crop)"
+        params["crop"] = f"%{crop}%"
+
+    if district:
+        query += " AND LOWER(district) LIKE LOWER(:district)"
+        params["district"] = f"%{district}%"
+
+    query += " ORDER BY date DESC LIMIT 50"
+
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params)
+        rows = result.fetchall()
+
+    return {
+        "prices": [
+            {
+                "commodity": r[0],
+                "district": r[1],
+                "market": r[2],
+                "price": r[3],
+                "date": str(r[4])
+            }
+            for r in rows
+        ]
+    }
