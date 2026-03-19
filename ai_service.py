@@ -25,7 +25,7 @@ def validate_image(image_bytes: bytes):
         raise ValueError("Empty image")
 
     if len(image_bytes) > 5 * 1024 * 1024:
-        raise ValueError("Image too large```python
+        raise ValueError("Image too large (max 5MB)")
                          
 async def analyze_image(image_bytes: bytes, crop: str):
 
