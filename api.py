@@ -361,12 +361,9 @@ async def predict_disease(
 
     try:
 
-       
         contents = await file.read()
 
-print("Uploaded image size:", len(contents))
-
-result = await analyze_image(contents, crop)
+        print("Uploaded image size:", len(contents))   # ✅ INSIDE try
 
         result = await analyze_image(contents, crop)
 
@@ -378,4 +375,8 @@ result = await analyze_image(contents, crop)
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
