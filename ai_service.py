@@ -77,12 +77,7 @@ Return JSON:
         print("RAW:", raw)
 
         try:
-            cleaned = raw.strip()
-
-            if cleaned.startswith("```"):
-            cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-
-            parsed = json.loads(cleaned)
+            return json.loads(raw)
         except:
             return {
                 "disease": raw,
