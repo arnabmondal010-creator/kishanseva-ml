@@ -223,6 +223,36 @@ def satellite_analysis(req: NDVIRequest):
             "system:time_start", False
         ).first()
 
+            # ================= TILE LAYERS =================
+
+        vis_ndvi = {
+            "min": 0,
+            "max": 1,
+            "palette": ["red", "yellow", "green"]
+        }
+
+        vis_ndwi = {
+            "min": -1,
+            "max": 1,
+            "palette": ["brown", "blue"]
+        }
+
+        vis_savi = {
+            "min": 0,
+            "max": 1,
+            "palette": ["red", "green"]
+        }
+
+        ndvi_map = latest_img.select("NDVI").getMapId(vis_ndvi)
+        ndwi_map = latest_img.select("NDWI").getMapId(vis_ndwi)
+        savi_map = latest_img.select("SAVI").getMapId(vis_savi)
+
+        tiles = {
+            "ndvi": ndvi_map["tile_fetcher"].url_format,
+            "ndwi": ndwi_map["tile_fetcher"].url_format,
+            "savi": savi_map["tile_fetcher"].url_format,
+        }
+
         stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
@@ -305,18 +335,13 @@ def satellite_analysis(req: NDVIRequest):
             }
 
         return {
-
-            "status":"OK",
-
-            "latest": latest,
-
-            "history": history[-12:],   # last 12 observations
-
-            "trend": trend,
-
-            "source":"Sentinel-2 (Google Earth Engine)"
-
-        }
+    "status": "OK",
+    "latest": latest,
+    "history": history[-12:],
+    "trend": trend,
+    "tiles": tiles,   # 🔥 ADD THIS LINE
+    "source": "Sentinel-2 (Google Earth Engine)"
+}
 
     except Exception as e:
 
@@ -324,6 +349,8 @@ def satellite_analysis(req: NDVIRequest):
             status_code=500,
             detail=str(e)
         )
+
+    
 # -----------------------------
 # Irrigation Prediction
 # -----------------------------
