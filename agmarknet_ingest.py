@@ -19,6 +19,10 @@ if DB_URL.startswith("postgres://"):
 engine = create_engine(DB_URL)
 
 # ================= FETCH =================
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import requests
+
 def fetch_data():
 
     url = f"https://api.data.gov.in/resource/{RESOURCE_ID}"
@@ -29,20 +33,30 @@ def fetch_data():
         "limit": 100
     }
 
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    r = requests.get(url, params=params, headers=headers)
-
-    if r.status_code != 200:
-        raise Exception(f"API failed: {r.text}")
+    # 🔥 RETRY LOGIC
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=2,
+        status_forcelist=[500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
 
     try:
-        data = r.json().get("records", [])
-    except Exception:
-        raise Exception("Invalid JSON response")
+        r = session.get(url, params=params, timeout=20)
 
-    print("Fetched:", len(data))
-    return data
+        if r.status_code != 200:
+            raise Exception(f"API failed: {r.text}")
+
+        data = r.json().get("records", [])
+
+        print("Fetched:", len(data))
+        return data
+
+    except Exception as e:
+        print("API ERROR:", e)
+        return []
 
 # ================= CLEAN =================
 def clean_data(data):
