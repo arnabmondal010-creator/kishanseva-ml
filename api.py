@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
 from services.yield_history_service import add_yield_record, get_history
+from functools import lru_cache
 
 # -----------------------------
 # App
@@ -390,11 +391,14 @@ from fastapi import Query
 engine = create_engine("postgresql://kishanseva_db_user:rQCe3oRP6FtrAVZ6349iWLJZfLLMRtBQ@dpg-d6u33jjuibrs73er47fg-a.singapore-postgres.render.com/kishanseva_db")
 
 
-@app.get("/market-prices")
-def get_prices(
-    crop: str = Query(default=None),
-    district: str = Query(default=None),
-):
+from fastapi import Query
+from sqlalchemy import text
+
+
+
+# 🔥 CACHE LAYER
+@lru_cache(maxsize=50)
+def cached_query(crop, district, sort):
 
     query = """
     SELECT commodity, district, market, price, date
@@ -412,10 +416,29 @@ def get_prices(
         query += " AND LOWER(district) LIKE LOWER(:district)"
         params["district"] = f"%{district}%"
 
-    query += " ORDER BY date DESC LIMIT 50"
+    # ✅ SAFE SORT (NO INJECTION)
+    if sort == "date":
+        query += " ORDER BY date DESC"
+    else:
+        query += " ORDER BY price DESC"
+
+    query += " LIMIT 50"
 
     with engine.connect() as conn:
         result = conn.execute(text(query), params)
-        rows = [dict(r._mapping) for r in result]
+        return [dict(r._mapping) for r in result]
 
-    return rows
+
+@app.get("/market-prices")
+def get_prices(
+    crop: str = Query(default=None),
+    district: str = Query(default=None),
+    sort: str = Query(default="price"),
+):
+
+    # ✅ sanitize inputs
+    crop = (crop or "").strip()
+    district = (district or "").strip()
+    sort = sort if sort in ["price", "date"] else "price"
+
+    return cached_query(crop, district, sort)
