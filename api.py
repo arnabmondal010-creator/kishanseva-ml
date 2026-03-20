@@ -435,29 +435,48 @@ def cached_query(crop, district, sort, limit, offset):
     return rows
 
 
-# ================= API =================
+# ================= APIfrom fastapi import Query
+from sqlalchemy import text
+
 @app.get("/market-prices")
 def get_prices(
     crop: str = Query(default=None),
     district: str = Query(default=None),
     sort: str = Query(default="price"),
-    limit: int = Query(default=50),
+    limit: int = Query(default=20),
     offset: int = Query(default=0),
 ):
 
-    # 🔥 SANITIZE
-    crop = (crop or "").strip()
-    district = (district or "").strip()
-    sort = sort if sort in ["price", "date"] else "price"
+    query = """
+    SELECT commodity, district, market, price, date
+    FROM market_prices
+    WHERE 1=1
+    """
 
-    rows = cached_query(crop, district, sort, limit, offset)
+    params = {
+        "limit": limit,
+        "offset": offset
+    }
 
-    # 🔥 LIGHT RESPONSE
-    return [
-        {
-            "commodity": r["commodity"],
-            "market": f"{r['market']}, {r['district']}",
-            "price": r["price"]
-        }
-        for r in rows
-    ]
+    if crop:
+        query += " AND LOWER(commodity) LIKE LOWER(:crop)"
+        params["crop"] = f"%{crop}%"
+
+    if district:
+        query += " AND LOWER(district) LIKE LOWER(:district)"
+        params["district"] = f"%{district}%"
+
+    # 🔥 SORT
+    if sort == "date":
+        query += " ORDER BY date DESC"
+    else:
+        query += " ORDER BY price DESC"
+
+    # 🔥 PAGINATION (THIS WAS MISSING)
+    query += " LIMIT :limit OFFSET :offset"
+
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params)
+        rows = [dict(r._mapping) for r in result]
+
+    return rows
