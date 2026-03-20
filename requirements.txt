@@ -12,3 +12,5 @@ openai
 earthengine-api
 sqlalchemy
 psycopg2-binary
+
+
