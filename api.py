@@ -416,17 +416,6 @@ def get_prices(
 
     with engine.connect() as conn:
         result = conn.execute(text(query), params)
-        rows = result.fetchall()
+        rows = [dict(r._mapping) for r in result]
 
-    return {
-        "prices": [
-            {
-                "commodity": r[0],
-                "district": r[1],
-                "market": r[2],
-                "price": r[3],
-                "date": str(r[4])
-            }
-            for r in rows
-        ]
-    }
+    return rows
