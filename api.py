@@ -384,21 +384,22 @@ async def predict_disease(
             detail=str(e)
         )
 
+from fastapi import Query
 from sqlalchemy import create_engine, text
-from fastapi import Query
-
-# 🔴 USE SAME DB URL
-engine = create_engine("postgresql://kishanseva_db_user:rQCe3oRP6FtrAVZ6349iWLJZfLLMRtBQ@dpg-d6u33jjuibrs73er47fg-a.singapore-postgres.render.com/kishanseva_db")
 
 
-from fastapi import Query
-from sqlalchemy import text
+# ================= DB =================
+DB_URL = os.getenv("DATABASE_URL")
+
+if DB_URL.startswith("postgres://"):
+    DB_URL = DB_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+
+engine = create_engine(DB_URL)
 
 
-
-# 🔥 CACHE LAYER
-@lru_cache(maxsize=50)
-def cached_query(crop, district, sort):
+# ================= CACHE =================
+@lru_cache(maxsize=100)
+def cached_query(crop, district, sort, limit, offset):
 
     query = """
     SELECT commodity, district, market, price, date
@@ -416,29 +417,47 @@ def cached_query(crop, district, sort):
         query += " AND LOWER(district) LIKE LOWER(:district)"
         params["district"] = f"%{district}%"
 
-    # ✅ SAFE SORT (NO INJECTION)
+    # 🔥 SAFE SORT
     if sort == "date":
         query += " ORDER BY date DESC"
     else:
         query += " ORDER BY price DESC"
 
-    query += " LIMIT 50"
+    query += " LIMIT :limit OFFSET :offset"
+
+    params["limit"] = limit
+    params["offset"] = offset
 
     with engine.connect() as conn:
         result = conn.execute(text(query), params)
-        return [dict(r._mapping) for r in result]
+        rows = [dict(r._mapping) for r in result]
+
+    return rows
 
 
+# ================= API =================
 @app.get("/market-prices")
 def get_prices(
     crop: str = Query(default=None),
     district: str = Query(default=None),
     sort: str = Query(default="price"),
+    limit: int = Query(default=50),
+    offset: int = Query(default=0),
 ):
 
-    # ✅ sanitize inputs
+    # 🔥 SANITIZE
     crop = (crop or "").strip()
     district = (district or "").strip()
     sort = sort if sort in ["price", "date"] else "price"
 
-    return cached_query(crop, district, sort)
+    rows = cached_query(crop, district, sort, limit, offset)
+
+    # 🔥 LIGHT RESPONSE
+    return [
+        {
+            "commodity": r["commodity"],
+            "market": f"{r['market']}, {r['district']}",
+            "price": r["price"]
+        }
+        for r in rows
+    ]

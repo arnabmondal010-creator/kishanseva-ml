@@ -3,6 +3,7 @@ import os
 import requests
 import pandas as pd
 from sqlalchemy import create_engine, text
+from psycopg2.extras import execute_values
 
 # ================= ENV =================
 API_KEY = os.getenv("API_KEY")
@@ -96,22 +97,37 @@ def save_to_db(df):
         print("No data to insert")
         return
 
-    with engine.begin() as conn:
-        for _, row in df.iterrows():
-            conn.execute(text("""
-                INSERT INTO market_prices (commodity, district, market, price, date)
-                VALUES (:commodity, :district, :market, :price, :date)
-                ON CONFLICT (commodity, district, market, date)
-                DO UPDATE SET price = EXCLUDED.price
-            """), {
-                "commodity": row["commodity"],
-                "district": row["district"],
-                "market": row["market"],
-                "price": row["price"],
-                "date": row["date"]
-            })
+    records = df.to_dict(orient="records")
 
-    print("Upserted:", len(df))
+    values = [
+        (
+            r["commodity"],
+            r["district"],
+            r["market"],
+            r["price"],
+            r["date"]
+        )
+        for r in records
+    ]
+
+    query = """
+    INSERT INTO market_prices
+    (commodity, district, market, price, date)
+    VALUES %s
+    ON CONFLICT (commodity, district, market, date)
+    DO UPDATE SET price = EXCLUDED.price
+    """
+
+    conn = engine.raw_connection()
+    cursor = conn.cursor()
+
+    execute_values(cursor, query, values)
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    print("🚀 Batch upsert done:", len(values))
 
 # ================= MAIN =================
 if __name__ == "__main__":
