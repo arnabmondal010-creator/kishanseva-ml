@@ -413,9 +413,9 @@ def cached_query(crop, district, sort, limit, offset):
         query += " AND LOWER(commodity) LIKE LOWER(:crop)"
         params["crop"] = f"%{crop}%"
 
-    if district:
-        query += " AND LOWER(district) LIKE LOWER(:district)"
-        params["district"] = f"%{district}%"
+    if state:
+        query += " AND LOWER(state) LIKE LOWER(:state)"
+        params["state"] = f"%{state}%"
 
     # 🔥 SAFE SORT
     if sort == "date":
@@ -462,9 +462,9 @@ def get_prices(
         query += " AND LOWER(commodity) LIKE LOWER(:crop)"
         params["crop"] = f"%{crop}%"
 
-    if district:
-        query += " AND LOWER(district) LIKE LOWER(:district)"
-        params["district"] = f"%{district}%"
+    if state:
+        query += " AND LOWER(state) LIKE LOWER(:state)"
+        params["state"] = f"%{state}%"
 
     # 🔥 SORT
     if sort == "date":
