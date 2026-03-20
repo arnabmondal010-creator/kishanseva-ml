@@ -13,11 +13,16 @@ DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
     raise Exception("DATABASE_URL not set")
 
-# 🔥 Fix Render postgres:// issue
+# 🔥 Fix old postgres:// format
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql+psycopg2://", 1)
 
-engine = create_engine(DB_URL)
+# 🔥 FORCE SSL + STABLE CONNECTION
+engine = create_engine(
+    DB_URL,
+    pool_pre_ping=True,                 # prevents stale connections
+    connect_args={"sslmode": "require"} # REQUIRED for Render
+)
 
 # ================= FETCH =================
 from requests.adapters import HTTPAdapter
