@@ -3,9 +3,9 @@ import pandas as pd
 from sqlalchemy import create_engine
 from datetime import datetime
 
-API_KEY = "579b464db66ec23bdd000001b76e3e7db5d6449d6a62fe73d6b4913a"
-RESOURCE_ID = "9ef84268-d588-465a-a308-a864a43d0070"
-DB_URL = "postgresql://kishanseva_db_user:rQCe3oRP6FtrAVZ6349iWLJZfLLMRtBQ@dpg-d6u33jjuibrs73er47fg-a.singapore-postgres.render.com/kishanseva_db"
+API_KEY = "API_KEY"
+RESOURCE_ID = "RESOURCE_ID"
+DB_URL = "DATABASE_URL"
 
 engine = create_engine(DB_URL)
 
