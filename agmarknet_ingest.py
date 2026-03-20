@@ -1,11 +1,20 @@
+# -*- coding: utf-8 -*-
+import os
 import requests
 import pandas as pd
-from sqlalchemy import create_engine
-from datetime import datetime
+from sqlalchemy import create_engine, text
 
+# ================= ENV =================
 API_KEY = os.getenv("API_KEY")
 RESOURCE_ID = os.getenv("RESOURCE_ID")
 DB_URL = os.getenv("DATABASE_URL")
+
+if not DB_URL:
+    raise Exception("DATABASE_URL not set")
+
+# 🔥 Fix Render postgres:// issue
+if DB_URL.startswith("postgres://"):
+    DB_URL = DB_URL.replace("postgres://", "postgresql+psycopg2://", 1)
 
 engine = create_engine(DB_URL)
 
@@ -20,18 +29,20 @@ def fetch_data():
         "limit": 100
     }
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     r = requests.get(url, params=params, headers=headers)
 
-    data = r.json().get("records", [])
+    if r.status_code != 200:
+        raise Exception(f"API failed: {r.text}")
+
+    try:
+        data = r.json().get("records", [])
+    except Exception:
+        raise Exception("Invalid JSON response")
 
     print("Fetched:", len(data))
-
     return data
-
 
 # ================= CLEAN =================
 def clean_data(data):
@@ -39,9 +50,6 @@ def clean_data(data):
     df = pd.DataFrame(data)
 
     df = df.rename(columns={
-        "commodity": "commodity",
-        "district": "district",
-        "market": "market",
         "modal_price": "price",
         "arrival_date": "date"
     })
@@ -65,34 +73,36 @@ def clean_data(data):
     df = df.dropna()
 
     print("Cleaned:", len(df))
-
     return df
 
-
-# ================= SAVE =================
+# ================= SAVE (UPSERT FIX) =================
 def save_to_db(df):
 
     if df.empty:
         print("No data to insert")
         return
 
-    df.to_sql(
-        "market_prices",
-        engine,
-        if_exists="append",
-        index=False
-    )
+    with engine.begin() as conn:
+        for _, row in df.iterrows():
+            conn.execute(text("""
+                INSERT INTO market_prices (commodity, district, market, price, date)
+                VALUES (:commodity, :district, :market, :price, :date)
+                ON CONFLICT (commodity, district, market, date)
+                DO UPDATE SET price = EXCLUDED.price
+            """), {
+                "commodity": row["commodity"],
+                "district": row["district"],
+                "market": row["market"],
+                "price": row["price"],
+                "date": row["date"]
+            })
 
-    print("Inserted:", len(df))
-
+    print("Upserted:", len(df))
 
 # ================= MAIN =================
 if __name__ == "__main__":
 
     raw = fetch_data()
-
     df = clean_data(raw)
-
     print(df.head())
-
     save_to_db(df)
