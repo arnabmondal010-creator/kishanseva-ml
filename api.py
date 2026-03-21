@@ -150,6 +150,8 @@ def predict_yield(data: YieldInput):
 def satellite_analysis(req: NDVIRequest):
 
     try:
+        import ee
+        import json
 
         boundary = req.boundary
 
@@ -160,7 +162,7 @@ def satellite_analysis(req: NDVIRequest):
         if boundary and isinstance(boundary, list) and len(boundary) > 2:
 
             coords = [
-                [p["lon"], p["lat"]]
+                [float(p["lon"]), float(p["lat"])]
                 for p in boundary
                 if "lat" in p and "lon" in p
             ]
@@ -168,7 +170,6 @@ def satellite_analysis(req: NDVIRequest):
             geom = ee.Geometry.Polygon([coords])
 
         else:
-            # ✅ FIXED (NO ZERO BUFFER)
             geom = ee.Geometry.Point([req.lon, req.lat]).buffer(50)
 
         # ================= COLLECTION =================
@@ -202,7 +203,7 @@ def satellite_analysis(req: NDVIRequest):
 
             return img.addBands([ndvi, ndwi, savi])
 
-        # ✅ FIXED POSITION (OUTSIDE FUNCTION)
+        # ================= LATEST IMAGE =================
         latest_img = add_indices(
             collection.sort("system:time_start", False).first()
         )
@@ -214,6 +215,27 @@ def satellite_analysis(req: NDVIRequest):
         ndwi_img = latest_img.select("NDWI").updateMask(mask).clip(geom)
         savi_img = latest_img.select("SAVI").updateMask(mask).clip(geom)
 
+        # ================= 🔥 DYNAMIC STRETCH =================
+        ndwi_stats = ndwi_img.reduceRegion(
+            reducer=ee.Reducer.minMax(),
+            geometry=geom,
+            scale=10,
+            maxPixels=1e9,
+        ).getInfo()
+
+        savi_stats = savi_img.reduceRegion(
+            reducer=ee.Reducer.minMax(),
+            geometry=geom,
+            scale=10,
+            maxPixels=1e9,
+        ).getInfo()
+
+        ndwi_min = float(ndwi_stats.get("NDWI_min", -0.2))
+        ndwi_max = float(ndwi_stats.get("NDWI_max", 0.2))
+
+        savi_min = float(savi_stats.get("SAVI_min", 0))
+        savi_max = float(savi_stats.get("SAVI_max", 1))
+
         # ================= VIS =================
         ndvi_vis = {
             "min": 0,
@@ -222,14 +244,14 @@ def satellite_analysis(req: NDVIRequest):
         }
 
         ndwi_vis = {
-            "min": -0.5,
-            "max": 0.5,
+            "min": ndwi_min,
+            "max": ndwi_max,
             "palette": ["#7f3b08", "#f7f7f7", "#2b83ba"]
         }
 
         savi_vis = {
-            "min": 0,
-            "max": 1,
+            "min": savi_min,
+            "max": savi_max,
             "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
         }
 
