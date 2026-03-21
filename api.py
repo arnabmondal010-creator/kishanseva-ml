@@ -227,17 +227,36 @@ def satellite_analysis(req: NDVIRequest):
         # MASK + CLIP (REAL FIX)
         # -----------------------------
 
-        mask = ee.Image.constant(1).clip(geom)
+       # -----------------------------
+# FIXED MASK + TILE GENERATION
+# -----------------------------
 
-        ndvi_img = latest_img.select("NDVI").updateMask(mask)
-        ndwi_img = latest_img.select("NDWI").updateMask(mask)
-        savi_img = latest_img.select("SAVI").updateMask(mask)
+# 🔥 VALID PIXEL MASK (CRITICAL FIX)
+        valid_mask = latest_img.select("NDVI").gt(-1)
 
-            # ================= TILE LAYERS =================
+# 🔥 GEOMETRY MASK
+        geom_mask = ee.Image.constant(1).clip(geom)
 
-        # -----------------------------
-        # TILE VISUALIZATION
-        # -----------------------------
+# 🔥 APPLY BOTH MASKS
+        ndvi_img = latest_img.select("NDVI") \
+            .updateMask(valid_mask) \
+            .updateMask(geom_mask) \
+            .clip(geom)
+
+        ndwi_img = latest_img.select("NDWI") \
+            .updateMask(valid_mask) \
+            .updateMask(geom_mask) \
+            .clip(geom)
+
+        savi_img = latest_img.select("SAVI") \
+            .updateMask(valid_mask) \
+            .updateMask(geom_mask) \
+            .clip(geom)
+
+
+# -----------------------------
+# VISUALIZATION
+# -----------------------------
 
         ndvi_vis = {
             "min": 0,
@@ -257,31 +276,16 @@ def satellite_analysis(req: NDVIRequest):
             "palette": ["red", "orange", "green"]
         }
 
+
         def get_tile_url(image, vis):
             map_id = ee.Image(image).getMapId(vis)
             return map_id["tile_fetcher"].url_format
+
 
         tiles = {
             "ndvi": get_tile_url(ndvi_img, ndvi_vis),
             "ndwi": get_tile_url(ndwi_img, ndwi_vis),
             "savi": get_tile_url(savi_img, savi_vis),
-        }
-
-        stats = latest_img.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=geom,
-            scale=10,
-            maxPixels=1e9,
-        )
-
-        latest = {
-            "date": ee.Date(
-                latest_img.get("system:time_start")
-            ).format("YYYY-MM-dd").getInfo(),
-
-            "ndvi": round(float(stats.get("NDVI").getInfo()),3),
-            "ndwi": round(float(stats.get("NDWI").getInfo()),3),
-            "savi": round(float(stats.get("SAVI").getInfo()),3),
         }
 
         # -----------------------------
