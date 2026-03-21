@@ -156,9 +156,7 @@ def satellite_analysis(req: NDVIRequest):
         if isinstance(boundary, str):
             boundary = json.loads(boundary)
 
-        # -----------------------------
-        # GEOMETRY
-        # -----------------------------
+        # ================= GEOMETRY =================
         if boundary and isinstance(boundary, list) and len(boundary) > 2:
 
             coords = [
@@ -170,11 +168,10 @@ def satellite_analysis(req: NDVIRequest):
             geom = ee.Geometry.Polygon([coords])
 
         else:
-            geom = ee.Geometry.Point([req.lon, req.lat]).buffer(0)
+            # ✅ FIXED (NO ZERO BUFFER)
+            geom = ee.Geometry.Point([req.lon, req.lat]).buffer(50)
 
-        # -----------------------------
-        # SENTINEL COLLECTION
-        # -----------------------------
+        # ================= COLLECTION =================
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(geom)
@@ -190,9 +187,7 @@ def satellite_analysis(req: NDVIRequest):
                 "trend": None
             }
 
-        # -----------------------------
-        # ADD INDICES (SAFE)
-        # -----------------------------
+        # ================= INDICES =================
         def add_indices(img):
 
             nir  = img.select("B8")
@@ -206,49 +201,42 @@ def satellite_analysis(req: NDVIRequest):
             savi = nir.subtract(red).divide(nir.add(red).add(0.5)).multiply(1.5).rename("SAVI")
 
             return img.addBands([ndvi, ndwi, savi])
-        # -----------------------------
-                latest_img = add_indices(
-                    collection.sort("system:time_start", False).first()
-                )
 
-        # -----------------------------
-        # SAFE MASKING (FIX CIRCLE)
-        # -----------------------------
-        #ndvi_band = latest_img.select("NDVI")
+        # ✅ FIXED POSITION (OUTSIDE FUNCTION)
+        latest_img = add_indices(
+            collection.sort("system:time_start", False).first()
+        )
 
+        # ================= MASK =================
         mask = ee.Image.constant(1).clip(geom)
 
         ndvi_img = latest_img.select("NDVI").updateMask(mask).clip(geom)
         ndwi_img = latest_img.select("NDWI").updateMask(mask).clip(geom)
         savi_img = latest_img.select("SAVI").updateMask(mask).clip(geom)
 
-        # -----------------------------
-        # TILE VISUALIZATION
-        # -----------------------------
-        # ================= TILE VIS =================
-
+        # ================= VIS =================
         ndvi_vis = {
             "min": 0,
             "max": 1,
-            "palette": ["red", "yellow", "green"]
+            "palette": ["#8b0000", "#ffcc00", "#006400"]
         }
 
         ndwi_vis = {
             "min": -0.5,
             "max": 0.5,
-            "palette": ["brown", "white", "blue"]   # 🔥 FIXED
+            "palette": ["#7f3b08", "#f7f7f7", "#2b83ba"]
         }
 
         savi_vis = {
             "min": 0,
             "max": 1,
-            "palette": ["purple", "orange", "green"]  # 🔥 DIFFERENT FROM NDVI
+            "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
         }
 
         def get_tile(image, vis):
             try:
-                map_id = ee.Image(image).getMapId(vis)
-                return map_id["tile_fetcher"].url_format
+                m = ee.Image(image).getMapId(vis)
+                return m["tile_fetcher"].url_format
             except Exception as e:
                 print("🔥 TILE ERROR:", e)
                 return None
@@ -259,9 +247,7 @@ def satellite_analysis(req: NDVIRequest):
             "savi": get_tile(savi_img, savi_vis),
         }
 
-        # -----------------------------
-        # STATS (SAFE)
-        # -----------------------------
+        # ================= STATS =================
         stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
@@ -279,10 +265,10 @@ def satellite_analysis(req: NDVIRequest):
             "savi": round(float(stats.get("SAVI", 0)), 3),
         }
 
-        # -----------------------------
-        # HISTORY
-        # -----------------------------
+        # ================= HISTORY =================
         def to_feature(img):
+
+            img = add_indices(img)
 
             mean = img.select("NDVI").reduceRegion(
                 reducer=ee.Reducer.mean(),
@@ -314,9 +300,7 @@ def satellite_analysis(req: NDVIRequest):
             for d, v in data
         ]
 
-        # -----------------------------
-        # TREND
-        # -----------------------------
+        # ================= TREND =================
         trend = None
 
         if len(history) >= 2:
@@ -342,9 +326,7 @@ def satellite_analysis(req: NDVIRequest):
                 "trend": trend_type
             }
 
-        # -----------------------------
-        # FINAL RESPONSE
-        # -----------------------------
+        # ================= RESPONSE =================
         return {
             "status": "OK",
             "latest": latest,
