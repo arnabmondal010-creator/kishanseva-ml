@@ -195,34 +195,28 @@ def satellite_analysis(req: NDVIRequest):
         # -----------------------------
         def add_indices(img):
 
-            nir = img.select("B8")
-            red = img.select("B4")
-            swir = img.select("B11")
+            nir  = img.select("B8")   # NIR
+            red  = img.select("B4")   # RED
+            swir = img.select("B11")  # SWIR
 
             ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
+
+    # ✅ CORRECT NDWI (moisture index)
             ndwi = nir.subtract(swir).divide(nir.add(swir)).rename("NDWI")
-            savi = (
-                nir.subtract(red)
-                .divide(nir.add(red).add(0.5))
-                .multiply(1.5)
-                .rename("SAVI")
-            )
 
-            return img.addBands([ndvi, ndwi, savi])
+    # ✅ SAVI with L=0.5
+            savi = nir.subtract(red).divide(nir.add(red).add(0.5)).multiply(1.5).rename("SAVI")
 
-        collection = collection.map(add_indices)
-
+            return img.addBands([ndvi, ndwi, savi])LATEST IMAGE (FORCE INDEX)
         # -----------------------------
-        # LATEST IMAGE (FORCE INDEX)
-        # -----------------------------
-        latest_img = add_indices(
-            collection.sort("system:time_start", False).first()
-        )
+                latest_img = add_indices(
+                    collection.sort("system:time_start", False).first()
+                )
 
         # -----------------------------
         # SAFE MASKING (FIX CIRCLE)
         # -----------------------------
-        ndvi_band = latest_img.select("NDVI")
+        #ndvi_band = latest_img.select("NDVI")
 
         mask = ee.Image.constant(1).clip(geom)
 
