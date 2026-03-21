@@ -222,13 +222,21 @@ def satellite_analysis(req: NDVIRequest):
         latest_img = collection.sort(
             "system:time_start", False
         ).first()
-        clipped = latest_img.clip(geom)
+        # -----------------------------
+        # MASK + CLIP (REAL FIX)
+        # -----------------------------
+
+        mask = ee.Image.constant(1).clip(geom)
+
+        ndvi_img = latest_img.select("NDVI").updateMask(mask)
+        ndwi_img = latest_img.select("NDWI").updateMask(mask)
+        savi_img = latest_img.select("SAVI").updateMask(mask)
 
             # ================= TILE LAYERS =================
 
         # -----------------------------
-# TILE VISUALIZATION
-# -----------------------------
+        # TILE VISUALIZATION
+        # -----------------------------
 
         ndvi_vis = {
             "min": 0,
@@ -253,9 +261,9 @@ def satellite_analysis(req: NDVIRequest):
             return map_id["tile_fetcher"].url_format
 
         tiles = {
-            "ndvi": get_tile_url(clipped.select("NDVI"), ndvi_vis),
-            "ndwi": get_tile_url(clipped.select("NDWI"), ndwi_vis),
-            "savi": get_tile_url(clipped.select("SAVI"), savi_vis),
+            "ndvi": get_tile_url(ndvi_img, ndvi_vis),
+            "ndwi": get_tile_url(ndwi_img, ndwi_vis),
+            "savi": get_tile_url(savi_img, savi_vis),
         }
 
         stats = latest_img.reduceRegion(
