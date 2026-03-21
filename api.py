@@ -222,36 +222,41 @@ def satellite_analysis(req: NDVIRequest):
         latest_img = collection.sort(
             "system:time_start", False
         ).first()
+        clipped = latest_img.clip(geom)
 
             # ================= TILE LAYERS =================
 
-        vis_ndvi = {
-            "min": 0,
-            "max": 1,
-            "palette": ["red", "yellow", "green"]
-        }
+        # -----------------------------
+# TILE VISUALIZATION
+# -----------------------------
 
-        vis_ndwi = {
-            "min": -1,
-            "max": 1,
-            "palette": ["brown", "blue"]
-        }
+ndvi_vis = {
+    "min": 0,
+    "max": 1,
+    "palette": ["red", "yellow", "green"]
+}
 
-        vis_savi = {
-            "min": 0,
-            "max": 1,
-            "palette": ["red", "green"]
-        }
+ndwi_vis = {
+    "min": -1,
+    "max": 1,
+    "palette": ["brown", "blue"]
+}
 
-        ndvi_map = latest_img.select("NDVI").getMapId(vis_ndvi)
-        ndwi_map = latest_img.select("NDWI").getMapId(vis_ndwi)
-        savi_map = latest_img.select("SAVI").getMapId(vis_savi)
+savi_vis = {
+    "min": 0,
+    "max": 1,
+    "palette": ["red", "orange", "green"]
+}
 
-        tiles = {
-            "ndvi": ndvi_map["tile_fetcher"].url_format,
-            "ndwi": ndwi_map["tile_fetcher"].url_format,
-            "savi": savi_map["tile_fetcher"].url_format,
-        }
+def get_tile_url(image, vis):
+    map_id = ee.Image(image).getMapId(vis)
+    return map_id["tile_fetcher"].url_format
+
+tiles = {
+    "ndvi": get_tile_url(clipped.select("NDVI"), ndvi_vis),
+    "ndwi": get_tile_url(clipped.select("NDWI"), ndwi_vis),
+    "savi": get_tile_url(clipped.select("SAVI"), savi_vis),
+}
 
         stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
