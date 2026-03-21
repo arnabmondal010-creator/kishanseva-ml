@@ -230,33 +230,33 @@ def satellite_analysis(req: NDVIRequest):
 # TILE VISUALIZATION
 # -----------------------------
 
-ndvi_vis = {
-    "min": 0,
-    "max": 1,
-    "palette": ["red", "yellow", "green"]
-}
+        ndvi_vis = {
+            "min": 0,
+            "max": 1,
+            "palette": ["red", "yellow", "green"]
+        }
 
-ndwi_vis = {
-    "min": -1,
-    "max": 1,
-    "palette": ["brown", "blue"]
-}
+        ndwi_vis = {
+            "min": -1,
+            "max": 1,
+            "palette": ["brown", "blue"]
+        }
 
-savi_vis = {
-    "min": 0,
-    "max": 1,
-    "palette": ["red", "orange", "green"]
-}
+        savi_vis = {
+            "min": 0,
+            "max": 1,
+            "palette": ["red", "orange", "green"]
+        }
 
-def get_tile_url(image, vis):
-    map_id = ee.Image(image).getMapId(vis)
-    return map_id["tile_fetcher"].url_format
+        def get_tile_url(image, vis):
+            map_id = ee.Image(image).getMapId(vis)
+            return map_id["tile_fetcher"].url_format
 
-tiles = {
-    "ndvi": get_tile_url(clipped.select("NDVI"), ndvi_vis),
-    "ndwi": get_tile_url(clipped.select("NDWI"), ndwi_vis),
-    "savi": get_tile_url(clipped.select("SAVI"), savi_vis),
-}
+        tiles = {
+            "ndvi": get_tile_url(clipped.select("NDVI"), ndvi_vis),
+            "ndwi": get_tile_url(clipped.select("NDWI"), ndwi_vis),
+            "savi": get_tile_url(clipped.select("SAVI"), savi_vis),
+        }
 
         stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
