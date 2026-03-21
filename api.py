@@ -146,12 +146,6 @@ def predict_yield(data: YieldInput):
         "history": get_history(user_id, data.field_id)
     }
 
-# -----------------------------
-# NDVI (Live)
-# -----------------------------
-# -----------------------------
-# Satellite Analysis API
-# -----------------------------
 @app.post("/satellite-analysis")
 def satellite_analysis(req: NDVIRequest):
 
@@ -162,6 +156,9 @@ def satellite_analysis(req: NDVIRequest):
         if isinstance(boundary, str):
             boundary = json.loads(boundary)
 
+        # -----------------------------
+        # GEOMETRY
+        # -----------------------------
         if boundary and isinstance(boundary, list) and len(boundary) > 2:
 
             coords = [
@@ -170,15 +167,13 @@ def satellite_analysis(req: NDVIRequest):
                 if "lat" in p and "lon" in p
             ]
 
-    # ✅ FIX INVALID POLYGON
             geom = ee.Geometry.Polygon([coords]).buffer(0)
 
         else:
-
             geom = ee.Geometry.Point([req.lon, req.lat]).buffer(100)
 
         # -----------------------------
-        # Sentinel Collection
+        # SENTINEL COLLECTION
         # -----------------------------
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
@@ -187,6 +182,17 @@ def satellite_analysis(req: NDVIRequest):
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
         )
 
+        if collection.size().getInfo() == 0:
+            return {
+                "status": "No satellite data",
+                "latest": None,
+                "history": [],
+                "trend": None
+            }
+
+        # -----------------------------
+        # ADD INDICES (SAFE)
+        # -----------------------------
         def add_indices(img):
 
             nir = img.select("B8")
@@ -194,9 +200,7 @@ def satellite_analysis(req: NDVIRequest):
             swir = img.select("B11")
 
             ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
-
             ndwi = nir.subtract(swir).divide(nir.add(swir)).rename("NDWI")
-
             savi = (
                 nir.subtract(red)
                 .divide(nir.add(red).add(0.5))
@@ -208,37 +212,22 @@ def satellite_analysis(req: NDVIRequest):
 
         collection = collection.map(add_indices)
 
-        if collection.size().getInfo() == 0:
-
-            return {
-                "status": "No satellite data",
-                "latest": None,
-                "history": [],
-                "trend": None
-            }
+        # -----------------------------
+        # LATEST IMAGE (FORCE INDEX)
+        # -----------------------------
+        latest_img = add_indices(
+            collection.sort("system:time_start", False).first()
+        )
 
         # -----------------------------
-        # Latest Vegetation Snapshot
+        # SAFE MASKING (FIX CIRCLE)
         # -----------------------------
-        latest_img = collection.sort(
-            "system:time_start", False
-        ).first()
-        # -----------------------------
-        # MASK + CLIP (REAL FIX)
-        # -----------------------------
+        ndvi_band = latest_img.select("NDVI")
 
-       # -----------------------------
-# FIXED MASK + TILE GENERATION
-# -----------------------------
-
-# 🔥 VALID PIXEL MASK (CRITICAL FIX)
-        valid_mask = latest_img.select("NDVI").gt(-1)
-
-# 🔥 GEOMETRY MASK
+        valid_mask = ndvi_band.unmask(0).gte(-1)
         geom_mask = ee.Image.constant(1).clip(geom)
 
-# 🔥 APPLY BOTH MASKS
-        ndvi_img = latest_img.select("NDVI") \
+        ndvi_img = ndvi_band \
             .updateMask(valid_mask) \
             .updateMask(geom_mask) \
             .clip(geom)
@@ -253,43 +242,53 @@ def satellite_analysis(req: NDVIRequest):
             .updateMask(geom_mask) \
             .clip(geom)
 
-
-# -----------------------------
-# VISUALIZATION
-# -----------------------------
-
-        ndvi_vis = {
-            "min": 0,
-            "max": 1,
-            "palette": ["red", "yellow", "green"]
-        }
-
-        ndwi_vis = {
-            "min": -1,
-            "max": 1,
-            "palette": ["brown", "blue"]
-        }
-
-        savi_vis = {
-            "min": 0,
-            "max": 1,
-            "palette": ["red", "orange", "green"]
-        }
-
-
+        # -----------------------------
+        # TILE VISUALIZATION
+        # -----------------------------
         def get_tile_url(image, vis):
             map_id = ee.Image(image).getMapId(vis)
             return map_id["tile_fetcher"].url_format
 
-
         tiles = {
-            "ndvi": get_tile_url(ndvi_img, ndvi_vis),
-            "ndwi": get_tile_url(ndwi_img, ndwi_vis),
-            "savi": get_tile_url(savi_img, savi_vis),
+            "ndvi": get_tile_url(ndvi_img, {
+                "min": 0,
+                "max": 1,
+                "palette": ["red", "yellow", "green"]
+            }),
+            "ndwi": get_tile_url(ndwi_img, {
+                "min": -1,
+                "max": 1,
+                "palette": ["brown", "blue"]
+            }),
+            "savi": get_tile_url(savi_img, {
+                "min": 0,
+                "max": 1,
+                "palette": ["red", "orange", "green"]
+            }),
         }
 
         # -----------------------------
-        # NDVI Time Series
+        # STATS (SAFE)
+        # -----------------------------
+        stats = latest_img.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geom,
+            scale=10,
+            maxPixels=1e9,
+        ).getInfo()
+
+        latest = {
+            "date": ee.Date(
+                latest_img.get("system:time_start")
+            ).format("YYYY-MM-dd").getInfo(),
+
+            "ndvi": round(float(stats.get("NDVI", 0)), 3),
+            "ndwi": round(float(stats.get("NDWI", 0)), 3),
+            "savi": round(float(stats.get("SAVI", 0)), 3),
+        }
+
+        # -----------------------------
+        # HISTORY
         # -----------------------------
         def to_feature(img):
 
@@ -319,12 +318,12 @@ def satellite_analysis(req: NDVIRequest):
         ).getInfo()
 
         history = [
-            {"date": d, "ndvi": round(float(v),3)}
+            {"date": d, "ndvi": round(float(v), 3)}
             for d, v in data
         ]
 
         # -----------------------------
-        # NDVI Trend Analysis
+        # TREND
         # -----------------------------
         trend = None
 
@@ -333,9 +332,8 @@ def satellite_analysis(req: NDVIRequest):
             start = history[0]["ndvi"]
             end = history[-1]["ndvi"]
 
-            change = round(end - start,3)
-
-            change_percent = round((change/start)*100,2)
+            change = round(end - start, 3)
+            change_percent = round((change / start) * 100, 2) if start != 0 else 0
 
             if change > 0.03:
                 trend_type = "improving"
@@ -352,23 +350,21 @@ def satellite_analysis(req: NDVIRequest):
                 "trend": trend_type
             }
 
+        # -----------------------------
+        # FINAL RESPONSE
+        # -----------------------------
         return {
-    "status": "OK",
-    "latest": latest,
-    "history": history[-12:],
-    "trend": trend,
-    "tiles": tiles,   # 🔥 ADD THIS LINE
-    "source": "Sentinel-2 (Google Earth Engine)"
-}
+            "status": "OK",
+            "latest": latest,
+            "history": history[-12:],
+            "trend": trend,
+            "tiles": tiles,
+            "source": "Sentinel-2 (Google Earth Engine)"
+        }
 
     except Exception as e:
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-    
+        print("🔥 ERROR:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 # -----------------------------
 # Irrigation Prediction
 # -----------------------------
