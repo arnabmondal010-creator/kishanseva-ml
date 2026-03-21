@@ -233,26 +233,38 @@ def satellite_analysis(req: NDVIRequest):
         # -----------------------------
         # TILE VISUALIZATION
         # -----------------------------
-        def get_tile_url(image, vis):
-            map_id = ee.Image(image).getMapId(vis)
-            return map_id["tile_fetcher"].url_format
+        # ================= TILE VIS =================
+
+        ndvi_vis = {
+            "min": 0,
+            "max": 1,
+            "palette": ["red", "yellow", "green"]
+        }
+
+        ndwi_vis = {
+            "min": -0.5,
+            "max": 0.5,
+            "palette": ["brown", "white", "blue"]   # 🔥 FIXED
+        }
+
+        savi_vis = {
+            "min": 0,
+            "max": 1,
+            "palette": ["purple", "orange", "green"]  # 🔥 DIFFERENT FROM NDVI
+        }
+
+        def get_tile(image, vis):
+            try:
+                map_id = ee.Image(image).getMapId(vis)
+                return map_id["tile_fetcher"].url_format
+            except Exception as e:
+                print("🔥 TILE ERROR:", e)
+                return None
 
         tiles = {
-            "ndvi": get_tile_url(ndvi_img, {
-                "min": 0,
-                "max": 1,
-                "palette": ["red", "yellow", "green"]
-            }),
-            "ndwi": get_tile_url(ndwi_img, {
-                "min": -1,
-                "max": 1,
-                "palette": ["brown", "blue"]
-            }),
-            "savi": get_tile_url(savi_img, {
-                "min": 0,
-                "max": 1,
-                "palette": ["red", "orange", "green"]
-            }),
+            "ndvi": get_tile(ndvi_img, ndvi_vis),
+            "ndwi": get_tile(ndwi_img, ndwi_vis),
+            "savi": get_tile(savi_img, savi_vis),
         }
 
         # -----------------------------
