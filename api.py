@@ -167,7 +167,7 @@ def satellite_analysis(req: NDVIRequest):
                 if "lat" in p and "lon" in p
             ]
 
-            geom = ee.Geometry.Polygon([coords]).buffer(0)
+            geom = ee.Geometry.Polygon([coords])
 
         else:
             geom = ee.Geometry.Point([req.lon, req.lat]).buffer(0)
