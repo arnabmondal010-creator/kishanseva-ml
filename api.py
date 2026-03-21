@@ -170,7 +170,7 @@ def satellite_analysis(req: NDVIRequest):
             geom = ee.Geometry.Polygon([coords]).buffer(0)
 
         else:
-            geom = ee.Geometry.Point([req.lon, req.lat]).buffer(100)
+            geom = ee.Geometry.Point([req.lon, req.lat]).buffer(0)
 
         # -----------------------------
         # SENTINEL COLLECTION
@@ -224,23 +224,11 @@ def satellite_analysis(req: NDVIRequest):
         # -----------------------------
         ndvi_band = latest_img.select("NDVI")
 
-        valid_mask = ndvi_band.unmask(0).gte(-1)
-        geom_mask = ee.Image.constant(1).clip(geom)
+        mask = ee.Image.constant(1).clip(geom)
 
-        ndvi_img = ndvi_band \
-            .updateMask(valid_mask) \
-            .updateMask(geom_mask) \
-            .clip(geom)
-
-        ndwi_img = latest_img.select("NDWI") \
-            .updateMask(valid_mask) \
-            .updateMask(geom_mask) \
-            .clip(geom)
-
-        savi_img = latest_img.select("SAVI") \
-            .updateMask(valid_mask) \
-            .updateMask(geom_mask) \
-            .clip(geom)
+        ndvi_img = latest_img.select("NDVI").updateMask(mask).clip(geom)
+        ndwi_img = latest_img.select("NDWI").updateMask(mask).clip(geom)
+        savi_img = latest_img.select("SAVI").updateMask(mask).clip(geom)
 
         # -----------------------------
         # TILE VISUALIZATION
