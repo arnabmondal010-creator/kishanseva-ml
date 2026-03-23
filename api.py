@@ -661,3 +661,100 @@ def ndvi_alert():
         messaging.send(message)
 
     return {"checked": True}
+
+import requests
+
+def get_weather(lat, lon):
+
+    key = os.getenv("361fc8d5afd174b36d1da13f66c5bbcd")
+
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
+
+    res = requests.get(url).json()
+
+    return res.get("weather", [{}])[0].get("main", "").lower()
+
+def get_ndvi(lat, lon):
+
+    url = "https://kishanseva-ai.onrender.com/satellite-analysis"
+
+    res = requests.post(url, json={
+        "lat": lat,
+        "lon": lon
+    }).json()
+
+    if res.get("latest"):
+        return res["latest"]["ndvi"]
+
+    return None
+
+def get_users():
+
+    users = db.collection("farmers").stream()
+
+    data = []
+
+    for u in users:
+        d = u.to_dict()
+
+        if d.get("lat") and d.get("lon"):
+
+            data.append({
+                "token": d.get("fcm_token"),
+                "lat": d.get("lat"),
+                "lon": d.get("lon"),
+            })
+
+    return data
+
+@app.get("/smart-alerts")
+def smart_alerts():
+
+    users = get_users()
+
+    sent = 0
+
+    for u in users:
+
+        lat = u["lat"]
+        lon = u["lon"]
+        token = u["token"]
+
+        if not token:
+            continue
+
+        try:
+
+            weather = get_weather(lat, lon)
+            ndvi = get_ndvi(lat, lon)
+
+            title = None
+            body = None
+
+            # 🌧 WEATHER ALERT
+            if "rain" in weather:
+                title = "Rain Alert 🌧"
+                body = "Rain expected. Avoid irrigation"
+
+            # 🌱 NDVI ALERT
+            if ndvi is not None and ndvi < 0.3:
+                title = "Crop Stress Alert 🌱"
+                body = "Low vegetation health detected"
+
+            if title:
+
+                message = messaging.Message(
+                    notification=messaging.Notification(
+                        title=title,
+                        body=body,
+                    ),
+                    token=token,
+                )
+
+                messaging.send(message)
+                sent += 1
+
+        except Exception as e:
+            print("❌ Error:", e)
+
+    return {"sent": sent}
