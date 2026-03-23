@@ -12,5 +12,6 @@ openai
 earthengine-api
 sqlalchemy
 psycopg2-binary
+firebase-admin==6.5.0
 
 
