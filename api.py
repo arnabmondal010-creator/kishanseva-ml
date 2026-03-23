@@ -517,3 +517,37 @@ def get_prices(
         rows = [dict(r._mapping) for r in result]
 
     return rows
+#----------------------------------
+#Firebase Massaging
+#----------------------------------
+
+
+from fastapi import FastAPI
+import firebase_admin
+from firebase_admin import credentials, messaging
+import os
+import json
+
+app = FastAPI()
+
+# 🔥 LOAD FIREBASE KEY FROM RENDER ENV
+firebase_key = json.loads(os.environ["FIREBASE_KEY"])
+
+cred = credentials.Certificate(firebase_key)
+firebase_admin.initialize_app(cred)
+
+# 🔥 SEND NOTIFICATION
+@app.post("/send-notification")
+def send_notification(token: str, title: str, body: str):
+
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title=title,
+            body=body,
+        ),
+        token=token,
+    )
+
+    response = messaging.send(message)
+
+    return {"success": True, "id": response}
