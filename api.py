@@ -522,13 +522,11 @@ def get_prices(
 #----------------------------------
 
 
-from fastapi import FastAPI
 import firebase_admin
 from firebase_admin import credentials, messaging
-import os
-import json
 
-app = FastAPI()
+
+
 
 # 🔥 LOAD FIREBASE KEY FROM RENDER ENV####
 firebase_key = json.loads(os.environ["FIREBASE_KEY"])
