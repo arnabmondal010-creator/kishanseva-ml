@@ -551,8 +551,16 @@ def send_notification(token: str, title: str, body: str):
     return {"success": True, "id": response}
 
 from google.cloud import firestore
+from google.oauth2 import service_account
 
-db = firestore.Client()
+firebase_key = json.loads(os.environ["FIREBASE_KEY"])
+
+credentials = service_account.Credentials.from_service_account_info(firebase_key)
+
+db = firestore.Client(
+    credentials=credentials,
+    project=firebase_key["project_id"],
+)
 
 @app.post("/notify-all")
 def notify_all():
@@ -614,3 +622,42 @@ def daily_reminder():
     messaging.send(message)
 
     return {"sent": True}
+
+@app.get("/weather-alert")
+def weather_alert():
+
+    weather = "rain"  # replace with real API later
+
+    if "rain" in weather:
+
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title="Rain Alert 🌧",
+                body="Rain expected. Avoid irrigation today",
+            ),
+            topic="all_users",
+        )
+
+        messaging.send(message)
+
+    return {"checked": True}
+
+
+@app.get("/ndvi-alert")
+def ndvi_alert():
+
+    ndvi = 0.25  # replace with real logic
+
+    if ndvi < 0.3:
+
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title="Crop Stress Alert 🌱",
+                body="Your crop health is low. Take action",
+            ),
+            topic="all_users",
+        )
+
+        messaging.send(message)
+
+    return {"checked": True}
