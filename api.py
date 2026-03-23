@@ -549,3 +549,68 @@ def send_notification(token: str, title: str, body: str):
     response = messaging.send(message)
 
     return {"success": True, "id": response}
+
+from google.cloud import firestore
+
+db = firestore.Client()
+
+@app.post("/notify-all")
+def notify_all():
+
+    users = db.collection("farmers").stream()
+
+    sent = 0
+
+    for user in users:
+        data = user.to_dict()
+        token = data.get("fcm_token")
+
+        if not token:
+            continue
+
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title="KishanSeva Alert 🌱",
+                    body="Check your farm updates today",
+                ),
+                token=token,
+            )
+
+            messaging.send(message)
+            sent += 1
+
+        except Exception as e:
+            print("❌ Failed:", e)
+
+    return {"sent": sent}
+
+@app.post("/notify-topic")
+def notify_topic(title: str, body: str):
+
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title=title,
+            body=body,
+        ),
+        topic="all_users",
+    )
+
+    messaging.send(message)
+
+    return {"success": True}
+
+@app.get("/daily-reminder")
+def daily_reminder():
+
+    message = messaging.Message(
+        notification=messaging.Notification(
+            title="Daily Reminder 🌱",
+            body="Check your crop health today",
+        ),
+        topic="all_users",
+    )
+
+    messaging.send(message)
+
+    return {"sent": True}
