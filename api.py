@@ -530,7 +530,7 @@ import json
 
 app = FastAPI()
 
-# 🔥 LOAD FIREBASE KEY FROM RENDER ENV
+# 🔥 LOAD FIREBASE KEY FROM RENDER ENV####
 firebase_key = json.loads(os.environ["FIREBASE_KEY"])
 
 cred = credentials.Certificate(firebase_key)
