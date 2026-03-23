@@ -623,44 +623,6 @@ def daily_reminder():
 
     return {"sent": True}
 
-@app.get("/weather-alert")
-def weather_alert():
-
-    weather = "rain"  # replace with real API later
-
-    if "rain" in weather:
-
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title="Rain Alert 🌧",
-                body="Rain expected. Avoid irrigation today",
-            ),
-            topic="all_users",
-        )
-
-        messaging.send(message)
-
-    return {"checked": True}
-
-
-@app.get("/ndvi-alert")
-def ndvi_alert():
-
-    ndvi = 0.25  # replace with real logic
-
-    if ndvi < 0.3:
-
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title="Crop Stress Alert 🌱",
-                body="Your crop health is low. Take action",
-            ),
-            topic="all_users",
-        )
-
-        messaging.send(message)
-
-    return {"checked": True}
 
 import requests
 
@@ -734,12 +696,12 @@ def smart_alerts():
             # 🌧 WEATHER ALERT
             if "rain" in weather:
                 title = "Rain Alert 🌧"
-                body = "Rain expected. Avoid irrigation"
+                body = "Rain expected. Avoid irrigation. Open KishanSeva for more updates"
 
             # 🌱 NDVI ALERT
             if ndvi is not None and ndvi < 0.3:
                 title = "Crop Stress Alert 🌱"
-                body = "Low vegetation health detected"
+                body = "Low vegetation health detected. Open KishanSeva for more updates"
 
             if title:
 
