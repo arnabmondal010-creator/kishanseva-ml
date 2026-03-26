@@ -154,15 +154,15 @@ def predict_yield(data: YieldInput):
 def satellite_analysis(req: NDVIRequest):
 
     try:
-        key = f"{req.lat}_{req.lon}"
-
-# 🔥 CACHE HIT
-        if key in NDVI_CACHE:
-            data, ts = NDVI_CACHE[key]
-        if time.time() - ts < CACHE_TTL:
-        return data
         import ee
         import json
+
+        # 🔥 CACHE
+        key = f"{req.lat}_{req.lon}"
+        if key in NDVI_CACHE:
+            data, ts = NDVI_CACHE[key]
+            if time.time() - ts < CACHE_TTL:
+                return data
 
         boundary = req.boundary
 
@@ -176,7 +176,7 @@ def satellite_analysis(req: NDVIRequest):
                 [float(p["lon"]), float(p["lat"])]
                 for p in boundary
                 if "lat" in p and "lon" in p
-        ]
+            ]
 
             geom = ee.Geometry.Polygon([coords])
 
@@ -187,7 +187,7 @@ def satellite_analysis(req: NDVIRequest):
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(geom)
-            .filterDate("2025-01-01", "2026-12-31")
+            .filterDate("2024-01-01", "2026-12-31")  # ✅ same as before
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
         )
 
@@ -197,7 +197,7 @@ def satellite_analysis(req: NDVIRequest):
                 "latest": None,
                 "history": [],
                 "trend": None
-        }
+            }
 
         # ================= INDICES =================
         def add_indices(img):
@@ -207,9 +207,7 @@ def satellite_analysis(req: NDVIRequest):
             swir = img.select("B11")
 
             ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
-
             ndwi = nir.subtract(swir).divide(nir.add(swir)).rename("NDWI")
-
             savi = nir.subtract(red).divide(nir.add(red).add(0.5)).multiply(1.5).rename("SAVI")
 
             return img.addBands([ndvi, ndwi, savi])
@@ -226,7 +224,7 @@ def satellite_analysis(req: NDVIRequest):
         ndwi_img = latest_img.select("NDWI").updateMask(mask).clip(geom)
         savi_img = latest_img.select("SAVI").updateMask(mask).clip(geom)
 
-        # ================= 🔥 DYNAMIC STRETCH =================
+        # ================= 🔥 DYNAMIC STRETCH (SAME AS BEFORE) =================
         ndwi_stats = ndwi_img.reduceRegion(
             reducer=ee.Reducer.minMax(),
             geometry=geom,
@@ -284,7 +282,7 @@ def satellite_analysis(req: NDVIRequest):
         stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
-            scale=30,
+            scale=10,
             maxPixels=1e9,
         ).getInfo()
 
@@ -331,7 +329,7 @@ def satellite_analysis(req: NDVIRequest):
         history = [
             {"date": d, "ndvi": round(float(v), 3)}
             for d, v in data
-        ]
+        ] if data else []
 
         # ================= TREND =================
         trend = None
@@ -360,7 +358,7 @@ def satellite_analysis(req: NDVIRequest):
             }
 
         # ================= RESPONSE =================
-                result = {
+        result = {
             "status": "OK",
             "latest": latest,
             "history": history[-12:] if history else [],
@@ -372,9 +370,8 @@ def satellite_analysis(req: NDVIRequest):
         NDVI_CACHE[key] = (result, time.time())
 
         return result
-        
 
-        except Exception as e:
+    except Exception as e:
         print("🔥 ERROR:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 # -----------------------------
