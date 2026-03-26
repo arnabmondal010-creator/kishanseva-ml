@@ -176,7 +176,7 @@ def satellite_analysis(req: NDVIRequest):
                 [float(p["lon"]), float(p["lat"])]
                 for p in boundary
                 if "lat" in p and "lon" in p
-            ]
+        ]
 
             geom = ee.Geometry.Polygon([coords])
 
@@ -197,7 +197,7 @@ def satellite_analysis(req: NDVIRequest):
                 "latest": None,
                 "history": [],
                 "trend": None
-            }
+        }
 
         # ================= INDICES =================
         def add_indices(img):
@@ -372,7 +372,7 @@ def satellite_analysis(req: NDVIRequest):
         NDVI_CACHE[key] = (result, time.time())
 
         return result
-        }
+        
 
         except Exception as e:
         print("🔥 ERROR:", str(e))
