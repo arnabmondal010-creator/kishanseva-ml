@@ -363,7 +363,7 @@ def satellite_analysis(req: NDVIRequest):
                 result = {
             "status": "OK",
             "latest": latest,
-            "history": history[-12:],
+            "history": history[-12:] if history else [],
             "trend": trend,
             "tiles": tiles,
             "source": "Sentinel-2 (Google Earth Engine)"
