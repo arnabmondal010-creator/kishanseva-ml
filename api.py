@@ -15,6 +15,10 @@ from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
 from services.yield_history_service import add_yield_record, get_history
 from functools import lru_cache
+import time
+
+NDVI_CACHE = {}
+CACHE_TTL = 3600  # 1 hour
 
 # -----------------------------
 # App
@@ -150,6 +154,13 @@ def predict_yield(data: YieldInput):
 def satellite_analysis(req: NDVIRequest):
 
     try:
+        key = f"{req.lat}_{req.lon}"
+
+# 🔥 CACHE HIT
+        if key in NDVI_CACHE:
+            data, ts = NDVI_CACHE[key]
+        if time.time() - ts < CACHE_TTL:
+        return data
         import ee
         import json
 
@@ -176,7 +187,7 @@ def satellite_analysis(req: NDVIRequest):
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(geom)
-            .filterDate("2024-01-01", "2026-12-31")
+            .filterDate("2025-01-01", "2026-12-31")
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
         )
 
@@ -273,7 +284,7 @@ def satellite_analysis(req: NDVIRequest):
         stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
-            scale=10,
+            scale=30,
             maxPixels=1e9,
         ).getInfo()
 
@@ -349,7 +360,7 @@ def satellite_analysis(req: NDVIRequest):
             }
 
         # ================= RESPONSE =================
-        return {
+                result = {
             "status": "OK",
             "latest": latest,
             "history": history[-12:],
@@ -358,7 +369,12 @@ def satellite_analysis(req: NDVIRequest):
             "source": "Sentinel-2 (Google Earth Engine)"
         }
 
-    except Exception as e:
+        NDVI_CACHE[key] = (result, time.time())
+
+        return result
+        }
+
+        except Exception as e:
         print("🔥 ERROR:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 # -----------------------------
@@ -628,7 +644,7 @@ import requests
 
 def get_weather(lat, lon):
 
-    key = os.getenv("361fc8d5afd174b36d1da13f66c5bbcd")
+    key = os.getenv("OPENWEATHER_API_KEY")
 
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
 
