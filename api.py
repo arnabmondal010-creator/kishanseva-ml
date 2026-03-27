@@ -710,8 +710,6 @@ def get_users():
 @app.get("/smart-alerts")
 def smart_alerts():
 
-    print("=== SMART ALERT START ===")
-
     users = get_users()
     print("TOTAL USERS:", len(users))
 
@@ -723,57 +721,101 @@ def smart_alerts():
         lon = u.get("lon")
         token = u.get("token")
 
-        print("\n--- USER ---")
-        print("LAT:", lat, "LON:", lon)
-        print("TOKEN:", token)
-
         if not token or lat is None or lon is None:
-            print("⛔ Skipped: Missing token or location")
             continue
 
         try:
 
-            # 🔥 FETCH DATA (WITH FAILSAFE)
             weather = get_weather(lat, lon)
             ndvi = get_ndvi(lat, lon)
 
-            print("WEATHER:", weather)
-            print("NDVI:", ndvi)
+            temp = None
 
-            title = None
-            body = None
+            # 🔥 GET TEMPERATURE
+            try:
+                key = os.getenv("OPENWEATHER_API_KEY")
+                url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
+                res = requests.get(url, timeout=5).json()
+                temp = res.get("main", {}).get("temp")
+            except:
+                pass
 
-            # 🌧 WEATHER ALERT (MORE REALISTIC)
-            if weather and ("rain" in weather or "cloud" in weather):
-                title = "Weather Alert 🌧"
-                body = "Rain/cloud conditions expected. Check irrigation."
+            messages = []
 
-            # 🌱 NDVI ALERT (LESS STRICT)
-            elif ndvi is not None and ndvi < 0.5:
-                title = "Crop Health Alert 🌱"
-                body = f"NDVI is low ({ndvi:.2f}). Monitor your crop."
+            # ================= NDVI =================
 
-            # 🔥 NOTHING TRIGGERED → SKIP
-            if not title:
-                print("⛔ No alert condition met")
-                continue
+            if ndvi is not None:
 
-            # 🔔 SEND NOTIFICATION
-            message = messaging.Message(
-                notification=messaging.Notification(
-                    title=title,
-                    body=body,
-                ),
-                token=token,
-            )
+                if ndvi < 0.3:
+                    messages.append(("🚨 Crop Critical",
+                                     f"NDVI very low ({ndvi:.2f}). Immediate action needed"))
 
-            messaging.send(message)
-            sent += 1
+                elif ndvi < 0.5:
+                    messages.append(("⚠️ Crop Moderate",
+                                     f"NDVI moderate ({ndvi:.2f}). Monitor crop health"))
 
-            print("✅ Sent")
+                else:
+                    messages.append(("✅ Crop Healthy",
+                                     f"NDVI good ({ndvi:.2f}). Crop condition is strong"))
+
+            else:
+                messages.append(("📡 NDVI Update",
+                                 "Satellite data not available today"))
+
+            # ================= WEATHER =================
+
+            if weather:
+
+                if "rain" in weather:
+                    messages.append(("🌧 Rain Alert",
+                                     "Rain expected. Avoid irrigation"))
+
+                elif "cloud" in weather:
+                    messages.append(("☁️ Cloudy Weather",
+                                     "Cloud cover detected. Monitor sunlight exposure"))
+
+                else:
+                    messages.append(("☀️ Clear Weather",
+                                     "Good weather conditions for farming"))
+
+            # ================= TEMPERATURE =================
+
+            if temp is not None:
+
+                if temp > 35:
+                    messages.append(("🔥 High Temperature",
+                                     f"Temperature is high ({temp}°C). Irrigation recommended"))
+
+                elif temp < 15:
+                    messages.append(("❄️ Low Temperature",
+                                     f"Temperature is low ({temp}°C). Crop stress possible"))
+
+                else:
+                    messages.append(("🌡 Normal Temperature",
+                                     f"Temperature optimal ({temp}°C)"))
+
+            # ================= LIMIT TO 3 NOTIFICATIONS =================
+
+            messages = messages[:3]
+
+            for title, body in messages:
+
+                try:
+                    message = messaging.Message(
+                        notification=messaging.Notification(
+                            title=title,
+                            body=body,
+                        ),
+                        token=token,
+                    )
+
+                    messaging.send(message)
+                    sent += 1
+
+                except Exception as e:
+                    print("❌ Send Error:", e)
 
         except Exception as e:
-            print("❌ Error:", e)
+            print("❌ User Error:", e)
 
-    print("=== DONE ===")
     return {"sent": sent}
