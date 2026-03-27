@@ -710,51 +710,70 @@ def get_users():
 @app.get("/smart-alerts")
 def smart_alerts():
 
+    print("=== SMART ALERT START ===")
+
     users = get_users()
+    print("TOTAL USERS:", len(users))
 
     sent = 0
 
     for u in users:
 
-        lat = u["lat"]
-        lon = u["lon"]
-        token = u["token"]
+        lat = u.get("lat")
+        lon = u.get("lon")
+        token = u.get("token")
 
-        if not token:
+        print("\n--- USER ---")
+        print("LAT:", lat, "LON:", lon)
+        print("TOKEN:", token)
+
+        if not token or lat is None or lon is None:
+            print("⛔ Skipped: Missing token or location")
             continue
 
         try:
 
+            # 🔥 FETCH DATA (WITH FAILSAFE)
             weather = get_weather(lat, lon)
             ndvi = get_ndvi(lat, lon)
+
+            print("WEATHER:", weather)
+            print("NDVI:", ndvi)
 
             title = None
             body = None
 
-            # 🌧 WEATHER ALERT
-            if "rain" in weather:
-                title = "Rain Alert 🌧"
-                body = "Rain expected. Avoid irrigation. Open KishanSeva for more updates"
+            # 🌧 WEATHER ALERT (MORE REALISTIC)
+            if weather and ("rain" in weather or "cloud" in weather):
+                title = "Weather Alert 🌧"
+                body = "Rain/cloud conditions expected. Check irrigation."
 
-            # 🌱 NDVI ALERT
-            if ndvi is not None and ndvi < 0.3:
-                title = "Crop Stress Alert 🌱"
-                body = "Low vegetation health detected. Open KishanSeva for more updates"
+            # 🌱 NDVI ALERT (LESS STRICT)
+            elif ndvi is not None and ndvi < 0.5:
+                title = "Crop Health Alert 🌱"
+                body = f"NDVI is low ({ndvi:.2f}). Monitor your crop."
 
-            if title:
+            # 🔥 NOTHING TRIGGERED → SKIP
+            if not title:
+                print("⛔ No alert condition met")
+                continue
 
-                message = messaging.Message(
-                    notification=messaging.Notification(
-                        title=title,
-                        body=body,
-                    ),
-                    token=token,
-                )
+            # 🔔 SEND NOTIFICATION
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                token=token,
+            )
 
-                messaging.send(message)
-                sent += 1
+            messaging.send(message)
+            sent += 1
+
+            print("✅ Sent")
 
         except Exception as e:
             print("❌ Error:", e)
 
+    print("=== DONE ===")
     return {"sent": sent}
