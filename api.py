@@ -708,7 +708,7 @@ def get_users():
 # ================= SMART ALERT =================
 
 from datetime import datetime
-
+from datetime import datetime, timedelta   # 🔥 ADD timedelta
 @app.get("/smart-alerts")
 def smart_alerts():
 
@@ -735,6 +735,19 @@ def smart_alerts():
             weather = weather_res.get("weather", [{}])[0].get("main", "").lower()
             temp = weather_res.get("main", {}).get("temp")
             humidity = weather_res.get("main", {}).get("humidity")
+            # ================= FORECAST (RAIN PREDICTION) =================
+            forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
+
+            forecast = requests.get(forecast_url, timeout=5).json()
+
+            rain_soon = False
+
+            for item in forecast.get("list", [])[:3]:  # next ~3 hours
+                cond = item.get("weather", [{}])[0].get("main", "").lower()
+
+                if "rain" in cond:
+                    rain_soon = True
+                    break
 
             # ================= NDVI =================
             ndvi = get_ndvi(lat, lon)
@@ -744,6 +757,16 @@ def smart_alerts():
             prev = user_ref.get().to_dict() or {}
 
             prev_ndvi = prev.get("ndvi")
+            # ================= COOLDOWN =================
+            now = datetime.utcnow()
+            last_sent = prev.get("last_sent")
+
+            if last_sent:
+                last_time = datetime.fromisoformat(last_sent)
+
+                if now - last_time < timedelta(hours=6):
+                    print("⛔ Cooldown active → skip user")
+                    continue
 
             alerts = []
 
@@ -803,6 +826,9 @@ def smart_alerts():
                 elif temp < 15:
                     alerts.append(("❄️ Low Temperature",
                                    f"{temp}°C → slow growth"))
+                if rain_soon:
+                    alerts.append(("🌧 Rain Soon",
+                                   "Rain expected in next few hours"))
 
             # =====================================================
             # 💧 IRRIGATION INTELLIGENCE (CORE FEATURE)
@@ -838,11 +864,20 @@ def smart_alerts():
                 alerts.append(("🚫 No Irrigation Needed",
                                "Soil moisture likely sufficient"))
 
-            # =====================================================
-            # 🎯 PRIORITY FILTER (NO SPAM)
-            # =====================================================
+            # ================= PRIORITY =================
+            priority = {
+                "🚨": 1,
+                "🔥": 2,
+                "💧": 3,
+                "🌧": 4,
+                "⚠️": 5,
+                "☀️": 6,
+                "✅": 7,
+            }
 
-            alerts = alerts[:3]
+            alerts.sort(key=lambda x: priority.get(x[0][0], 10))
+
+            alerts = alerts[:2]
 
             # =====================================================
             # 📊 FALLBACK (ALWAYS SEND SOMETHING)
@@ -877,7 +912,7 @@ def smart_alerts():
 
             user_ref.set({
                 "ndvi": ndvi,
-                "last_updated": datetime.utcnow().isoformat()
+                "last_sent": now.isoformat()
             }, merge=True)
 
         except Exception as e:
