@@ -531,23 +531,24 @@ def get_prices(
 
     return rows
 #----------------------------------
-#Firebase Massaging
-#----------------------------------
+# ================= FIREBASE =================
 
-
+import os
+import json
 import firebase_admin
 from firebase_admin import credentials, messaging
 
-
-
-
-# 🔥 LOAD FIREBASE KEY FROM RENDER ENV####
+# 🔥 LOAD KEY
 firebase_key = json.loads(os.environ["FIREBASE_KEY"])
-
 cred = credentials.Certificate(firebase_key)
-firebase_admin.initialize_app(cred)
 
-# 🔥 SEND NOTIFICATION
+# 🔥 SAFE INIT (IMPORTANT FIX)
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred)
+
+
+# ================= SEND SINGLE =================
+
 @app.post("/send-notification")
 def send_notification(token: str, title: str, body: str):
 
@@ -563,17 +564,21 @@ def send_notification(token: str, title: str, body: str):
 
     return {"success": True, "id": response}
 
+
+# ================= FIRESTORE =================
+
 from google.cloud import firestore
 from google.oauth2 import service_account
 
-firebase_key = json.loads(os.environ["FIREBASE_KEY"])
-
-credentials = service_account.Credentials.from_service_account_info(firebase_key)
+credentials_fs = service_account.Credentials.from_service_account_info(firebase_key)
 
 db = firestore.Client(
-    credentials=credentials,
+    credentials=credentials_fs,
     project=firebase_key["project_id"],
 )
+
+
+# ================= NOTIFY ALL =================
 
 @app.post("/notify-all")
 def notify_all():
@@ -606,6 +611,9 @@ def notify_all():
 
     return {"sent": sent}
 
+
+# ================= TOPIC =================
+
 @app.post("/notify-topic")
 def notify_topic(title: str, body: str):
 
@@ -620,6 +628,9 @@ def notify_topic(title: str, body: str):
     messaging.send(message)
 
     return {"success": True}
+
+
+# ================= DAILY =================
 
 @app.get("/daily-reminder")
 def daily_reminder():
@@ -637,6 +648,8 @@ def daily_reminder():
     return {"sent": True}
 
 
+# ================= HELPERS =================
+
 import requests
 
 def get_weather(lat, lon):
@@ -645,23 +658,32 @@ def get_weather(lat, lon):
 
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
 
-    res = requests.get(url).json()
+    try:
+        res = requests.get(url, timeout=5).json()  # 🔥 timeout added
+        return res.get("weather", [{}])[0].get("main", "").lower()
+    except:
+        return ""
 
-    return res.get("weather", [{}])[0].get("main", "").lower()
 
 def get_ndvi(lat, lon):
 
     url = "https://kishanseva-ai.onrender.com/satellite-analysis"
 
-    res = requests.post(url, json={
-        "lat": lat,
-        "lon": lon
-    }).json()
+    try:
+        res = requests.post(
+            url,
+            json={"lat": lat, "lon": lon},
+            timeout=5  # 🔥 timeout added
+        ).json()
 
-    if res.get("latest"):
-        return res["latest"]["ndvi"]
+        if res.get("latest"):
+            return res["latest"]["ndvi"]
+
+    except:
+        return None
 
     return None
+
 
 def get_users():
 
@@ -681,6 +703,9 @@ def get_users():
             })
 
     return data
+
+
+# ================= SMART ALERT =================
 
 @app.get("/smart-alerts")
 def smart_alerts():
