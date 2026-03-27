@@ -707,12 +707,12 @@ def get_users():
 
 # ================= SMART ALERT =================
 
+from datetime import datetime
+
 @app.get("/smart-alerts")
 def smart_alerts():
 
     users = get_users()
-    print("TOTAL USERS:", len(users))
-
     sent = 0
 
     for u in users:
@@ -726,96 +726,161 @@ def smart_alerts():
 
         try:
 
-            weather = get_weather(lat, lon)
-            ndvi = get_ndvi(lat, lon)
+            # ================= FETCH WEATHER =================
+            key = os.getenv("OPENWEATHER_API_KEY")
+            url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
 
-            temp = None
+            weather_res = requests.get(url, timeout=5).json()
 
-            # 🔥 GET TEMPERATURE
-            try:
-                key = os.getenv("OPENWEATHER_API_KEY")
-                url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
-                res = requests.get(url, timeout=5).json()
-                temp = res.get("main", {}).get("temp")
-            except:
-                pass
-
-            messages = []
+            weather = weather_res.get("weather", [{}])[0].get("main", "").lower()
+            temp = weather_res.get("main", {}).get("temp")
+            humidity = weather_res.get("main", {}).get("humidity")
 
             # ================= NDVI =================
+            ndvi = get_ndvi(lat, lon)
+
+            # ================= LOAD PREVIOUS =================
+            user_ref = db.collection("alerts_state").document(token)
+            prev = user_ref.get().to_dict() or {}
+
+            prev_ndvi = prev.get("ndvi")
+
+            alerts = []
+
+            # =====================================================
+            # 🌱 NDVI INTELLIGENCE
+            # =====================================================
 
             if ndvi is not None:
 
+                if prev_ndvi is not None:
+                    change = ndvi - prev_ndvi
+
+                    if change < -0.1:
+                        alerts.append(("🚨 Crop Declining",
+                                       f"NDVI dropped {prev_ndvi:.2f} → {ndvi:.2f}"))
+
+                    elif change > 0.1:
+                        alerts.append(("🌱 Crop Improving",
+                                       f"NDVI improved {prev_ndvi:.2f} → {ndvi:.2f}"))
+
                 if ndvi < 0.3:
-                    messages.append(("🚨 Crop Critical",
-                                     f"NDVI very low ({ndvi:.2f}). Immediate action needed"))
+                    alerts.append(("🚨 Critical Crop",
+                                   f"Very low NDVI ({ndvi:.2f})"))
 
                 elif ndvi < 0.5:
-                    messages.append(("⚠️ Crop Moderate",
-                                     f"NDVI moderate ({ndvi:.2f}). Monitor crop health"))
+                    alerts.append(("⚠️ Moderate Crop",
+                                   f"NDVI moderate ({ndvi:.2f})"))
 
                 else:
-                    messages.append(("✅ Crop Healthy",
-                                     f"NDVI good ({ndvi:.2f}). Crop condition is strong"))
+                    alerts.append(("✅ Healthy Crop",
+                                   f"NDVI good ({ndvi:.2f})"))
 
-            else:
-                messages.append(("📡 NDVI Update",
-                                 "Satellite data not available today"))
-
-            # ================= WEATHER =================
+            # =====================================================
+            # 🌦 WEATHER INTELLIGENCE
+            # =====================================================
 
             if weather:
 
                 if "rain" in weather:
-                    messages.append(("🌧 Rain Alert",
-                                     "Rain expected. Avoid irrigation"))
+                    alerts.append(("🌧 Rain Incoming",
+                                   "Rain expected. Avoid irrigation"))
 
                 elif "cloud" in weather:
-                    messages.append(("☁️ Cloudy Weather",
-                                     "Cloud cover detected. Monitor sunlight exposure"))
+                    alerts.append(("☁️ Cloudy",
+                                   "Low sunlight may affect growth"))
 
                 else:
-                    messages.append(("☀️ Clear Weather",
-                                     "Good weather conditions for farming"))
-
-            # ================= TEMPERATURE =================
+                    alerts.append(("☀️ Clear Weather",
+                                   "Good farming conditions"))
 
             if temp is not None:
 
                 if temp > 35:
-                    messages.append(("🔥 High Temperature",
-                                     f"Temperature is high ({temp}°C). Irrigation recommended"))
+                    alerts.append(("🔥 High Temperature",
+                                   f"{temp}°C → crop stress risk"))
 
                 elif temp < 15:
-                    messages.append(("❄️ Low Temperature",
-                                     f"Temperature is low ({temp}°C). Crop stress possible"))
+                    alerts.append(("❄️ Low Temperature",
+                                   f"{temp}°C → slow growth"))
 
-                else:
-                    messages.append(("🌡 Normal Temperature",
-                                     f"Temperature optimal ({temp}°C)"))
+            # =====================================================
+            # 💧 IRRIGATION INTELLIGENCE (CORE FEATURE)
+            # =====================================================
 
-            # ================= LIMIT TO 3 NOTIFICATIONS =================
+            irrigation_score = 0
 
-            messages = messages[:3]
+            if ndvi is not None:
+                if ndvi < 0.3:
+                    irrigation_score += 2
+                elif ndvi < 0.5:
+                    irrigation_score += 1
 
-            for title, body in messages:
+            if temp is not None and temp > 32:
+                irrigation_score += 2
 
-                try:
-                    message = messaging.Message(
-                        notification=messaging.Notification(
-                            title=title,
-                            body=body,
-                        ),
-                        token=token,
-                    )
+            if humidity is not None and humidity < 40:
+                irrigation_score += 1
 
-                    messaging.send(message)
-                    sent += 1
+            if weather and "rain" in weather:
+                irrigation_score -= 3
 
-                except Exception as e:
-                    print("❌ Send Error:", e)
+            # 🔥 DECISION
+            if irrigation_score >= 3:
+                alerts.append(("💧 Irrigation Needed",
+                               "High water stress detected. Irrigate now"))
+
+            elif irrigation_score == 2:
+                alerts.append(("💧 Irrigation Soon",
+                               "Moderate stress. Plan irrigation"))
+
+            elif irrigation_score <= 0:
+                alerts.append(("🚫 No Irrigation Needed",
+                               "Soil moisture likely sufficient"))
+
+            # =====================================================
+            # 🎯 PRIORITY FILTER (NO SPAM)
+            # =====================================================
+
+            alerts = alerts[:3]
+
+            # =====================================================
+            # 📊 FALLBACK (ALWAYS SEND SOMETHING)
+            # =====================================================
+
+            if not alerts:
+                alerts.append((
+                    "📊 Farm Summary",
+                    f"NDVI: {ndvi}, Temp: {temp}, Weather: {weather}"
+                ))
+
+            # =====================================================
+            # 🔔 SEND
+            # =====================================================
+
+            for title, body in alerts:
+
+                message = messaging.Message(
+                    notification=messaging.Notification(
+                        title=title,
+                        body=body,
+                    ),
+                    token=token,
+                )
+
+                messaging.send(message)
+                sent += 1
+
+            # =====================================================
+            # 💾 SAVE STATE
+            # =====================================================
+
+            user_ref.set({
+                "ndvi": ndvi,
+                "last_updated": datetime.utcnow().isoformat()
+            }, merge=True)
 
         except Exception as e:
-            print("❌ User Error:", e)
+            print("❌ Error:", e)
 
     return {"sent": sent}
