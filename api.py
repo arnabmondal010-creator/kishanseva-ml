@@ -919,3 +919,32 @@ def smart_alerts():
             print("❌ Error:", e)
 
     return {"sent": sent}
+
+#=================DELETE ACCOUNT==============================
+
+
+from fastapi import Depends, Header
+
+@app.delete("/delete-account")
+async def delete_account(authorization: str = Header(...)):
+
+    try:
+        # 🔐 VERIFY FIREBASE TOKEN
+        token = authorization.replace("Bearer ", "")
+        decoded = auth.verify_id_token(token)
+
+        user_id = decoded["uid"]
+
+        # 🔥 DELETE FIREBASE USER
+        auth.delete_user(user_id)
+
+        # 🔥 DELETE FIRESTORE DATA
+        db.collection("farmers").document(user_id).delete()
+        db.collection("alerts_state").document(user_id).delete()
+
+        # TODO: delete yield history if stored separately
+
+        return {"success": True, "message": "Account deleted"}
+
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
