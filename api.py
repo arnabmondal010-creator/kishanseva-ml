@@ -877,7 +877,7 @@ def smart_alerts():
 
             alerts.sort(key=lambda x: priority.get(x[0][0], 10))
 
-            alerts = alerts[:2]
+            alerts = alerts[:1]
 
             # =====================================================
             # 📊 FALLBACK (ALWAYS SEND SOMETHING)
