@@ -948,3 +948,42 @@ async def delete_account(authorization: str = Header(...)):
 
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/delete-account-info", response_class=HTMLResponse)
+async def delete_account_info():
+    return """
+    <html>
+    <head>
+        <title>KishanSeva Account Deletion</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+    </head>
+    <body style="font-family: Arial; padding:20px; background:#F5F7F2;">
+
+        <h2 style="color:#689F38;">KishanSeva Account Deletion</h2>
+
+        <p>You can delete your account directly inside the app:</p>
+
+        <ol>
+            <li>Open KishanSeva</li>
+            <li>Go to Profile</li>
+            <li>Tap <b>"Delete My Account"</b></li>
+        </ol>
+
+        <p>If you cannot access the app, contact support:</p>
+        <p><b>Email:</b> contactkishanseva@gmail.com</p>
+
+        <h4>Data that will be deleted:</h4>
+        <ul>
+            <li>User account</li>
+            <li>Farm field data</li>
+            <li>NDVI and advisory data</li>
+        </ul>
+
+        <p><b>Processing time:</b> Within 7 days</p>
+
+    </body>
+    </html>
+    """
