@@ -987,3 +987,24 @@ async def delete_account_info():
     </body>
     </html>
     """
+
+
+
+from googletrans import Translator
+
+translator = Translator()
+
+def translate_text(text, lang="bn"):
+    try:
+        return translator.translate(text, dest=lang).text
+    except:
+        return text
+    
+@app.post("/translate")
+def translate_api(data: dict):
+    text = data.get("text")
+    lang = data.get("lang", "bn")
+
+    translated = translate_text(text, lang)
+
+    return {"translated": translated}
