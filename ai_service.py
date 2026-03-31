@@ -5,9 +5,9 @@ import os
 import json
 import io
 from PIL import Image
-from openai import OpenAI
+import openai
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 def compress_image(image_bytes: bytes) -> bytes:
@@ -50,7 +50,7 @@ Return JSON:
 }}
 """
 
-        response = client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o",
             temperature=0,
             messages=[
