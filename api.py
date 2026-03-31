@@ -798,39 +798,40 @@ def smart_alerts(lang: str = Query("en")):
 
             if ndvi is not None:
 
+    # 🔹 CHANGE DETECTION
                 if prev_ndvi is not None:
                     change = ndvi - prev_ndvi
 
                     if change < -0.1:
                         alerts.append((
                             t("🚨 Crop Declining", lang),
-                            t(f"NDVI dropped {prev_ndvi:.2f} → {ndvi:.2f}", lang)
+                            t("NDVI dropped", lang) + f" {prev_ndvi:.2f} → {ndvi:.2f}"
                         ))
 
                     elif change > 0.1:
                         alerts.append((
                             t("🌱 Crop Improving", lang),
-                            t(f"NDVI improved {prev_ndvi:.2f} → {ndvi:.2f}", lang)
+                            t("NDVI improved", lang) + f" {prev_ndvi:.2f} → {ndvi:.2f}"
                         ))
 
-    # 🔥 ONLY ADD STATUS IF NO CHANGE ALERT
-                    if not alerts:
+    # 🔹 STATUS (ONLY IF NO CHANGE ALERT)
+                if not alerts:
                     if ndvi < 0.3:
                         alerts.append((
                             t("🚨 Critical Crop", lang),
-                            t(f"Very low NDVI ({ndvi:.2f})", lang)
+                            t("Very low NDVI", lang) + f" ({ndvi:.2f})"
                         ))
 
                     elif ndvi < 0.5:
                         alerts.append((
                             t("⚠️ Moderate Crop", lang),
-                            t(f"NDVI moderate ({ndvi:.2f})", lang)
+                            t("NDVI moderate", lang) + f" ({ndvi:.2f})"
                         ))
 
                     else:
                         alerts.append((
                             t("✅ Healthy Crop", lang),
-                            t(f"NDVI good ({ndvi:.2f})", lang)
+                            t("NDVI good", lang) + f" ({ndvi:.2f})"
                         ))
 
             # =====================================================
