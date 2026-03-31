@@ -19,6 +19,13 @@ import time
 from firebase_admin import auth
 
 import requests
+def get_user_lang(user_id):
+    try:
+        doc = db.collection("farmers").document(user_id).get()
+        data = doc.to_dict()
+        return data.get("lang", "en") if data else "en"
+    except:
+        return "en"
 
 translation_cache = {}
 
@@ -43,6 +50,10 @@ def translate_text(text, lang="bn"):
         translated = res.json()[0][0][0]
 
         translation_cache[key] = translated
+
+        if len(translation_cache) > 1000:
+            translation_cache.clear()
+
         return translated
 
     except:
@@ -118,6 +129,7 @@ class NDVIRequest(BaseModel):
     lat: float
     lon: float
     boundary: list | None = None
+    user_id: str | None = None
 
 
 class IrrigationInput(BaseModel):
@@ -381,14 +393,11 @@ def satellite_analysis(req: NDVIRequest):
             else:
                 trend_type = "stable"
 
- #           class NDVIRequest(BaseModel):
-  #              lat: float
-    #            lon: float
-   #             boundary: list | None = None
-   #             lang: str = "en"   # 🔥 ADD
-
-  #              lang = req.lang
-
+            class NDVIRequest(BaseModel):
+                lat: float
+                lon: float
+                boundary: list | None = None
+                user_id: str | None = None
             if lang != "en":
                 trend_type = translate_text(trend_type, lang)
 
@@ -452,8 +461,9 @@ import io
 async def predict_disease(
     crop: str = Form(...),
     user_id: str = Form(...),
+    lang = get_user_lang(user_id)
     file: UploadFile = File(...),
-    lang: str = Form("en")
+    
 ):
 
     try:
@@ -772,9 +782,11 @@ def t(text, lang):
     return translate_text(text, lang) if lang != "en" else text
 @app.get("/smart-alerts")
 
-def smart_alerts(lang: str = Query("en")):
+def smart_alerts():
 
     users = get_users()
+    user_id = u.get("id")
+    lang = get_user_lang(user_id)
     sent = 0
 
     for u in users:
