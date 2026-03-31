@@ -454,7 +454,7 @@ from fastapi import UploadFile, File, Form
 from PIL import Image
 import numpy as np
 import io
-lang = get_user_lang(user_id)
+
 
 @app.post("/predict-disease")
 async def predict_disease(
