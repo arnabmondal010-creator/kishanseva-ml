@@ -8,7 +8,7 @@ pillow
 python-multipart
 requests
 razorpay
-openai
+openai>=1.0.0
 earthengine-api
 sqlalchemy
 psycopg2-binary
