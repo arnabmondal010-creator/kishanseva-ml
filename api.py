@@ -16,6 +16,25 @@ from ai_service import analyze_image
 from services.yield_history_service import add_yield_record, get_history
 from functools import lru_cache
 import time
+from firebase_admin import auth
+
+from googletrans import Translator
+
+translation_cache = {}
+translator = Translator()
+
+def translate_text(text, lang="bn"):
+    key = f"{text}_{lang}"
+
+    if key in translation_cache:
+        return translation_cache[key]
+
+    try:
+        translated = translator.translate(text, dest=lang).text
+        translation_cache[key] = translated
+        return translated
+    except:
+        return text
 
 NDVI_CACHE = {}
 CACHE_TTL = 3600  # 1 hour
@@ -332,6 +351,7 @@ def satellite_analysis(req: NDVIRequest):
         ] if data else []
 
         # ================= TREND =================
+        lang = getattr(req, "lang", "en")
         trend = None
 
         if len(history) >= 2:
@@ -349,13 +369,13 @@ def satellite_analysis(req: NDVIRequest):
             else:
                 trend_type = "stable"
 
-            class NDVIRequest(BaseModel):
-                lat: float
-                lon: float
-                boundary: list | None = None
-                lang: str = "en"   # 🔥 ADD
+ #           class NDVIRequest(BaseModel):
+  #              lat: float
+    #            lon: float
+   #             boundary: list | None = None
+   #             lang: str = "en"   # 🔥 ADD
 
-                lang = req.lang
+  #              lang = req.lang
 
             if lang != "en":
                 trend_type = translate_text(trend_type, lang)
@@ -557,7 +577,12 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 
 # 🔥 LOAD KEY
-firebase_key = json.loads(os.environ["FIREBASE_KEY"])
+firebase_env = os.getenv("FIREBASE_KEY")
+
+if not firebase_env:
+    raise Exception("FIREBASE_KEY not set")
+
+firebase_key = json.loads(firebase_env)
 cred = credentials.Certificate(firebase_key)
 
 # 🔥 SAFE INIT (IMPORTANT FIX)
@@ -725,7 +750,6 @@ def get_users():
 
 # ================= SMART ALERT =================
 
-from datetime import datetime
 from datetime import datetime, timedelta   # 🔥 ADD timedelta
 
 def t(text, lang):
@@ -1045,29 +1069,10 @@ async def delete_account_info():
     </html>
     """
 
-
-
-from googletrans import Translator
-
-translation_cache = {}
-translator = Translator()
-
-def translate_text(text, lang="bn"):
-    key = f"{text}_{lang}"
-
-    if key in translation_cache:
-        return translation_cache[key]
-
-    try:
-        translated = translator.translate(text, dest=lang).text
-        translation_cache[key] = translated
-        return translated
-    except:
-        return text
     
 @app.post("/translate")
 def translate_api(data: dict):
-    text = data.get("text")
+    text = data.get("text") or ""
     lang = data.get("lang", "bn")
 
     translated = translate_text(text, lang)
