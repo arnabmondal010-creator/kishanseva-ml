@@ -398,6 +398,11 @@ def satellite_analysis(req: NDVIRequest):
                 lon: float
                 boundary: list | None = None
                 user_id: str | None = None
+
+
+# inside API function
+            lang = get_user_lang(req.user_id)
+
             if lang != "en":
                 trend_type = translate_text(trend_type, lang)
 
