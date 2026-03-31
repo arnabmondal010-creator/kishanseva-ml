@@ -13,5 +13,6 @@ earthengine-api
 sqlalchemy
 psycopg2-binary
 firebase-admin==6.5.0
+googletrans==4.0.0-rc1
 
 
