@@ -454,12 +454,12 @@ from fastapi import UploadFile, File, Form
 from PIL import Image
 import numpy as np
 import io
+lang = get_user_lang(user_id)
 
 @app.post("/predict-disease")
 async def predict_disease(
     crop: str = Form(...),
     user_id: str = Form(...),
-    lang = get_user_lang(user_id)
     file: UploadFile = File(...),
     
 ):
@@ -783,11 +783,12 @@ def t(text, lang):
 def smart_alerts():
 
     users = get_users()
-    user_id = u.get("id")
-    lang = get_user_lang(user_id)
     sent = 0
 
     for u in users:
+
+        user_id = u.get("id")   # 🔥 REQUIRED
+        lang = get_user_lang(user_id)
 
         lat = u.get("lat")
         lon = u.get("lon")
@@ -848,7 +849,6 @@ def smart_alerts():
 
             if ndvi is not None:
 
-    # 🔹 CHANGE DETECTION
                 if prev_ndvi is not None:
                     change = ndvi - prev_ndvi
 
