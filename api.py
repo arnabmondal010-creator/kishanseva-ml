@@ -375,7 +375,7 @@ def satellite_analysis(req: NDVIRequest):
         ] if data else []
 
         # ================= TREND =================
-        lang = getattr(req, "lang", "en")
+       
         trend = None
 
         if len(history) >= 2:
@@ -393,15 +393,8 @@ def satellite_analysis(req: NDVIRequest):
             else:
                 trend_type = "stable"
 
-            class NDVIRequest(BaseModel):
-                lat: float
-                lon: float
-                boundary: list | None = None
-                user_id: str | None = None
-
-
-# inside API function
-            lang = get_user_lang(req.user_id),
+    # ✅ CORRECT PLACE
+            lang = get_user_lang(req.user_id)
 
             if lang != "en":
                 trend_type = translate_text(trend_type, lang)
