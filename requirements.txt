@@ -13,6 +13,6 @@ earthengine-api
 sqlalchemy
 psycopg2-binary
 firebase-admin==6.5.0
-
+scikit-learn==1.7.2
 
 

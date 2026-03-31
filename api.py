@@ -662,9 +662,13 @@ def notify_all():
             sent += 1
 
         except Exception as e:
-            print("❌ Failed:", e)
-
-    return {"sent": sent}
+            if "Requested entity was not found" in str(e):
+                db.collection("farmers").document(token).update({
+                    "fcm_token": None
+                })
+                print("🧹 Removed invalid token")
+            else:
+                print("❌ Error:", e)
 
 
 # ================= TOPIC =================
