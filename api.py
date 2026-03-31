@@ -18,10 +18,9 @@ from functools import lru_cache
 import time
 from firebase_admin import auth
 
-from googletrans import Translator
+import requests
 
 translation_cache = {}
-translator = Translator()
 
 def translate_text(text, lang="bn"):
     key = f"{text}_{lang}"
@@ -30,9 +29,22 @@ def translate_text(text, lang="bn"):
         return translation_cache[key]
 
     try:
-        translated = translator.translate(text, dest=lang).text
+        url = "https://translate.googleapis.com/translate_a/single"
+
+        params = {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": lang,
+            "dt": "t",
+            "q": text
+        }
+
+        res = requests.get(url, params=params, timeout=5)
+        translated = res.json()[0][0][0]
+
         translation_cache[key] = translated
         return translated
+
     except:
         return text
 
