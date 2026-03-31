@@ -349,6 +349,17 @@ def satellite_analysis(req: NDVIRequest):
             else:
                 trend_type = "stable"
 
+            class NDVIRequest(BaseModel):
+                lat: float
+                lon: float
+                boundary: list | None = None
+                lang: str = "en"   # 🔥 ADD
+
+                lang = req.lang
+
+            if lang != "en":
+                trend_type = translate_text(trend_type, lang)
+
             trend = {
                 "start_ndvi": start,
                 "current_ndvi": end,
@@ -409,7 +420,8 @@ import io
 async def predict_disease(
     crop: str = Form(...),
     user_id: str = Form(...),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    lang: str = Form("en")
 ):
 
     try:
@@ -420,11 +432,17 @@ async def predict_disease(
 
         result = await analyze_image(contents, crop)
 
+        
+        advice = result.get("advice")
+
+        if lang != "en":
+            advice = translate_text(advice, lang)
+
         return {
             "crop": crop,
             "disease": result.get("disease"),
             "confidence": result.get("confidence"),
-            "advice": result.get("advice")
+            "advice": advice
         }
 
     except Exception as e:
@@ -709,8 +727,12 @@ def get_users():
 
 from datetime import datetime
 from datetime import datetime, timedelta   # 🔥 ADD timedelta
+
+def t(text, lang):
+    return translate_text(text, lang) if lang != "en" else text
 @app.get("/smart-alerts")
-def smart_alerts():
+
+def smart_alerts(lang: str = Query("en")):
 
     users = get_users()
     sent = 0
@@ -780,24 +802,36 @@ def smart_alerts():
                     change = ndvi - prev_ndvi
 
                     if change < -0.1:
-                        alerts.append(("🚨 Crop Declining",
-                                       f"NDVI dropped {prev_ndvi:.2f} → {ndvi:.2f}"))
+                        alerts.append((
+                            t("🚨 Crop Declining", lang),
+                            t(f"NDVI dropped {prev_ndvi:.2f} → {ndvi:.2f}", lang)
+                        ))
 
                     elif change > 0.1:
-                        alerts.append(("🌱 Crop Improving",
-                                       f"NDVI improved {prev_ndvi:.2f} → {ndvi:.2f}"))
+                        alerts.append((
+                            t("🌱 Crop Improving", lang),
+                            t(f"NDVI improved {prev_ndvi:.2f} → {ndvi:.2f}", lang)
+                        ))
 
-                if ndvi < 0.3:
-                    alerts.append(("🚨 Critical Crop",
-                                   f"Very low NDVI ({ndvi:.2f})"))
+    # 🔥 ONLY ADD STATUS IF NO CHANGE ALERT
+                    if not alerts:
+                    if ndvi < 0.3:
+                        alerts.append((
+                            t("🚨 Critical Crop", lang),
+                            t(f"Very low NDVI ({ndvi:.2f})", lang)
+                        ))
 
-                elif ndvi < 0.5:
-                    alerts.append(("⚠️ Moderate Crop",
-                                   f"NDVI moderate ({ndvi:.2f})"))
+                    elif ndvi < 0.5:
+                        alerts.append((
+                            t("⚠️ Moderate Crop", lang),
+                            t(f"NDVI moderate ({ndvi:.2f})", lang)
+                        ))
 
-                else:
-                    alerts.append(("✅ Healthy Crop",
-                                   f"NDVI good ({ndvi:.2f})"))
+                    else:
+                        alerts.append((
+                            t("✅ Healthy Crop", lang),
+                            t(f"NDVI good ({ndvi:.2f})", lang)
+                        ))
 
             # =====================================================
             # 🌦 WEATHER INTELLIGENCE
@@ -806,29 +840,44 @@ def smart_alerts():
             if weather:
 
                 if "rain" in weather:
-                    alerts.append(("🌧 Rain Incoming",
-                                   "Rain expected. Avoid irrigation"))
+                    alerts.append((
+                        t("🌧 Rain Incoming", lang),
+                        t("Rain expected. Avoid irrigation", lang)
+                    ))
 
                 elif "cloud" in weather:
-                    alerts.append(("☁️ Cloudy",
-                                   "Low sunlight may affect growth"))
+                    alerts.append((
+                        t("☁️ Cloudy", lang),
+                        t("Low sunlight may affect growth", lang)
+                    ))
 
                 else:
-                    alerts.append(("☀️ Clear Weather",
-                                   "Good farming conditions"))
+                    alerts.append((
+                        t("☀️ Clear Weather", lang),
+                        t("Good farming conditions", lang)
+                    ))
 
-            if temp is not None:
+# 🔥 ONLY ADD TEMP ALERT IF NO WEATHER ALERT
+            if temp is not None and not alerts:
 
                 if temp > 35:
-                    alerts.append(("🔥 High Temperature",
-                                   f"{temp}°C → crop stress risk"))
+                    alerts.append((
+                        t("🔥 High Temperature", lang),
+                        t("Crop stress risk", lang) + f" ({temp}°C)"
+                    ))
 
                 elif temp < 15:
-                    alerts.append(("❄️ Low Temperature",
-                                   f"{temp}°C → slow growth"))
-                if rain_soon:
-                    alerts.append(("🌧 Rain Soon",
-                                   "Rain expected in next few hours"))
+                    alerts.append((
+                        t("❄️ Low Temperature", lang),
+                        t("Slow crop growth", lang) + f" ({temp}°C)"
+                    ))
+
+            # 🔥 RAIN SOON (SEPARATE SIGNAL)
+            if rain_soon and not alerts:
+                alerts.append((
+                    t("🌧 Rain Soon", lang),
+                    t("Rain expected in next few hours", lang)
+                ))
 
             # =====================================================
             # 💧 IRRIGATION INTELLIGENCE (CORE FEATURE)
@@ -851,19 +900,26 @@ def smart_alerts():
             if weather and "rain" in weather:
                 irrigation_score -= 3
 
-            # 🔥 DECISION
-            if irrigation_score >= 3:
-                alerts.append(("💧 Irrigation Needed",
-                               "High water stress detected. Irrigate now"))
+# 🔥 ONLY ADD IF NO HIGHER PRIORITY ALERT EXISTS
+            if not alerts:
 
-            elif irrigation_score == 2:
-                alerts.append(("💧 Irrigation Soon",
-                               "Moderate stress. Plan irrigation"))
+                if irrigation_score >= 3:
+                    alerts.append((
+                        t("💧 Irrigation Needed", lang),
+                        t("High water stress detected. Irrigate now", lang)
+                    ))
 
-            elif irrigation_score <= 0:
-                alerts.append(("🚫 No Irrigation Needed",
-                               "Soil moisture likely sufficient"))
+                elif irrigation_score == 2:
+                    alerts.append((
+                        t("💧 Irrigation Soon", lang),
+                        t("Moderate stress. Plan irrigation", lang)
+                    ))
 
+                elif irrigation_score <= 0:
+                    alerts.append((
+                        t("🚫 No Irrigation Needed", lang),
+                        t("Soil moisture likely sufficient", lang)
+                    ))
             # ================= PRIORITY =================
             priority = {
                 "🚨": 1,
@@ -992,11 +1048,19 @@ async def delete_account_info():
 
 from googletrans import Translator
 
+translation_cache = {}
 translator = Translator()
 
 def translate_text(text, lang="bn"):
+    key = f"{text}_{lang}"
+
+    if key in translation_cache:
+        return translation_cache[key]
+
     try:
-        return translator.translate(text, dest=lang).text
+        translated = translator.translate(text, dest=lang).text
+        translation_cache[key] = translated
+        return translated
     except:
         return text
     
