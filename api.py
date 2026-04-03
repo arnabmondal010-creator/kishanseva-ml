@@ -473,10 +473,11 @@ async def predict_disease(
         result = await analyze_image(contents, crop)
 
         
+        lang = get_user_lang(user_id)
+
         advice = result.get("advice")
 
-        if lang != "en":
-            advice = translate_text(advice, lang)
+        advice = t(advice, lang)
 
         return {
             "crop": crop,
@@ -719,15 +720,18 @@ def daily_reminder():
 
 import requests
 
-def get_weather(lat, lon):
+def get_weather(lat, lon, lang="en"):
 
     key = os.getenv("OPENWEATHER_API_KEY")
 
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
 
     try:
-        res = requests.get(url, timeout=5).json()  # 🔥 timeout added
-        return res.get("weather", [{}])[0].get("main", "").lower()
+        res = requests.get(url, timeout=5).json()
+        weather = res.get("weather", [{}])[0].get("main", "").lower()
+
+        return t(weather, lang)
+
     except:
         return ""
 
@@ -764,6 +768,7 @@ def get_users():
         if d.get("lat") and d.get("lon"):
 
             data.append({
+                "id": u.id,
                 "token": d.get("fcm_token"),
                 "lat": d.get("lat"),
                 "lon": d.get("lon"),
@@ -992,8 +997,10 @@ def smart_alerts():
 
             if not alerts:
                 alerts.append((
-                    "📊 Farm Summary",
-                    f"NDVI: {ndvi}, Temp: {temp}, Weather: {weather}"
+                    t("Farm Summary", lang),
+                    t("NDVI", lang) + f": {ndvi}, " +
+                    t("Temp", lang) + f": {temp}, " +
+                    t("Weather", lang) + f": {weather}"
                 ))
 
             # =====================================================
