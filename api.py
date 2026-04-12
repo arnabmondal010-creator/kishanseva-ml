@@ -17,6 +17,33 @@ from services.yield_history_service import add_yield_record, get_history
 from functools import lru_cache
 import time
 from firebase_admin import auth
+from deep_translator import GoogleTranslator
+
+# 🔥 GLOBAL CACHE
+translation_cache = {}
+
+def translate_text(text, lang="bn"):
+    if not text:
+        return text
+
+    # 🔥 normalize (important)
+    key = f"{text.lower().strip()}_{lang}"
+
+    if key in translation_cache:
+        return translation_cache[key]
+
+    try:
+        translated = GoogleTranslator(
+            source='auto',
+            target=lang
+        ).translate(text)
+
+        translation_cache[key] = translated
+        return translated
+
+    except Exception as e:
+        print("Translation error:", e)
+        return text
 
 import requests
 def get_user_lang(user_id):
@@ -624,6 +651,7 @@ def cached_query(crop, district, sort, limit, offset):
 
 # ================= APIfrom fastapi import Query
 from sqlalchemy import text
+from fastapi import Query
 
 @app.get("/market-prices")
 def get_prices(
@@ -632,7 +660,15 @@ def get_prices(
     sort: str = Query(default="price"),
     limit: int = Query(default=20),
     offset: int = Query(default=0),
+    lang: str = Query(default="en")
 ):
+
+    # 🔥 TRANSLATE SEARCH INPUT (BEFORE QUERY)
+    if crop and lang != "en":
+        crop = translate_text(crop, "en")
+
+    if district and lang != "en":
+        district = translate_text(district, "en")
 
     query = """
     SELECT commodity, district, market, price, date
@@ -659,12 +695,23 @@ def get_prices(
     else:
         query += " ORDER BY price DESC"
 
-    # 🔥 PAGINATION (THIS WAS MISSING)
+    # 🔥 PAGINATION
     query += " LIMIT :limit OFFSET :offset"
 
+    # 🔥 SINGLE QUERY EXECUTION
     with engine.connect() as conn:
         result = conn.execute(text(query), params)
         rows = [dict(r._mapping) for r in result]
+
+    # 🔥 TRANSLATE OUTPUT
+    if lang != "en":
+        for r in rows:
+            if r.get("commodity"):
+                r["commodity"] = translate_text(r["commodity"], lang)
+            if r.get("market"):
+                r["market"] = translate_text(r["market"], lang)
+            if r.get("district"):
+                r["district"] = translate_text(r["district"], lang)
 
     return rows
 #----------------------------------
