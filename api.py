@@ -130,6 +130,7 @@ class NDVIRequest(BaseModel):
     lon: float
     boundary: list | None = None
     user_id: str | None = None
+    lang: str = "en"
 
 
 class IrrigationInput(BaseModel):
@@ -394,7 +395,7 @@ def satellite_analysis(req: NDVIRequest):
                 trend_type = "stable"
 
     # ✅ CORRECT PLACE
-            lang = get_user_lang(req.user_id)
+            lang = req.lang or "en"
 
             if lang != "en":
                 trend_type = translate_text(trend_type, lang)
@@ -451,47 +452,96 @@ def root_head():
 # -----------------------------------
 
 from fastapi import UploadFile, File, Form
-from PIL import Image
-import numpy as np
-import io
+import json
+
+# 🔥 PROMPT BUILDER (NOT API)
+def build_prompt(crop, lang):
+    if lang == "bn":
+        return f"""
+তুমি একজন কৃষি বিশেষজ্ঞ।
+
+এই {crop} ফসলের পাতার ছবি বিশ্লেষণ করো।
+
+শুধুমাত্র JSON ফরম্যাটে উত্তর দাও:
+{{
+  "disease": "...",
+  "advice": "..."
+}}
+
+নিয়ম:
+- সম্পূর্ণ বাংলা ভাষায় লিখবে
+- সহজ কৃষক-বান্ধব ভাষা ব্যবহার করবে
+- সংক্ষিপ্ত পরামর্শ দেবে
+- কোনো ইংরেজি ব্যবহার করবে না
+- এই সমস্যা সমাধানের জন্য কোন কোন স্যার বা কীটনাশক ব্যবহার করাইতে পারে সেটা বল
+"""
+    else:
+        return f"""
+You are an agriculture expert.
+
+Analyze this {crop} leaf image.
+
+Please tell me which pesticide can be used to solve this problem.
+
+Return ONLY JSON:
+{{
+  "disease": "...",
+  "advice": "..."
+}}
+"""
 
 
+# 🔥 AI CALL
+async def analyze_image(image_bytes, crop, lang):
+    prompt = build_prompt(crop, lang)
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3,
+    )
+
+    text = response.choices[0].message.content
+
+    return json.loads(text)
+
+
+# 🔥 MAIN API
 @app.post("/predict-disease")
 async def predict_disease(
     crop: str = Form(...),
     user_id: str = Form(...),
     file: UploadFile = File(...),
-    
+    lang: str = Form("en")
 ):
+    print("LANG RECEIVED:", lang)
 
     try:
-
         contents = await file.read()
 
-        print("Uploaded image size:", len(contents))   # ✅ INSIDE try
+        # ✅ PASS LANG HERE
+        result = await analyze_image(contents, crop, lang)
 
-        result = await analyze_image(contents, crop)
-
-        
-        lang = get_user_lang(user_id)
-
-        advice = result.get("advice")
-
-        advice = t(advice, lang)
+        disease = result.get("disease", "")
+        advice = result.get("advice", "")
 
         return {
             "crop": crop,
-            "disease": result.get("disease"),
+            "disease": disease,
             "confidence": result.get("confidence"),
             "advice": advice
         }
 
     except Exception as e:
+        print(e)
 
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+        return {
+            "disease": "অজানা" if lang == "bn" else "Unknown",
+            "advice": "সার্ভার সমস্যা" if lang == "bn" else "Server error"
+        }
+    
 
 from fastapi import Query
 from sqlalchemy import create_engine, text
