@@ -451,14 +451,16 @@ def root_head():
 # CROP DISEASE
 # -----------------------------------
 
-from fastapi import UploadFile, File, Form
-import json
+from fastapi import FastAPI, UploadFile, File, Form
+import json, os, base64
 from openai import OpenAI
 
+app = FastAPI()
 
-client = OpenAI(api_key="OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 🔥 PROMPT BUILDER (NOT API)
+
+# 🔥 PROMPT
 def build_prompt(crop, lang):
     if lang == "bn":
         return f"""
@@ -475,9 +477,7 @@ def build_prompt(crop, lang):
 নিয়ম:
 - সম্পূর্ণ বাংলা ভাষায় লিখবে
 - সহজ কৃষক-বান্ধব ভাষা ব্যবহার করবে
-- সংক্ষিপ্ত পরামর্শ দেবে
-- কোনো ইংরেজি ব্যবহার করবে না
-- এই সমস্যা সমাধানের জন্য কোন কোন স্যার বা কীটনাশক ব্যবহার করাইতে পারে সেটা বল
+- কীটনাশক বা সমাধান বলবে
 """
     else:
         return f"""
@@ -485,7 +485,7 @@ You are an agriculture expert.
 
 Analyze this {crop} leaf image.
 
-Please tell me which pesticide can be used to solve this problem.
+Give pesticide solution.
 
 Return ONLY JSON:
 {{
@@ -494,35 +494,43 @@ Return ONLY JSON:
 }}
 """
 
-import base64
 
-img_b64 = base64.b64encode(image_bytes).decode("utf-8")
 # 🔥 AI CALL
 def analyze_image(image_bytes, crop, lang):
     prompt = build_prompt(crop, lang)
 
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
     response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": f"data:image/jpeg;base64,{img_b64}"
-                }
-            ],
-        }
-    ],
-)
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": f"data:image/jpeg;base64,{img_b64}"
+                    }
+                ],
+            }
+        ],
+    )
 
     text = response.choices[0].message.content
 
-    return json.loads(text)
+    print("GPT RAW:", text)  # 🔥 DEBUG
+
+    try:
+        return json.loads(text)
+    except:
+        return {
+            "disease": text[:50],
+            "advice": text
+        }
 
 
-# 🔥 MAIN API
+# 🔥 API
 @app.post("/predict-disease")
 async def predict_disease(
     crop: str = Form(...),
@@ -535,21 +543,16 @@ async def predict_disease(
     try:
         contents = await file.read()
 
-        # ✅ PASS LANG HERE
         result = analyze_image(contents, crop, lang)
-
-        disease = result.get("disease", "")
-        advice = result.get("advice", "")
 
         return {
             "crop": crop,
-            "disease": disease,
-            "confidence": result.get("confidence"),
-            "advice": advice
+            "disease": result.get("disease", ""),
+            "advice": result.get("advice", "")
         }
 
     except Exception as e:
-        print(e)
+        print("ERROR:", e)
 
         return {
             "disease": "অজানা" if lang == "bn" else "Unknown",
