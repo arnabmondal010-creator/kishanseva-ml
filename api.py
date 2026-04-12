@@ -502,20 +502,22 @@ def analyze_image(image_bytes, crop, lang):
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": f"data:image/jpeg;base64,{img_b64}"
+    model="gpt-4o-mini",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{img_b64}"
                     }
-                ],
-            }
-        ],
-    )
+                }
+            ],
+        }
+    ],
+)
 
     text = response.choices[0].message.content
 
