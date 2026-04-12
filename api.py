@@ -453,6 +453,10 @@ def root_head():
 
 from fastapi import UploadFile, File, Form
 import json
+from openai import OpenAI
+
+
+client = OpenAI(api_key="OPENAI_API_KEY")
 
 # 🔥 PROMPT BUILDER (NOT API)
 def build_prompt(crop, lang):
@@ -490,18 +494,28 @@ Return ONLY JSON:
 }}
 """
 
+import base64
 
+img_b64 = base64.b64encode(image_bytes).decode("utf-8")
 # 🔥 AI CALL
-async def analyze_image(image_bytes, crop, lang):
+def analyze_image(image_bytes, crop, lang):
     prompt = build_prompt(crop, lang)
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3,
-    )
+    model="gpt-4o-mini",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": f"data:image/jpeg;base64,{img_b64}"
+                }
+            ],
+        }
+    ],
+)
 
     text = response.choices[0].message.content
 
@@ -522,7 +536,7 @@ async def predict_disease(
         contents = await file.read()
 
         # ✅ PASS LANG HERE
-        result = await analyze_image(contents, crop, lang)
+        result = analyze_image(contents, crop, lang)
 
         disease = result.get("disease", "")
         advice = result.get("advice", "")
