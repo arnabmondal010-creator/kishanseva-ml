@@ -22,13 +22,16 @@ from deep_translator import GoogleTranslator
 # 🔥 GLOBAL CACHE
 translation_cache = {}
 
+from deep_translator import GoogleTranslator
+
 def translate_text(text, lang="bn"):
     if not text:
         return text
 
-    # 🔥 normalize (important)
+    # 🔥 NORMALIZE (CRITICAL)
     key = f"{text.lower().strip()}_{lang}"
 
+    # 🔥 CACHE HIT
     if key in translation_cache:
         return translation_cache[key]
 
@@ -38,7 +41,9 @@ def translate_text(text, lang="bn"):
             target=lang
         ).translate(text)
 
+        # 🔥 SAVE CACHE
         translation_cache[key] = translated
+
         return translated
 
     except Exception as e:
