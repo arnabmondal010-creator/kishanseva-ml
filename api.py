@@ -18,6 +18,10 @@ from functools import lru_cache
 import time
 from firebase_admin import auth
 from deep_translator import GoogleTranslator
+from datetime import datetime
+
+def get_alert_index():
+    return datetime.utcnow().hour % 10
 
 # 🔥 GLOBAL CACHE
 translation_cache = {}
@@ -1053,6 +1057,10 @@ def smart_alerts(data: dict):
             continue
 
         try:
+            
+
+            # ================= TIME FILTER =================
+            hour = datetime.utcnow().hour
 
             # ================= FETCH WEATHER =================
             key = os.getenv("OPENWEATHER_API_KEY")
@@ -1067,6 +1075,31 @@ def smart_alerts(data: dict):
             forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
 
             forecast = requests.get(forecast_url, timeout=5).json()
+            hour = datetime.utcnow().hour
+
+            if 6 <= hour < 12:
+                alerts = [a for a in alerts if (
+                    "Weather" in a[0] or "Crop" in a[0] or
+                    "আবহাওয়া" in a[0] or "ফসল" in a[0]
+                )]
+
+            elif 12 <= hour < 18:
+                alerts = [a for a in alerts if (
+                    "Irrigation" in a[0] or "Yield" in a[0] or
+                    "সেচ" in a[0] or "ফলন" in a[0]
+                )]
+
+            elif 18 <= hour < 21:
+                alerts = [a for a in alerts if (
+                    "Market" in a[0] or "Diary" in a[0] or "News" in a[0] or
+                    "বাজার" in a[0] or "ডায়েরি" in a[0] or "সংবাদ" in a[0]
+                )]
+
+            else:
+                alerts = [a for a in alerts if (
+                    "Tomorrow" in a[0] or "High temp" in a[0] or
+                    "আগামীকাল" in a[0] or "তাপমাত্রা" in a[0]
+                )]
 
             rain_soon = False
 
@@ -1079,6 +1112,15 @@ def smart_alerts(data: dict):
 
             # ================= NDVI =================
             ndvi = get_ndvi(lat, lon)
+            alerts = generate_notifications(
+            user_id,
+            lang,
+            weather,
+            temp,
+            humidity,
+            ndvi,
+            news_list
+            )
 
             # ================= LOAD PREVIOUS =================
             user_ref = db.collection("alerts_state").document(token)
@@ -1095,34 +1137,21 @@ def smart_alerts(data: dict):
                 if now - last_time < timedelta(minutes=90):
                     print("⛔ Cooldown active → skip user")
                     continue
+                
 
-            alerts = generate_notifications(
-            user_id,
-            lang,
-            weather,
-            temp,
-            humidity,
-            ndvi,
-            news_list
-            )
+            
 
-            # =====================================================
-            # 📊 FALLBACK (ALWAYS SEND SOMETHING)
-            # =====================================================
+        
 
-            if not alerts:
-                alerts.append((
-                    t("Farm Summary", lang),
-                    t("NDVI", lang) + f": {ndvi}, " +
-                    t("Temp", lang) + f": {temp}, " +
-                    t("Weather", lang) + f": {weather}"
-                ))
+            
 
             # =====================================================
             # 🔔 SEND
             # =====================================================
 
-            for title, body in alerts:
+            if alerts:
+                idx = datetime.utcnow().hour % len(alerts)
+                title, body = alerts[idx]
 
                 message = messaging.Message(
                     notification=messaging.Notification(
