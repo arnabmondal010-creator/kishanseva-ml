@@ -904,6 +904,127 @@ def get_users():
 
     return data
 
+def generate_notifications(user_id, lang, weather, temp, humidity, ndvi, news_list):
+
+    notes = []
+
+    def t_en_bn(en, bn):
+        return bn if lang == "bn" else en
+
+    # ================= 1 NDVI =================
+    if ndvi is not None:
+        if ndvi < 0.3:
+            notes.append((
+                t_en_bn("🚨 Crop Critical", "🚨 ফসল ঝুঁকিপূর্ণ"),
+                t_en_bn(f"NDVI low ({ndvi})", f"NDVI কম ({ndvi})")
+            ))
+        elif ndvi < 0.5:
+            notes.append((
+                t_en_bn("⚠️ Crop Moderate", "⚠️ মাঝারি গুণমানের ফসল"),
+                t_en_bn(f"NDVI moderate ({ndvi})", f"NDVI মাঝারি ({ndvi})")
+            ))
+        else:
+            notes.append((
+                t_en_bn("✅ Healthy Crop", "✅ ভালো ফসল"),
+                t_en_bn(f"NDVI good ({ndvi})", f"NDVI ভালো ({ndvi})")
+            ))
+
+    # ================= 2 IRRIGATION =================
+    if temp and temp > 32:
+        notes.append((
+            t_en_bn("💧 Irrigation Needed", "💧 সেচ প্রয়োজন"),
+            t_en_bn("High temperature stress", "উচ্চ তাপমাত্রায় চাপ")
+        ))
+
+    # ================= 3 YIELD =================
+    if ndvi:
+        if ndvi > 0.6:
+            notes.append((
+                t_en_bn("📈 High Yield Expected", "📈 ভালো ফলনের সম্ভাবনা"),
+                t_en_bn("Crop performing well", "ফসল ভালো অবস্থায় আছে")
+            ))
+        else:
+            notes.append((
+                t_en_bn("📉 Yield Risk", "📉 ফলনের ঝুঁকি"),
+                t_en_bn("Improve management", "পরিচর্যা উন্নত করুন")
+            ))
+
+    # ================= 4 WEATHER TODAY =================
+    notes.append((
+        t_en_bn("🌤 Weather Today", "🌤 আজকের আবহাওয়া"),
+        t_en_bn(f"{weather}, {temp}°C", f"{weather}, {temp}°C")
+    ))
+
+    # ================= 5–6 TOMORROW =================
+    notes.append((
+        t_en_bn("🌧 Tomorrow Alert", "🌧 আগামীকালের সতর্কতা"),
+        t_en_bn("Rain expected, avoid irrigation", "বৃষ্টি হতে পারে, সেচ বন্ধ রাখুন")
+    ))
+
+    notes.append((
+        t_en_bn("🌡 High temp tomorrow", "🌡 আগামীকাল তাপমাত্রা বেশি থাকার সম্ভাবনা আছে"),
+        t_en_bn("Try to irrigate more", "বেশি জলসেচ করুন")
+    ))
+
+    # ================= 7 DIARY BASED =================
+    try:
+        diary = db.collection("field_diary").document(user_id).get().to_dict()
+        if diary:
+            last = diary.get("latest", {})
+
+            if last.get("irrigationCount", 0) < 1:
+                notes.append((
+                    t_en_bn("💧 Low Irrigation", "💧 সেচের পরিমাণ কম"),
+                    t_en_bn("Increase watering", "সেচ বাড়ান")
+                ))
+
+            if last.get("fertilizerKg", 0) < 20:
+                notes.append((
+                    t_en_bn("🌱 Low Fertilizer", "🌱 সারের অভাব দেখা যাচ্ছে"),
+                    t_en_bn("Apply nutrients", "সার প্রয়োগ করুন")
+                ))
+    except:
+        pass
+
+    # ================= 8 MARKET =================
+    try:
+        res = requests.get("https://kishanseva-ai.onrender.com/market-prices?limit=1").json()
+        if res:
+            p = res[0]
+            notes.append((
+                t_en_bn("💰 Market Price", "💰 বাজার মূল্য"),
+                t_en_bn(
+                    f"{p['commodity']} ₹{p['price']}",
+                    f"{p['commodity']} ₹{p['price']}"
+                )
+            ))
+    except:
+        pass
+
+    # ================= 9 NEWS =================
+    try:
+        
+        # ================= NEWS (FROM APP) =================
+        if news_list:
+            for n in news_list[:2]:
+                notes.append((
+                    "📰 Agri News" if lang == "en" else "📰 কৃষি সংবাদ",
+                    n
+                ))
+    except:
+        pass
+
+    # ================= 10 GENERAL =================
+    notes.append((
+        t_en_bn("🌱 Farming Tip", "🌱 কৃষি পরামর্শ"),
+        t_en_bn(
+            "Monitor crop regularly",
+            "নিয়মিত ফসল পর্যবেক্ষণ করুন"
+        )
+    ))
+
+    return notes[:10]
+
 
 # ================= SMART ALERT =================
 
@@ -911,9 +1032,10 @@ from datetime import datetime, timedelta   # 🔥 ADD timedelta
 
 def t(text, lang):
     return translate_text(text, lang) if lang != "en" else text
-@app.get("/smart-alerts")
 
-def smart_alerts():
+@app.post("/smart-alerts")
+def smart_alerts(data: dict):
+    news_list = data.get("news", [])
 
     users = get_users()
     sent = 0
@@ -970,154 +1092,19 @@ def smart_alerts():
             if last_sent:
                 last_time = datetime.fromisoformat(last_sent)
 
-                if now - last_time < timedelta(hours=6):
+                if now - last_time < timedelta(minutes=90):
                     print("⛔ Cooldown active → skip user")
                     continue
 
-            alerts = []
-
-            # =====================================================
-            # 🌱 NDVI INTELLIGENCE
-            # =====================================================
-
-            if ndvi is not None:
-
-                if prev_ndvi is not None:
-                    change = ndvi - prev_ndvi
-
-                    if change < -0.1:
-                        alerts.append((
-                            t("🚨 Crop Declining", lang),
-                            t("NDVI dropped", lang) + f" {prev_ndvi:.2f} → {ndvi:.2f}"
-                        ))
-
-                    elif change > 0.1:
-                        alerts.append((
-                            t("🌱 Crop Improving", lang),
-                            t("NDVI improved", lang) + f" {prev_ndvi:.2f} → {ndvi:.2f}"
-                        ))
-
-    # 🔹 STATUS (ONLY IF NO CHANGE ALERT)
-                if not alerts:
-                    if ndvi < 0.3:
-                        alerts.append((
-                            t("🚨 Critical Crop", lang),
-                            t("Very low NDVI", lang) + f" ({ndvi:.2f})"
-                        ))
-
-                    elif ndvi < 0.5:
-                        alerts.append((
-                            t("⚠️ Moderate Crop", lang),
-                            t("NDVI moderate", lang) + f" ({ndvi:.2f})"
-                        ))
-
-                    else:
-                        alerts.append((
-                            t("✅ Healthy Crop", lang),
-                            t("NDVI good", lang) + f" ({ndvi:.2f})"
-                        ))
-
-            # =====================================================
-            # 🌦 WEATHER INTELLIGENCE
-            # =====================================================
-
-            if weather:
-
-                if "rain" in weather:
-                    alerts.append((
-                        t("🌧 Rain Incoming", lang),
-                        t("Rain expected. Avoid irrigation", lang)
-                    ))
-
-                elif "cloud" in weather:
-                    alerts.append((
-                        t("☁️ Cloudy", lang),
-                        t("Low sunlight may affect growth", lang)
-                    ))
-
-                else:
-                    alerts.append((
-                        t("☀️ Clear Weather", lang),
-                        t("Good farming conditions", lang)
-                    ))
-
-# 🔥 ONLY ADD TEMP ALERT IF NO WEATHER ALERT
-            if temp is not None and not alerts:
-
-                if temp > 35:
-                    alerts.append((
-                        t("🔥 High Temperature", lang),
-                        t("Crop stress risk", lang) + f" ({temp}°C)"
-                    ))
-
-                elif temp < 15:
-                    alerts.append((
-                        t("❄️ Low Temperature", lang),
-                        t("Slow crop growth", lang) + f" ({temp}°C)"
-                    ))
-
-            # 🔥 RAIN SOON (SEPARATE SIGNAL)
-            if rain_soon and not alerts:
-                alerts.append((
-                    t("🌧 Rain Soon", lang),
-                    t("Rain expected in next few hours", lang)
-                ))
-
-            # =====================================================
-            # 💧 IRRIGATION INTELLIGENCE (CORE FEATURE)
-            # =====================================================
-
-            irrigation_score = 0
-
-            if ndvi is not None:
-                if ndvi < 0.3:
-                    irrigation_score += 2
-                elif ndvi < 0.5:
-                    irrigation_score += 1
-
-            if temp is not None and temp > 32:
-                irrigation_score += 2
-
-            if humidity is not None and humidity < 40:
-                irrigation_score += 1
-
-            if weather and "rain" in weather:
-                irrigation_score -= 3
-
-# 🔥 ONLY ADD IF NO HIGHER PRIORITY ALERT EXISTS
-            if not alerts:
-
-                if irrigation_score >= 3:
-                    alerts.append((
-                        t("💧 Irrigation Needed", lang),
-                        t("High water stress detected. Irrigate now", lang)
-                    ))
-
-                elif irrigation_score == 2:
-                    alerts.append((
-                        t("💧 Irrigation Soon", lang),
-                        t("Moderate stress. Plan irrigation", lang)
-                    ))
-
-                elif irrigation_score <= 0:
-                    alerts.append((
-                        t("🚫 No Irrigation Needed", lang),
-                        t("Soil moisture likely sufficient", lang)
-                    ))
-            # ================= PRIORITY =================
-            priority = {
-                "🚨": 1,
-                "🔥": 2,
-                "💧": 3,
-                "🌧": 4,
-                "⚠️": 5,
-                "☀️": 6,
-                "✅": 7,
-            }
-
-            alerts.sort(key=lambda x: priority.get(x[0][0], 10))
-
-            alerts = alerts[:1]
+            alerts = generate_notifications(
+            user_id,
+            lang,
+            weather,
+            temp,
+            humidity,
+            ndvi,
+            news_list
+            )
 
             # =====================================================
             # 📊 FALLBACK (ALWAYS SEND SOMETHING)
