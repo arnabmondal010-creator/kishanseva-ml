@@ -485,9 +485,7 @@ def root_head():
 
 from fastapi import FastAPI, UploadFile, File, Form
 import json, os, base64
-from openai import OpenAI
-
-app = FastAPI()
+from openai import OpenAIs
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
