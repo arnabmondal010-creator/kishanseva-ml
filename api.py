@@ -196,38 +196,65 @@ def predict_yield(data: YieldInput):
 
     user_id = data.user_id or "guest_user"
 
-    df = pd.DataFrame([{
-        "soil_type": data.soil_type,
-        "fertilizer_type": data.fertilizer_type,
-        "crop_stage": data.crop_stage,
-        "stress_level": data.stress_level,
-        "fertilizer_kg": data.fertilizer_kg,
-        "irrigation_count": data.irrigation_count,
-        "pesticide_sprays": data.pesticide_sprays,
-        "avg_temp": data.avg_temp,
-        "rainfall": data.rainfall,
-        "humidity": data.humidity,
-        "wind_speed": data.wind_speed,
-        "ndvi": data.ndvi
-    }])
+    # ✅ SAFE VALUES
+    ndvi = data.ndvi if data.ndvi is not None else 0.45
+    humidity = data.humidity if data.humidity is not None else 50
+    rainfall = data.rainfall if data.rainfall is not None else 0
+    temp = data.avg_temp if data.avg_temp is not None else 25
 
-    y = float(yield_model.predict(df)[0])
+    try:
+        df = pd.DataFrame([{
+            "soil_type": (data.soil_type or "loamy").lower(),
+            "fertilizer_type": (data.fertilizer_type or "urea").lower(),
+            "crop_stage": (data.crop_stage or "vegetative").lower(),
+            "stress_level": (data.stress_level or "low").lower(),
+            "fertilizer_kg": data.fertilizer_kg or 0,
+            "irrigation_count": data.irrigation_count or 0,
+            "pesticide_sprays": data.pesticide_sprays or 0,
+            "avg_temp": temp,
+            "rainfall": rainfall,
+            "humidity": humidity,
+            "wind_speed": data.wind_speed or 2,
+            "ndvi": ndvi
+        }])
 
-    confidence = 70
+        # 🔥 CRITICAL: FIX COLUMN ORDER
+        df = df[[
+            "soil_type",
+            "fertilizer_type",
+            "crop_stage",
+            "stress_level",
+            "fertilizer_kg",
+            "irrigation_count",
+            "pesticide_sprays",
+            "avg_temp",
+            "rainfall",
+            "humidity",
+            "wind_speed",
+            "ndvi"
+        ]]
 
-    if data.ndvi > 0.6:
-        confidence += 10
+        # ✅ PREDICT
+        y = float(yield_model.predict(df)[0])
 
-    if data.humidity > 60:
-        confidence += 5
+        # 🔥 REAL CONFIDENCE (Random Forest ONLY)
+        preds = [t.predict(df)[0] for t in yield_model.estimators_]
+        std = float(pd.Series(preds).std())
 
-    confidence = min(confidence, 95)
+        confidence = 100 - (std * 50)
+        confidence = max(40, min(95, confidence))
 
-    add_yield_record(user_id, data.field_id, y)
+    except Exception as e:
+        return {"error": str(e)}
+
+    # ✅ SAVE ONLY VALID
+    if y > 0:
+        add_yield_record(user_id, data.field_id, y)
 
     return {
         "predicted_yield": round(y, 2),
-        "confidence": confidence,
+        "confidence": round(confidence, 1),
+        "uncertainty": round(std, 3),
         "history": get_history(user_id, data.field_id)
     }
 
