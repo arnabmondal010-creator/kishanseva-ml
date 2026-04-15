@@ -1045,48 +1045,53 @@ def smart_alerts(data: dict):
     sent = 0
 
     for u in users:
-
-        user_id = u.get("id")   # 🔥 REQUIRED
-        lang = get_user_lang(user_id)
-
-        lat = u.get("lat")
-        lon = u.get("lon")
-        token = u.get("token")
-
-        if not token or lat is None or lon is None:
-            continue
-
         try:
+            user_id = u.get("id")
+            lang = get_user_lang(user_id)
+
+            lat = u.get("lat")
+            lon = u.get("lon")
+            token = u.get("token")
+
+            # 🔥 HARD FILTER
+            if not token or lat is None or lon is None:
+                continue
+
+            hour = datetime.utcnow().hour
+
+            # ================= WEATHER =================
+            key = os.getenv("OPENWEATHER_API_KEY")
+
+            weather = ""
+            temp = None
+            humidity = None
+
+            try:
+                weather_res = requests.get(
+                    f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric",
+                    timeout=5
+                ).json()
+
+                weather = weather_res.get("weather", [{}])[0].get("main", "").lower()
+                temp = weather_res.get("main", {}).get("temp")
+                humidity = weather_res.get("main", {}).get("humidity")
+
+            except Exception as e:
+                print("Weather error:", e)
 
             # ================= NDVI =================
             ndvi = get_ndvi(lat, lon)
+
+            # ================= ALERTS =================
             alerts = generate_notifications(
-            user_id,
-            lang,
-            weather,
-            temp,
-            humidity,
-            ndvi,
-            news_list
+                user_id, lang, weather, temp, humidity, ndvi, news_list
             )
-            
-            # ================= TIME FILTER =================
-            hour = datetime.utcnow().hour
 
-            # ================= FETCH WEATHER =================
-            key = os.getenv("OPENWEATHER_API_KEY")
-            url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
-
-            weather_res = requests.get(url, timeout=5).json()
-
-            weather = weather_res.get("weather", [{}])[0].get("main", "").lower()
-            temp = weather_res.get("main", {}).get("temp")
-            humidity = weather_res.get("main", {}).get("humidity")
-            # ================= FORECAST (RAIN PREDICTION) =================
+            # ================= FORECAST =================
             forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
-
             forecast = requests.get(forecast_url, timeout=5).json()
 
+            # ================= TIME FILTER =================
             if 6 <= hour < 12:
                 alerts = [a for a in alerts if (
                     "Weather" in a[0] or "Crop" in a[0] or
@@ -1101,8 +1106,8 @@ def smart_alerts(data: dict):
 
             elif 18 <= hour < 21:
                 alerts = [a for a in alerts if (
-                    "Market" in a[0] or "Diary" in a[0] or "News" in a[0] or
-                    "বাজার" in a[0] or "ডায়েরি" in a[0] or "সংবাদ" in a[0]
+                    "Market" in a[0] or "News" in a[0] or
+                    "বাজার" in a[0] or "সংবাদ" in a[0]
                 )]
 
             else:
@@ -1111,60 +1116,42 @@ def smart_alerts(data: dict):
                     "আগামীকাল" in a[0] or "তাপমাত্রা" in a[0]
                 )]
 
-
+            # ================= FALLBACK =================
             if not alerts:
                 alerts = generate_notifications(
-                user_id,
-                lang,
-                weather,
-                temp,
-                humidity,
-                ndvi,
-                news_list
-            )
-                
+                    user_id, lang, weather, temp, humidity, ndvi, news_list
+                )
+
+            # ================= RAIN CHECK =================
             rain_soon = False
-
-            for item in forecast.get("list", [])[:3]:  # next ~3 hours
+            for item in forecast.get("list", [])[:3]:
                 cond = item.get("weather", [{}])[0].get("main", "").lower()
-
                 if "rain" in cond:
                     rain_soon = True
                     break
 
-            
+            if rain_soon:
+                alerts.insert(0, (
+                    "🌧 Rain Incoming" if lang == "en" else "🌧 বৃষ্টি আসছে",
+                    "Avoid irrigation now" if lang == "en" else "এখন সেচ দেবেন না"
+                ))
 
-            
-
-            # ================= LOAD PREVIOUS =================
+            # ================= COOLDOWN =================
             user_ref = db.collection("alerts_state").document(token)
             prev = user_ref.get().to_dict() or {}
 
-            prev_ndvi = prev.get("ndvi")
-            # ================= COOLDOWN =================
             now = datetime.utcnow()
             last_sent = prev.get("last_sent")
 
             if last_sent:
                 last_time = datetime.fromisoformat(last_sent)
-
                 if now - last_time < timedelta(minutes=90):
                     print("⛔ Cooldown active → skip user")
                     continue
-                
 
-            
-
-        
-
-            
-
-            # =====================================================
-            # 🔔 SEND
-            # =====================================================
-
+            # ================= SEND =================
             if alerts:
-                idx = datetime.utcnow().hour % len(alerts)
+                idx = now.hour % len(alerts)
                 title, body = alerts[idx]
 
                 message = messaging.Message(
@@ -1178,10 +1165,7 @@ def smart_alerts(data: dict):
                 messaging.send(message)
                 sent += 1
 
-            # =====================================================
-            # 💾 SAVE STATE
-            # =====================================================
-
+            # ================= SAVE =================
             user_ref.set({
                 "ndvi": ndvi,
                 "last_sent": now.isoformat()
@@ -1189,6 +1173,7 @@ def smart_alerts(data: dict):
 
         except Exception as e:
             print("❌ Error:", e)
+            continue
 
     return {"sent": sent}
 
