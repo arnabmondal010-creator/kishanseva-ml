@@ -20,6 +20,7 @@ from firebase_admin import auth
 from deep_translator import GoogleTranslator
 from datetime import datetime
 
+
 def get_alert_index():
     return datetime.utcnow().hour % 10
 
@@ -1030,6 +1031,7 @@ def generate_notifications(user_id, lang, weather, temp, humidity, ndvi, news_li
     return notes[:10]
 
 
+
 # ================= SMART ALERT =================
 
 from datetime import datetime, timedelta   # 🔥 ADD timedelta
@@ -1043,6 +1045,8 @@ def smart_alerts(data: dict):
 
     users = get_users()
     sent = 0
+    print("TOTAL USERS:", len(users))
+    print("USER:", user_id, lat, lon, token)
 
     for u in users:
         try:
