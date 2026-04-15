@@ -1255,3 +1255,7 @@ def translate_api(data: dict):
     translated = translate_text(text, lang)
 
     return {"translated": translated}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
