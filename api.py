@@ -1084,7 +1084,10 @@ def smart_alerts(data: dict):
                 print("Weather error:", e)
 
             # ================= NDVI =================
-            ndvi = get_ndvi(lat, lon)
+            try:
+                ndvi = get_ndvi(lat, lon)
+            except:
+                ndvi = None
 
             # ================= ALERTS =================
             alerts = generate_notifications(
