@@ -1057,8 +1057,19 @@ def smart_alerts(data: dict):
             continue
 
         try:
-            
 
+            # ================= NDVI =================
+            ndvi = get_ndvi(lat, lon)
+            alerts = generate_notifications(
+            user_id,
+            lang,
+            weather,
+            temp,
+            humidity,
+            ndvi,
+            news_list
+            )
+            
             # ================= TIME FILTER =================
             hour = datetime.utcnow().hour
 
@@ -1075,7 +1086,6 @@ def smart_alerts(data: dict):
             forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
 
             forecast = requests.get(forecast_url, timeout=5).json()
-            hour = datetime.utcnow().hour
 
             if 6 <= hour < 12:
                 alerts = [a for a in alerts if (
@@ -1101,6 +1111,18 @@ def smart_alerts(data: dict):
                     "আগামীকাল" in a[0] or "তাপমাত্রা" in a[0]
                 )]
 
+
+            if not alerts:
+                alerts = generate_notifications(
+                user_id,
+                lang,
+                weather,
+                temp,
+                humidity,
+                ndvi,
+                news_list
+            )
+                
             rain_soon = False
 
             for item in forecast.get("list", [])[:3]:  # next ~3 hours
@@ -1110,17 +1132,9 @@ def smart_alerts(data: dict):
                     rain_soon = True
                     break
 
-            # ================= NDVI =================
-            ndvi = get_ndvi(lat, lon)
-            alerts = generate_notifications(
-            user_id,
-            lang,
-            weather,
-            temp,
-            humidity,
-            ndvi,
-            news_list
-            )
+            
+
+            
 
             # ================= LOAD PREVIOUS =================
             user_ref = db.collection("alerts_state").document(token)
