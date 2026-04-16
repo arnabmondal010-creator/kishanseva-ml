@@ -223,7 +223,7 @@ def predict_yield(data: YieldInput):
             "soil_type",
             "fertilizer_type",
             "crop_stage",
-            "stress_level",s
+            "stress_level",
             "fertilizer_kg",
             "irrigation_count",
             "pesticide_sprays",

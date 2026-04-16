@@ -96,6 +96,7 @@ def clean_data(data):
     subset=["commodity", "district", "market", "date"],
     keep="last"
     )
+
     print("Cleaned:", len(df))
     return df
 
@@ -108,16 +109,16 @@ def save_to_db(df):
 
     records = df.to_dict(orient="records")
 
-    values = list({
-    (
-        r["commodity"],
-        r["district"],
-        r["market"],
-        r["price"],
-        r["date"]
-    )
-    for r in records
-    })
+    values = [
+        (
+            r["commodity"],
+            r["district"],
+            r["market"],
+            r["price"],
+            r["date"]
+        )
+        for r in records
+    ]
 
     query = """
     INSERT INTO market_prices
