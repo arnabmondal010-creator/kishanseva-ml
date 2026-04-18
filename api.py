@@ -948,17 +948,17 @@ def generate_notifications(user_id, lang, weather, temp, humidity, ndvi, news_li
         if ndvi < 0.3:
             notes.append((
                 t_en_bn("🚨 Crop Critical", "🚨 ফসল ঝুঁকিপূর্ণ"),
-                t_en_bn(f"NDVI low ({ndvi})", f"NDVI কম ({ndvi})")
+                t_en_bn(f"Field health low ({ndvi})", f"জমির অবস্থা খারাপ ({ndvi})")
             ))
         elif ndvi < 0.5:
             notes.append((
                 t_en_bn("⚠️ Crop Moderate", "⚠️ মাঝারি গুণমানের ফসল"),
-                t_en_bn(f"NDVI moderate ({ndvi})", f"NDVI মাঝারি ({ndvi})")
+                t_en_bn(f"Field health moderate ({ndvi})", f"জমির অবস্থা মাঝারি ({ndvi})")
             ))
         else:
             notes.append((
                 t_en_bn("✅ Healthy Crop", "✅ ভালো ফসল"),
-                t_en_bn(f"NDVI good ({ndvi})", f"NDVI ভালো ({ndvi})")
+                t_en_bn(f"Field health good ({ndvi})", f"জমির অবস্থা ভালো ({ndvi})")
             ))
 
     # ================= 2 IRRIGATION =================
