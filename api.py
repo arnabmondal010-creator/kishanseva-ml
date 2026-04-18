@@ -1073,11 +1073,14 @@ def smart_alerts(data: dict):
     users = get_users()
     sent = 0
     print("TOTAL USERS:", len(users))
-    print("USER:", user_id, lat, lon, token)
+    #print("USER:", user_id, lat, lon, token)
 
     for u in users:
         try:
             user_id = u.get("id")
+            if not user_id:
+                print("❌ Missing user_id → skip")
+                continue
             lang = get_user_lang(user_id)
 
             lat = u.get("lat")
@@ -1123,7 +1126,10 @@ def smart_alerts(data: dict):
 
             # ================= FORECAST =================
             forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
-            forecast = requests.get(forecast_url, timeout=5).json()
+            try:
+                forecast = requests.get(forecast_url, timeout=5).json()
+            except:
+                forecast = {}
 
             # ================= TIME FILTER =================
             if 6 <= hour < 12:
