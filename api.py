@@ -283,8 +283,11 @@ def satellite_analysis(req: NDVIRequest):
             coords = [
                 [float(p["lon"]), float(p["lat"])]
                 for p in boundary
-                if "lat" in p and "lon" in p
             ]
+
+# 🔥 CLOSE POLYGON
+            if coords[0] != coords[-1]:
+                coords.append(coords[0])
 
             geom = ee.Geometry.Polygon([coords])
 
@@ -326,11 +329,16 @@ def satellite_analysis(req: NDVIRequest):
         )
 
         # ================= MASK =================
-        mask = ee.Image.constant(1).clip(geom)
+        #mask = ee.Image.constant(1).clip(geom)
 
-        ndvi_img = latest_img.select("NDVI").updateMask(mask).clip(geom)
-        ndwi_img = latest_img.select("NDWI").updateMask(mask).clip(geom)
-        savi_img = latest_img.select("SAVI").updateMask(mask).clip(geom)
+        #ndvi_img = latest_img.select("NDVI").updateMask(mask).clip(geom)
+        #ndwi_img = latest_img.select("NDWI").updateMask(mask).clip(geom)
+        #savi_img = latest_img.select("SAVI").updateMask(mask).clip(geom)
+
+        ndvi_img = latest_img.select("NDVI").clip(geom).unmask(0)
+        ndvi_img = ndvi_img.focal_mean(radius=10, units="meters")
+        ndwi_img = latest_img.select("NDWI").clip(geom).unmask(0)
+        savi_img = latest_img.select("SAVI").clip(geom).unmask(0)
 
         # ================= 🔥 DYNAMIC STRETCH (SAME AS BEFORE) =================
         ndwi_stats = ndwi_img.reduceRegion(
