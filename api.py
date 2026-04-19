@@ -336,11 +336,11 @@ def satellite_analysis(req: NDVIRequest):
         #savi_img = latest_img.select("SAVI").updateMask(mask).clip(geom)
 
         ndvi_img = latest_img.select("NDVI").clip(geom).unmask(0)
-        ndvi_img = ndvi_img.focal_mean(radius=10, units="meters")
+        ndvi_img = ndvi_img.focal_mean(radius=1, units="meters")
         ndwi_img = latest_img.select("NDWI").clip(geom).unmask(0)
-        ndwi_img = ndwi_img.focal_mean(radius=10, units="meters")
+        ndwi_img = ndwi_img.focal_mean(radius=1, units="meters")
         savi_img = latest_img.select("SAVI").clip(geom).unmask(0)
-        savi_img = savi_img.focal_mean(radius=10, units="meters")
+        savi_img = savi_img.focal_mean(radius=1, units="meters")
 
         # ================= 🔥 DYNAMIC STRETCH (SAME AS BEFORE) =================
         ndwi_stats = ndwi_img.reduceRegion(
