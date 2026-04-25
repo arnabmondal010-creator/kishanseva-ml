@@ -332,7 +332,6 @@ def satellite_analysis(req: NDVIRequest):
         mask = ee.Image.constant(1).clip(geom)
 
         ndvi_img = latest_img.select("NDVI").updateMask(mask)
-        ndvi_img = ndvi_img.reproject(crs='EPSG:3857', scale=10)
         ndwi_img = latest_img.select("NDWI").updateMask(mask)
         savi_img = latest_img.select("SAVI").updateMask(mask)
         # ================= 🔥 DYNAMIC STRETCH (SAME AS BEFORE) =================
