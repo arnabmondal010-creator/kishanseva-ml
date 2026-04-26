@@ -33,7 +33,7 @@ def get_yield_prediction(ndvi, temp, humidity):
             "rainfall": 0
         }
 
-        res = requests.post(url, json=payload, timeout=5).json()
+        res = requests.post(url, json=payload, timeout=3).json()
 
         return res.get("predicted_yield")
     except:
@@ -42,7 +42,7 @@ def get_yield_prediction(ndvi, temp, humidity):
 def get_market_price():
     try:
         url = "https://kishanseva-ai.onrender.com/market-prices?limit=1"
-        res = requests.get(url, timeout=5).json()
+        res = requests.get(url, timeout=3).json()
 
         if res:
             r = res[0]
@@ -93,7 +93,7 @@ def get_irrigation(temp, humidity, ndvi):
             "infiltration": 0.5
         }
 
-        res = requests.post(url, json=payload, timeout=5).json()
+        res = requests.post(url, json=payload, timeout=3).json()
 
         return res.get("irrigation_mm")
     except:
@@ -162,7 +162,7 @@ def translate_text(text, lang="bn"):
             "q": text
         }
 
-        res = requests.get(url, params=params, timeout=5)
+        res = requests.get(url, params=params, timeout=3)
         translated = res.json()[0][0][0]
 
         translation_cache[key] = translated
@@ -352,12 +352,28 @@ def satellite_analysis(req: NDVIRequest):
                 return data
 
         boundary = req.boundary
+        # 🔥 FETCH FROM DB FIRST (CRITICAL)
+        if (not boundary or len(boundary) < 3) and req.user_id:
+            try:
+                doc = db.collection("fields").document(req.user_id).get()
+                if doc.exists:
+                    boundary = doc.to_dict().get("boundary")
+                    print("BOUNDARY FROM DB:", boundary)
+            except:
+                boundary = None
 
-        if isinstance(boundary, str):
-            boundary = json.loads(boundary)
+        try:
+            if isinstance(boundary, str):
+                boundary = json.loads(boundary)
+        except:
+            boundary = None
 
         # ================= GEOMETRY =================
-        if boundary and isinstance(boundary, list) and len(boundary) > 2:
+        if isinstance(boundary, list) and len(boundary) >= 3:
+            if req.user_id:
+                db.collection("fields").document(req.user_id).set({
+                    "boundary": boundary
+                }, merge=True)
 
             coords = [
                 [float(p["lon"]), float(p["lat"])]
@@ -371,7 +387,10 @@ def satellite_analysis(req: NDVIRequest):
             geom = ee.Geometry.Polygon([coords])
 
         else:
-            geom = ee.Geometry.Point([req.lon, req.lat]).buffer(50)
+            return {
+                "error": "Boundary missing. Cannot generate polygon heatmap."
+            }
+        print("BOUNDARY RECEIVED:", req.boundary)
 
         # ================= COLLECTION =================
         collection = (
@@ -380,6 +399,10 @@ def satellite_analysis(req: NDVIRequest):
             .filterDate("2024-01-01", "2026-12-31")  # ✅ same as before
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
         )
+        if (not boundary or len(boundary) < 3) and req.user_id:
+            doc = db.collection("fields").document(req.user_id).get()
+            if doc.exists:
+                boundary = doc.to_dict().get("boundary")
 
         if collection.size().getInfo() == 0:
             return {
@@ -1228,7 +1251,7 @@ def smart_alerts(data: dict):
             # ================= FORECAST =================
             forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
             try:
-                forecast = requests.get(forecast_url, timeout=5).json()
+                forecast = requests.get(forecast_url, timeout=3).json()
             except:
                 forecast = {}
 
