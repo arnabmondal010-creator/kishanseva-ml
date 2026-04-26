@@ -1077,7 +1077,7 @@ def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
 
 # ================= SMART ALERT =================
 
-from datetime import datetime, timedelta   # 🔥 ADD timedelta
+from datetime import datetime, timedelta
 
 def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
 
@@ -1173,7 +1173,8 @@ def smart_alerts(data: dict):
             if not token or lat is None or lon is None:
                 continue
 
-            hour = datetime.utcnow().hour
+            now = datetime.utcnow() + timedelta(hours=5, minutes=30)  # convert to IST
+            hour = now.hour
 
             # ================= WEATHER =================
             key = os.getenv("OPENWEATHER_API_KEY")
@@ -1258,8 +1259,17 @@ def smart_alerts(data: dict):
                     continue
 
             # ================= SEND =================
-            if alerts:
-                slot = datetime.utcnow().hour  # 0–23
+            if not alerts:
+                continue  # skip this user safely
+
+            slot = hour - 16  # map 16–23 → 0–7
+
+            if slot < 0 or slot > 7:
+                continue  # skip outside time window
+
+            if slot >= len(alerts):
+                slot = 0  # fallback safety
+
                 title, body = alerts[slot]
 
                 message = messaging.Message(
