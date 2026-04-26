@@ -1075,79 +1075,6 @@ def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
 
 
 
-# ================= SMART ALERT =================
-
-from datetime import datetime, timedelta
-
-def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
-
-    alerts = []
-
-    # ================= 1. CRITICAL =================
-    # 🌧 Rain timing
-    for item in forecast.get("list", [])[:8]:
-        cond = item.get("weather", [{}])[0].get("main", "").lower()
-        if "rain" in cond:
-            t = item["dt_txt"].split()[1][:5]
-            alerts.append(("🌧 Rain Alert", f"Rain expected at {t}"))
-            break
-
-    # 🚨 Crop stress
-    if ndvi and ndvi < 0.4:
-        alerts.append(("🚨 Crop Stress", "Low vegetation health detected"))
-
-    # ================= 2. PRODUCTIVE =================
-    alerts += [
-        ("💧 Irrigation Check", "Check soil moisture today"),
-        ("🌱 Fertilizer Tip", "Apply nutrients if growth slow"),
-        ("📊 NDVI Update", f"Current NDVI: {ndvi}"),
-        ("🌡 Heat Alert", "High temp may stress crops"),
-        ("🧪 Soil Health", "Test soil condition this week"),
-    ]
-
-    # ================= 3. MARKET =================
-    alerts += [
-        ("💰 Market Price", "Check latest mandi rates"),
-        ("📈 Sell Opportunity", "Prices may increase today"),
-        ("📉 Price Drop", "Hold crops if possible"),
-    ]
-
-    # ================= 4. WEATHER =================
-    alerts += [
-        ("🌤 Weather Update", f"{weather}, {temp}°C"),
-        ("🌙 Night Advisory", "Prepare for next day"),
-    ]
-
-    # ================= 5. ENGAGEMENT =================
-    alerts += [
-        ("📱 Open App", "Check your farm insights"),
-        ("📊 Weekly Trend", "See crop performance graph"),
-        ("🧠 Smart Tip", "Improve yield with AI insights"),
-        ("📰 Agri News", news_list[0] if news_list else "Latest farming news"),
-    ]
-
-    # ================= 6. YIELD =================
-    if ndvi:
-        yield_est = ndvi * 5
-        alerts.append(("🌾 Yield Forecast", f"Expected yield: {yield_est:.2f}"))
-
-    # ================= 7. FILL TO 24 =================
-    base_msgs = [
-        "Monitor crop daily",
-        "Check irrigation schedule",
-        "Review pest activity",
-        "Update farm diary",
-        "Check satellite data",
-        "Optimize fertilizer usage",
-    ]
-
-    i = 0
-    while len(alerts) < 24:
-        alerts.append(("🌱 Tip", base_msgs[i % len(base_msgs)]))
-        i += 1
-
-    return alerts[:24]
-
 @app.post("/smart-alerts")
 def smart_alerts(data: dict):
     news_list = data.get("news", [])
@@ -1202,17 +1129,17 @@ def smart_alerts(data: dict):
             except:
                 ndvi = None
 
-            # ================= ALERTS =================
-            alerts = build_24_notifications(
-                lang, weather, temp, ndvi, forecast, news_list
-            )
-
             # ================= FORECAST =================
             forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
             try:
                 forecast = requests.get(forecast_url, timeout=5).json()
             except:
                 forecast = {}
+
+            # ================= ALERTS =================
+            alerts = build_24_notifications(
+                lang, weather, temp, ndvi, forecast, news_list
+            )
 
             # ================= TIME FILTER =================
             if 6 <= hour < 12:
@@ -1241,7 +1168,7 @@ def smart_alerts(data: dict):
 
             # ================= FALLBACK =================
             if not alerts:
-                alerts = generate_notifications(
+                alerts = build_24_notifications(
                     user_id, lang, weather, temp, humidity, ndvi, news_list
                 )
 
@@ -1259,35 +1186,58 @@ def smart_alerts(data: dict):
                     continue
 
             # ================= SEND =================
+            # ================= SEND =================
             if not alerts:
-                continue  # skip this user safely
+                continue
 
-            slot = hour - 16  # map 16–23 → 0–7
+            slot = hour - 16
 
             if slot < 0 or slot > 7:
-                continue  # skip outside time window
+                continue
 
-            if slot >= len(alerts):
-                slot = 0  # fallback safety
+# 🔥 LOAD PREVIOUS STATE
+            user_ref = db.collection("alerts_state").document(token)
+            prev = user_ref.get().to_dict() or {}
 
-                title, body = alerts[slot]
+            prev_index = prev.get("last_index", -1)
 
-                message = messaging.Message(
-                    notification=messaging.Notification(
-                        title=title,
-                        body=body,
-                    ),
-                    token=token,
-                )
+            import random
 
-                messaging.send(message)
-                sent += 1
+# 🔥 ROTATION LOGIC
+            index = (prev_index + 1) % len(alerts)
 
-            # ================= SAVE =================
+# 🔥 RANDOM BOOST (30%)
+            if random.random() < 0.3:
+                index = random.randint(0, len(alerts) - 1)
+
+# 🔥 PRIORITY OVERRIDE
+            priority = [a for a in alerts if "Rain" in a[0] or "বৃষ্টি" in a[0]]
+
+            if priority:
+                title, body = priority[0]
+            else:
+                title, body = alerts[index]
+
+# 🔥 SEND
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                token=token,
+            )
+
+            messaging.send(message)
+            sent += 1
+
+# 🔥 SAVE STATE
             user_ref.set({
                 "ndvi": ndvi,
-                "last_sent": now.isoformat()
+                "last_sent": datetime.utcnow().isoformat(),
+                "last_index": index
             }, merge=True)
+
+            # ================= SAVE =================
 
         except Exception as e:
             print("❌ Error:", e)
