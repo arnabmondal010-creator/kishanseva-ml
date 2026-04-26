@@ -1256,7 +1256,7 @@ def smart_alerts(data: dict):
                 continue
 
             # 12 AM – 4 AM window
-            if hour > 4:
+            if hour < 4:
                 continue
 
 # 🔥 LOAD PREVIOUS STATE
