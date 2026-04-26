@@ -938,126 +938,140 @@ def get_users():
 
     return data
 
-def generate_notifications(user_id, lang, weather, temp, humidity, ndvi, news_list):
+def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
 
-    notes = []
+    alerts = []
 
-    def t_en_bn(en, bn):
+    def t(en, bn):
         return bn if lang == "bn" else en
 
-    # ================= 1 NDVI =================
+    # ================= 1. 🌧 RAIN TIMING =================
+    for item in forecast.get("list", [])[:8]:  # next 24h
+        cond = item.get("weather", [{}])[0].get("main", "").lower()
+
+        if "rain" in cond:
+            ts = item.get("dt_txt")
+            time_str = ts.split()[1][:5]
+
+            alerts.append((
+                t("🌧 Rain Alert", "🌧 বৃষ্টি সতর্কতা"),
+                t(f"Rain expected at {time_str}",
+                  f"{time_str} সময় বৃষ্টি হতে পারে")
+            ))
+            break
+
+    # ================= 2. 🚨 NDVI / CROP =================
     if ndvi is not None:
         if ndvi < 0.3:
-            notes.append((
-                t_en_bn("🚨 Crop Critical", "🚨 ফসল ঝুঁকিপূর্ণ"),
-                t_en_bn(f"Field health low ({ndvi})", f"জমির অবস্থা খারাপ ({ndvi})")
+            alerts.append((
+                t("🚨 Crop Critical", "🚨 ফসল ঝুঁকিপূর্ণ"),
+                t("Very low vegetation health",
+                  "ফসলের অবস্থা খুব খারাপ")
             ))
         elif ndvi < 0.5:
-            notes.append((
-                t_en_bn("⚠️ Crop Moderate", "⚠️ মাঝারি গুণমানের ফসল"),
-                t_en_bn(f"Field health moderate ({ndvi})", f"জমির অবস্থা মাঝারি ({ndvi})")
+            alerts.append((
+                t("⚠️ Crop Moderate", "⚠️ মাঝারি ফসল"),
+                t("Moderate crop condition",
+                  "ফসলের অবস্থা মাঝারি")
             ))
         else:
-            notes.append((
-                t_en_bn("✅ Healthy Crop", "✅ ভালো ফসল"),
-                t_en_bn(f"Field health good ({ndvi})", f"জমির অবস্থা ভালো ({ndvi})")
+            alerts.append((
+                t("✅ Healthy Crop", "✅ ভালো ফসল"),
+                t("Crop health is good",
+                  "ফসলের অবস্থা ভালো")
             ))
 
-    # ================= 2 IRRIGATION =================
+    # ================= 3. 💧 IRRIGATION =================
     if temp and temp > 32:
-        notes.append((
-            t_en_bn("💧 Irrigation Needed", "💧 সেচ প্রয়োজন"),
-            t_en_bn("High temperature stress", "উচ্চ তাপমাত্রায় চাপ")
+        alerts.append((
+            t("💧 Irrigation Needed", "💧 সেচ প্রয়োজন"),
+            t("High temperature stress",
+              "উচ্চ তাপমাত্রায় ফসলের চাপ বাড়ছে")
         ))
 
-    # ================= 3 YIELD =================
+    # ================= 4. 🌾 YIELD =================
     if ndvi:
-        if ndvi > 0.6:
-            notes.append((
-                t_en_bn("📈 High Yield Expected", "📈 ভালো ফলনের সম্ভাবনা"),
-                t_en_bn("Crop performing well", "ফসল ভালো অবস্থায় আছে")
+        yield_est = ndvi * 5
+
+        alerts.append((
+            t("🌾 Yield Forecast", "🌾 ফলন পূর্বাভাস"),
+            t(f"Expected yield: {yield_est:.2f}",
+              f"সম্ভাব্য ফলন: {yield_est:.2f}")
+        ))
+
+    # ================= 5. 🌤 WEATHER =================
+    alerts.append((
+        t("🌤 Weather Update", "🌤 আবহাওয়া আপডেট"),
+        t(f"{weather}, {temp}°C",
+          f"{weather}, {temp}°C")
+    ))
+
+    alerts.append((
+        t("🌙 Tomorrow Planning", "🌙 আগামী দিনের পরিকল্পনা"),
+        t("Prepare for tomorrow farming",
+          "আগামী দিনের জন্য প্রস্তুত থাকুন")
+    ))
+
+    # ================= 6. 💰 MARKET =================
+    alerts.append((
+        t("💰 Market Price", "💰 বাজার মূল্য"),
+        t("Check latest mandi prices",
+          "আজকের বাজার মূল্য দেখুন")
+    ))
+
+    alerts.append((
+        t("📈 Sell Opportunity", "📈 বিক্রির সুযোগ"),
+        t("Prices may increase today",
+          "আজ দাম বাড়তে পারে")
+    ))
+
+    # ================= 7. 📰 NEWS =================
+    if news_list:
+        for n in news_list[:2]:
+            alerts.append((
+                t("📰 Agri News", "📰 কৃষি সংবাদ"),
+                n
             ))
-        else:
-            notes.append((
-                t_en_bn("📉 Yield Risk", "📉 ফলনের ঝুঁকি"),
-                t_en_bn("Improve management", "পরিচর্যা উন্নত করুন")
-            ))
+    else:
+        alerts.append((
+            t("📰 Agri News", "📰 কৃষি সংবাদ"),
+            t("Latest farming updates available",
+              "নতুন কৃষি সংবাদ দেখুন")
+        ))
 
-    # ================= 4 WEATHER TODAY =================
-    notes.append((
-        t_en_bn("🌤 Weather Today", "🌤 আজকের আবহাওয়া"),
-        t_en_bn(f"{weather}, {temp}°C", f"{weather}, {temp}°C")
-    ))
+    # ================= 8. 📊 ENGAGEMENT =================
+    alerts += [
+        (t("📊 NDVI Check", "📊 NDVI চেক করুন"),
+         t("See your crop health map", "আপনার জমির অবস্থা দেখুন")),
 
-    # ================= 5–6 TOMORROW =================
-    notes.append((
-        t_en_bn("🌧 Tomorrow Alert", "🌧 আগামীকালের সতর্কতা"),
-        t_en_bn("Rain expected, avoid irrigation", "বৃষ্টি হতে পারে, সেচ বন্ধ রাখুন")
-    ))
+        (t("📱 Open App", "📱 অ্যাপ খুলুন"),
+         t("Check farm insights now", "এখনই ফসলের তথ্য দেখুন")),
 
-    notes.append((
-        t_en_bn("🌡 High temp tomorrow", "🌡 আগামীকাল তাপমাত্রা বেশি থাকার সম্ভাবনা আছে"),
-        t_en_bn("Try to irrigate more", "বেশি জলসেচ করুন")
-    ))
+        (t("🧠 Smart Tip", "🧠 স্মার্ট পরামর্শ"),
+         t("AI can improve your yield", "AI ব্যবহার করে ফলন বাড়ান")),
+    ]
 
-    # ================= 7 DIARY BASED =================
-    try:
-        diary = db.collection("field_diary").document(user_id).get().to_dict()
-        if diary:
-            last = diary.get("latest", {})
+    # ================= 9. 🌱 PRODUCTIVE TIPS =================
+    tips = [
+        ("Monitor crop daily", "নিয়মিত ফসল দেখুন"),
+        ("Check soil moisture", "মাটির আর্দ্রতা পরীক্ষা করুন"),
+        ("Apply fertilizer if needed", "প্রয়োজনে সার দিন"),
+        ("Check pest attack", "পোকামাকড় দেখুন"),
+        ("Update farm diary", "ফার্ম ডায়েরি আপডেট করুন"),
+        ("Use satellite insights", "স্যাটেলাইট ডাটা ব্যবহার করুন"),
+    ]
 
-            if last.get("irrigationCount", 0) < 1:
-                notes.append((
-                    t_en_bn("💧 Low Irrigation", "💧 সেচের পরিমাণ কম"),
-                    t_en_bn("Increase watering", "সেচ বাড়ান")
-                ))
+    for en, bn in tips:
+        alerts.append((t("🌱 Tip", "🌱 পরামর্শ"), t(en, bn)))
 
-            if last.get("fertilizerKg", 0) < 20:
-                notes.append((
-                    t_en_bn("🌱 Low Fertilizer", "🌱 সারের অভাব দেখা যাচ্ছে"),
-                    t_en_bn("Apply nutrients", "সার প্রয়োগ করুন")
-                ))
-    except:
-        pass
+    # ================= 10. FILL TO 24 =================
+    i = 0
+    while len(alerts) < 24:
+        en, bn = tips[i % len(tips)]
+        alerts.append((t("🌱 Tip", "🌱 পরামর্শ"), t(en, bn)))
+        i += 1
 
-    # ================= 8 MARKET =================
-    try:
-        res = requests.get("https://kishanseva-ai.onrender.com/market-prices?limit=1").json()
-        if res:
-            p = res[0]
-            notes.append((
-                t_en_bn("💰 Market Price", "💰 বাজার মূল্য"),
-                t_en_bn(
-                    f"{p['commodity']} ₹{p['price']}",
-                    f"{p['commodity']} ₹{p['price']}"
-                )
-            ))
-    except:
-        pass
-
-    # ================= 9 NEWS =================
-    try:
-        
-        # ================= NEWS (FROM APP) =================
-        if news_list:
-            for n in news_list[:2]:
-                notes.append((
-                    "📰 Agri News" if lang == "en" else "📰 কৃষি সংবাদ",
-                    n
-                ))
-    except:
-        pass
-
-    # ================= 10 GENERAL =================
-    notes.append((
-        t_en_bn("🌱 Farming Tip", "🌱 কৃষি পরামর্শ"),
-        t_en_bn(
-            "Monitor crop regularly",
-            "নিয়মিত ফসল পর্যবেক্ষণ করুন"
-        )
-    ))
-
-    return notes[:10]
+    return alerts[:24]
 
 
 
@@ -1065,8 +1079,74 @@ def generate_notifications(user_id, lang, weather, temp, humidity, ndvi, news_li
 
 from datetime import datetime, timedelta   # 🔥 ADD timedelta
 
-def t(text, lang):
-    return translate_text(text, lang) if lang != "en" else text
+def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
+
+    alerts = []
+
+    # ================= 1. CRITICAL =================
+    # 🌧 Rain timing
+    for item in forecast.get("list", [])[:8]:
+        cond = item.get("weather", [{}])[0].get("main", "").lower()
+        if "rain" in cond:
+            t = item["dt_txt"].split()[1][:5]
+            alerts.append(("🌧 Rain Alert", f"Rain expected at {t}"))
+            break
+
+    # 🚨 Crop stress
+    if ndvi and ndvi < 0.4:
+        alerts.append(("🚨 Crop Stress", "Low vegetation health detected"))
+
+    # ================= 2. PRODUCTIVE =================
+    alerts += [
+        ("💧 Irrigation Check", "Check soil moisture today"),
+        ("🌱 Fertilizer Tip", "Apply nutrients if growth slow"),
+        ("📊 NDVI Update", f"Current NDVI: {ndvi}"),
+        ("🌡 Heat Alert", "High temp may stress crops"),
+        ("🧪 Soil Health", "Test soil condition this week"),
+    ]
+
+    # ================= 3. MARKET =================
+    alerts += [
+        ("💰 Market Price", "Check latest mandi rates"),
+        ("📈 Sell Opportunity", "Prices may increase today"),
+        ("📉 Price Drop", "Hold crops if possible"),
+    ]
+
+    # ================= 4. WEATHER =================
+    alerts += [
+        ("🌤 Weather Update", f"{weather}, {temp}°C"),
+        ("🌙 Night Advisory", "Prepare for next day"),
+    ]
+
+    # ================= 5. ENGAGEMENT =================
+    alerts += [
+        ("📱 Open App", "Check your farm insights"),
+        ("📊 Weekly Trend", "See crop performance graph"),
+        ("🧠 Smart Tip", "Improve yield with AI insights"),
+        ("📰 Agri News", news_list[0] if news_list else "Latest farming news"),
+    ]
+
+    # ================= 6. YIELD =================
+    if ndvi:
+        yield_est = ndvi * 5
+        alerts.append(("🌾 Yield Forecast", f"Expected yield: {yield_est:.2f}"))
+
+    # ================= 7. FILL TO 24 =================
+    base_msgs = [
+        "Monitor crop daily",
+        "Check irrigation schedule",
+        "Review pest activity",
+        "Update farm diary",
+        "Check satellite data",
+        "Optimize fertilizer usage",
+    ]
+
+    i = 0
+    while len(alerts) < 24:
+        alerts.append(("🌱 Tip", base_msgs[i % len(base_msgs)]))
+        i += 1
+
+    return alerts[:24]
 
 @app.post("/smart-alerts")
 def smart_alerts(data: dict):
@@ -1122,8 +1202,8 @@ def smart_alerts(data: dict):
                 ndvi = None
 
             # ================= ALERTS =================
-            alerts = generate_notifications(
-                user_id, lang, weather, temp, humidity, ndvi, news_list
+            alerts = build_24_notifications(
+                lang, weather, temp, ndvi, forecast, news_list
             )
 
             # ================= FORECAST =================
@@ -1164,20 +1244,6 @@ def smart_alerts(data: dict):
                     user_id, lang, weather, temp, humidity, ndvi, news_list
                 )
 
-            # ================= RAIN CHECK =================
-            rain_soon = False
-            for item in forecast.get("list", [])[:3]:
-                cond = item.get("weather", [{}])[0].get("main", "").lower()
-                if "rain" in cond:
-                    rain_soon = True
-                    break
-
-            if rain_soon:
-                alerts.insert(0, (
-                    "🌧 Rain Incoming" if lang == "en" else "🌧 বৃষ্টি আসছে",
-                    "Avoid irrigation now" if lang == "en" else "এখন সেচ দেবেন না"
-                ))
-
             # ================= COOLDOWN =================
             user_ref = db.collection("alerts_state").document(token)
             prev = user_ref.get().to_dict() or {}
@@ -1187,14 +1253,14 @@ def smart_alerts(data: dict):
 
             if last_sent:
                 last_time = datetime.fromisoformat(last_sent)
-                if now - last_time < timedelta(minutes=90):
+                if now - last_time < timedelta(minutes=55):
                     print("⛔ Cooldown active → skip user")
                     continue
 
             # ================= SEND =================
             if alerts:
-                idx = now.hour % len(alerts)
-                title, body = alerts[idx]
+                slot = datetime.utcnow().hour  # 0–23
+                title, body = alerts[slot]
 
                 message = messaging.Message(
                     notification=messaging.Notification(
