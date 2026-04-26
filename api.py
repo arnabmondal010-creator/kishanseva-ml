@@ -6,6 +6,7 @@ import json
 import ee
 import pandas as pd
 import joblib
+import feedparser
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,84 @@ import time
 from firebase_admin import auth
 from deep_translator import GoogleTranslator
 from datetime import datetime
+from datetime import timedelta
+
+def get_yield_prediction(ndvi, temp, humidity):
+    try:
+        url = "https://kishanseva-ai.onrender.com/predict-yield"
+
+        payload = {
+            "ndvi": ndvi or 0.5,
+            "avg_temp": temp or 28,
+            "humidity": humidity or 60,
+            "rainfall": 0
+        }
+
+        res = requests.post(url, json=payload, timeout=5).json()
+
+        return res.get("predicted_yield")
+    except:
+        return None
+    
+def get_market_price():
+    try:
+        url = "https://kishanseva-ai.onrender.com/market-prices?limit=1"
+        res = requests.get(url, timeout=5).json()
+
+        if res:
+            r = res[0]
+            return f"{r['commodity']} ₹{r['price']}"
+    except:
+        return None
+
+    return None
+
+
+def get_agri_news(lang="en"):
+    feeds_bn = [
+        "https://www.anandabazar.com/rss",
+        "https://news.google.com/rss/search?q=কৃষি&hl=bn&gl=IN&ceid=IN:bn"
+    ]
+
+    feeds_en = [
+        "https://agricoop.nic.in/en/rss.xml",
+        "https://news.google.com/rss/search?q=agriculture+india&hl=en-IN&gl=IN&ceid=IN:en"
+    ]
+
+    feeds = feeds_bn if lang == "bn" else feeds_en
+
+    news = []
+
+    for url in feeds:
+        try:
+            d = feedparser.parse(url)
+            for e in d.entries[:2]:
+                news.append(e.title)
+        except:
+            continue
+
+    return news[:3]
+
+
+def get_irrigation(temp, humidity, ndvi):
+    try:
+        url = "https://kishanseva-ai.onrender.com/predict-irrigation"
+
+        payload = {
+            "soil": "loamy",
+            "crop": "rice",
+            "temperature": temp or 30,
+            "humidity": humidity or 60,
+            "rainfall": 0,
+            "ndvi": ndvi or 0.5,
+            "infiltration": 0.5
+        }
+
+        res = requests.post(url, json=payload, timeout=5).json()
+
+        return res.get("irrigation_mm")
+    except:
+        return None
 
 
 def get_alert_index():
@@ -892,7 +971,7 @@ def get_weather(lat, lon, lang="en"):
         res = requests.get(url, timeout=5).json()
         weather = res.get("weather", [{}])[0].get("main", "").lower()
 
-        return t(weather, lang)
+        return (weather, lang)
 
     except:
         return ""
@@ -938,7 +1017,8 @@ def get_users():
 
     return data
 
-def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
+def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_list, market_price):
+    price = market_price
 
     alerts = []
 
@@ -982,22 +1062,25 @@ def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
             ))
 
     # ================= 3. 💧 IRRIGATION =================
-    if temp and temp > 32:
+    irrigation = get_irrigation(temp, humidity, ndvi)
+
+    if irrigation:
         alerts.append((
-            t("💧 Irrigation Needed", "💧 সেচ প্রয়োজন"),
-            t("High temperature stress",
-              "উচ্চ তাপমাত্রায় ফসলের চাপ বাড়ছে")
+            t("💧 Irrigation Advice", "💧 সেচ পরামর্শ"),
+            t(f"Apply {irrigation} mm water",
+            f"{irrigation} মিমি সেচ দিন")
         ))
 
     # ================= 4. 🌾 YIELD =================
     if ndvi:
-        yield_est = ndvi * 5
+        yield_est = get_yield_prediction(ndvi, temp, 60)
 
-        alerts.append((
-            t("🌾 Yield Forecast", "🌾 ফলন পূর্বাভাস"),
-            t(f"Expected yield: {yield_est:.2f}",
-              f"সম্ভাব্য ফলন: {yield_est:.2f}")
-        ))
+        if yield_est:
+            alerts.append((
+                t("🌾 Yield Forecast", "🌾 ফলন পূর্বাভাস"),
+                t(f"Expected yield: {yield_est}",
+                f"সম্ভাব্য ফলন: {yield_est}")
+            ))
 
     # ================= 5. 🌤 WEATHER =================
     alerts.append((
@@ -1013,17 +1096,20 @@ def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
     ))
 
     # ================= 6. 💰 MARKET =================
-    alerts.append((
-        t("💰 Market Price", "💰 বাজার মূল্য"),
-        t("Check latest mandi prices",
-          "আজকের বাজার মূল্য দেখুন")
-    ))
+    price = get_market_price()
 
-    alerts.append((
-        t("📈 Sell Opportunity", "📈 বিক্রির সুযোগ"),
-        t("Prices may increase today",
+    if price:
+        alerts.append((
+            t("💰 Market Price", "💰 বাজার মূল্য"),
+            price
+        ))
+    
+
+        alerts.append((
+            t("📈 Sell Opportunity", "📈 বিক্রির সুযোগ"),
+            t("Prices may increase today",
           "আজ দাম বাড়তে পারে")
-    ))
+        ))
 
     # ================= 7. 📰 NEWS =================
     if news_list:
@@ -1038,6 +1124,14 @@ def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
             t("Latest farming updates available",
               "নতুন কৃষি সংবাদ দেখুন")
         ))
+
+    if ndvi and temp:
+        if ndvi < 0.4 and temp > 30:
+            alerts.append((
+                t("🚨 Crop Stress", "🚨 ফসলের চাপ"),
+                t("Low NDVI + high temp → irrigate today",
+                "কম NDVI + বেশি তাপ → আজই সেচ দিন")
+            ))
 
     # ================= 8. 📊 ENGAGEMENT =================
     alerts += [
@@ -1077,12 +1171,14 @@ def build_24_notifications(lang, weather, temp, ndvi, forecast, news_list):
 
 @app.post("/smart-alerts")
 def smart_alerts(data: dict):
-    news_list = data.get("news", [])
 
     users = get_users()
     sent = 0
     print("TOTAL USERS:", len(users))
     #print("USER:", user_id, lat, lon, token)
+    market_cache = get_market_price()
+    news_cache = get_agri_news("lang")
+    
 
     for u in users:
         try:
@@ -1138,45 +1234,14 @@ def smart_alerts(data: dict):
 
             # ================= ALERTS =================
             alerts = build_24_notifications(
-                lang, weather, temp, ndvi, forecast, news_list
+                lang, weather, temp, humidity, ndvi, forecast, news_cache, market_cache
             )
-
-            # ================= TIME FILTER =================
-            if 6 <= hour < 12:
-                alerts = [a for a in alerts if (
-                    "Weather" in a[0] or "Crop" in a[0] or
-                    "আবহাওয়া" in a[0] or "ফসল" in a[0]
-                )]
-
-            elif 12 <= hour < 18:
-                alerts = [a for a in alerts if (
-                    "Irrigation" in a[0] or "Yield" in a[0] or
-                    "সেচ" in a[0] or "ফলন" in a[0]
-                )]
-
-            elif 18 <= hour < 21:
-                alerts = [a for a in alerts if (
-                    "Market" in a[0] or "News" in a[0] or
-                    "বাজার" in a[0] or "সংবাদ" in a[0]
-                )]
-
-            else:
-                alerts = [a for a in alerts if (
-                    "Tomorrow" in a[0] or "High temp" in a[0] or
-                    "আগামীকাল" in a[0] or "তাপমাত্রা" in a[0]
-                )]
-
-            # ================= FALLBACK =================
-            if not alerts:
-                alerts = build_24_notifications(
-                    user_id, lang, weather, temp, humidity, ndvi, news_list
-                )
 
             # ================= COOLDOWN =================
             user_ref = db.collection("alerts_state").document(token)
             prev = user_ref.get().to_dict() or {}
 
-            now = datetime.utcnow()
+            now = datetime.utcnow() + timedelta(hours=5, minutes=30)
             last_sent = prev.get("last_sent")
 
             if last_sent:
@@ -1191,10 +1256,8 @@ def smart_alerts(data: dict):
                 continue
 
             # 12 AM – 4 AM window
-            if hour < 0 or hour > 4:
+            if hour > 4:
                 continue
-
-            slot = hour  # 0–4 directly
 
 # 🔥 LOAD PREVIOUS STATE
             user_ref = db.collection("alerts_state").document(token)
