@@ -1190,10 +1190,11 @@ def smart_alerts(data: dict):
             if not alerts:
                 continue
 
-            slot = hour - 16
-
-            if slot < 0 or slot > 7:
+            # 12 AM – 4 AM window
+            if hour < 0 or hour > 4:
                 continue
+
+            slot = hour  # 0–4 directly
 
 # 🔥 LOAD PREVIOUS STATE
             user_ref = db.collection("alerts_state").document(token)
