@@ -1049,17 +1049,28 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
         return bn if lang == "bn" else en
 
     # ================= 1. 🌧 RAIN TIMING =================
-    for item in forecast.get("list", [])[:8]:  # next 24h
+    for item in forecast.get("list", [])[:12]:  # next 24h
         cond = item.get("weather", [{}])[0].get("main", "").lower()
 
         if "rain" in cond:
             ts = item.get("dt_txt")
-            time_str = ts.split()[1][:5]
+
+            dt_utc = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            dt_ist = dt_utc + timedelta(hours=5, minutes=30)
+            time_str = dt_ist.strftime("%I:%M %p")
+            today = datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+            if dt_ist.date() == today.date():
+                day_label = "Today"
+            elif dt_ist.date() == (today + timedelta(days=1)).date():
+                day_label = "Tomorrow"
+            else:
+                day_label = dt_ist.strftime("%d %b")
 
             alerts.append((
                 t("🌧 Rain Alert", "🌧 বৃষ্টি সতর্কতা"),
-                t(f"Rain expected at {time_str}",
-                  f"{time_str} সময় বৃষ্টি হতে পারে")
+                t(f"Rain expected {day_label} at {time_str}",
+                f"{day_label} {time_str} সময় বৃষ্টি হতে পারে")
             ))
             break
 
@@ -1091,7 +1102,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
         alerts.append((
             t("💧 Irrigation Advice", "💧 সেচ পরামর্শ"),
             t(f"Apply {irrigation} mm water",
-            f"{irrigation} মিমি সেচ দিন")
+            f"{irrigation} মিমি জলসেচ করুন")
         ))
 
     # ================= 4. 🌾 YIELD =================
@@ -1107,7 +1118,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
 
     # ================= 5. 🌤 WEATHER =================
     alerts.append((
-        t("🌤 Weather Update", "🌤 আবহাওয়া আপডেট"),
+        t("🌤 Weather Update", "🌤 আবহাওয়ার আপডেট"),
         t(f"{weather}, {temp}°C",
           f"{weather}, {temp}°C")
     ))
@@ -1115,7 +1126,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
     alerts.append((
         t("🌙 Tomorrow Planning", "🌙 আগামী দিনের পরিকল্পনা"),
         t("Prepare for tomorrow farming",
-          "আগামী দিনের জন্য প্রস্তুত থাকুন")
+          "আগামীকালের কৃষিকাজের জন্য প্রস্তুতি নিন")
     ))
 
     # ================= 6. 💰 MARKET =================
@@ -1153,7 +1164,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
             alerts.append((
                 t("🚨 Crop Stress", "🚨 ফসলের চাপ"),
                 t("Low NDVI + high temp → irrigate today",
-                "কম NDVI + বেশি তাপ → আজই সেচ দিন")
+                "কম NDVI + বেশি তাপ → আজই জলসেচ করুন")
             ))
 
     # ================= 8. 📊 ENGAGEMENT =================
@@ -1273,7 +1284,6 @@ def smart_alerts(data: dict):
                     print("⛔ Cooldown active → skip user")
                     continue
 
-            # ================= SEND =================
             # ================= SEND =================
             if not alerts:
                 continue
