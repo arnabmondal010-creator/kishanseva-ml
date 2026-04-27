@@ -1058,19 +1058,28 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
             dt_utc = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             dt_ist = dt_utc + timedelta(hours=5, minutes=30)
             time_str = dt_ist.strftime("%I:%M %p")
+
+            if lang == "bn":
+                time_str = (
+                    time_str
+                    .replace("AM", "সকালে")
+                    .replace("PM", "বিকালে")
+                )
             today = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
             if dt_ist.date() == today.date():
-                day_label = "Today"
+                day_label = "আজ" if lang == "bn" else "Today"
+
             elif dt_ist.date() == (today + timedelta(days=1)).date():
-                day_label = "Tomorrow"
+                day_label = "আগামীকাল" if lang == "bn" else "Tomorrow"
+
             else:
                 day_label = dt_ist.strftime("%d %b")
 
             alerts.append((
                 t("🌧 Rain Alert", "🌧 বৃষ্টি সতর্কতা"),
                 t(f"Rain expected {day_label} at {time_str}",
-                f"{day_label} {time_str} সময় বৃষ্টি হতে পারে")
+                f"{day_label} {time_str} বৃষ্টি হওয়ার সম্ভাবনা আছে")
             ))
             break
 
