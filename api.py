@@ -22,6 +22,12 @@ from deep_translator import GoogleTranslator
 from datetime import datetime
 from datetime import timedelta
 
+def to_bengali_number(text):
+    en = "0123456789"
+    bn = "০১২৩৪৫৬৭৮৯"
+    table = str.maketrans(en, bn)
+    return str(text).translate(table)
+
 def get_yield_prediction(ndvi, temp, humidity):
     try:
         url = "https://kishanseva-ai.onrender.com/predict-yield"
@@ -1065,6 +1071,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
                     .replace("AM", "সকালে")
                     .replace("PM", "বিকালে")
                 )
+                time_str = to_bengali_number(time_str)
             today = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
             if dt_ist.date() == today.date():
@@ -1107,22 +1114,61 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
     # ================= 3. 💧 IRRIGATION =================
     irrigation = get_irrigation(temp, humidity, ndvi)
 
-    if irrigation:
+    if irrigation is not None:
+
+    # 🔥 round value
+        irrigation_val = round(float(irrigation), 1)
+
+    # 🔥 decision logic (important)
+        if irrigation_val < 5:
+            en_msg = "No irrigation needed"
+            bn_msg = "এখন সেচ প্রয়োজন নেই"
+        elif irrigation_val < 15:
+            en_msg = f"Light irrigation: {irrigation_val} mm"
+            bn_msg = f"হালকা জলসেচ করুন: {irrigation_val} মিমি"
+        else:
+            en_msg = f"Apply irrigation: {irrigation_val} mm"
+            bn_msg = f"{irrigation_val} মিমি জলসেচ করুন"
+
+    # 🔥 number localization
+        if lang == "bn":
+            irrigation_str = to_bengali_number(str(irrigation_val))
+            bn_msg = bn_msg.replace(str(irrigation_val), irrigation_str)
+
         alerts.append((
             t("💧 Irrigation Advice", "💧 সেচ পরামর্শ"),
-            t(f"Apply {irrigation} mm water",
-            f"{irrigation} মিমি জলসেচ করুন")
+            t(en_msg, bn_msg)
         ))
 
     # ================= 4. 🌾 YIELD =================
-    if ndvi:
+    if ndvi is not None:
+
         yield_est = get_yield_prediction(ndvi, temp, 60)
 
-        if yield_est:
+        if yield_est is not None:
+
+        # 🔥 round value
+            y = round(float(yield_est), 2)
+
+        # 🔥 interpretation (VERY IMPORTANT)
+            if y < 2:
+                en_msg = f"Low yield expected: {y} t/ha"
+                bn_msg = f"কম ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+            elif y < 4:
+                en_msg = f"Moderate yield expected: {y} t/ha"
+                bn_msg = f"মাঝারি ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+            else:
+                en_msg = f"Good yield expected: {y} t/ha"
+                bn_msg = f"ভালো ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+
+        # 🔥 number localization
+            if lang == "bn":
+                y_str = to_bengali_number(str(y))
+                bn_msg = bn_msg.replace(str(y), y_str)
+
             alerts.append((
                 t("🌾 Yield Forecast", "🌾 ফলন পূর্বাভাস"),
-                t(f"Expected yield: {yield_est}",
-                f"সম্ভাব্য ফলন: {yield_est}")
+                t(en_msg, bn_msg)
             ))
 
     # ================= 5. 🌤 WEATHER =================
