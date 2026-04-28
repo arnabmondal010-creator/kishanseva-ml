@@ -1208,7 +1208,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
     ))
 
     # ================= 6. 💰 MARKET =================
-    price = get_market_price()
+    price = market_price()
 
     if price:
         alerts.append((
@@ -1237,7 +1237,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
               "নতুন কৃষি সংবাদ দেখুন")
         ))
 
-    if ndvi and temp:
+    if ndvi is not None and temp is not None:
         if ndvi < 0.4 and temp > 30:
             alerts.append((
                 t("🚨 Crop Stress", "🚨 ফসলের চাপ"),
@@ -1290,8 +1290,6 @@ def smart_alerts(data: dict):
     #print("USER:", user_id, lat, lon, token)
     market_cache = get_market_price()
     
-    
-
     for u in users:
         try:
             user_id = u.get("id")
@@ -1370,10 +1368,6 @@ def smart_alerts(data: dict):
             # 12 AM – 4 AM window
             if hour < 4:
                 continue
-
-# 🔥 LOAD PREVIOUS STATE
-            user_ref = db.collection("alerts_state").document(token)
-            prev = user_ref.get().to_dict() or {}
 
             prev_index = prev.get("last_index", -1)
 
