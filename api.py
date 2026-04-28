@@ -1111,26 +1111,49 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
                   "ফসলের অবস্থা ভালো")
             ))
 
+    rain_soon = False
+    rain_time = None
+
+    for item in forecast.get("list", [])[:12]:
+        cond = item.get("weather", [{}])[0].get("main", "").lower()
+
+        if "rain" in cond:
+            ts = item.get("dt_txt")
+            dt_utc = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            dt_ist = dt_utc + timedelta(hours=5, minutes=30)
+
+            now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+            if dt_ist <= now_ist + timedelta(hours=6):
+                rain_soon = True
+                rain_time = dt_ist
+                break
+
     # ================= 3. 💧 IRRIGATION =================
     irrigation = get_irrigation(temp, humidity, ndvi)
 
     if irrigation is not None:
 
-    # 🔥 round value
         irrigation_val = round(float(irrigation), 1)
 
-    # 🔥 decision logic (important)
-        if irrigation_val < 5:
+    # 🔥 RAIN-AWARE DECISION (critical upgrade)
+        if rain_soon:
+            en_msg = "Rain expected soon → skip irrigation"
+            bn_msg = "শীঘ্রই বৃষ্টি হবে → সেচ বন্ধ রাখুন"
+
+        elif irrigation_val < 5:
             en_msg = "No irrigation needed"
             bn_msg = "এখন সেচ প্রয়োজন নেই"
+
         elif irrigation_val < 15:
             en_msg = f"Light irrigation: {irrigation_val} mm"
             bn_msg = f"হালকা জলসেচ করুন: {irrigation_val} মিমি"
+
         else:
             en_msg = f"Apply irrigation: {irrigation_val} mm"
             bn_msg = f"{irrigation_val} মিমি জলসেচ করুন"
 
-    # 🔥 number localization
+    # 🔥 Bengali number localization
         if lang == "bn":
             irrigation_str = to_bengali_number(str(irrigation_val))
             bn_msg = bn_msg.replace(str(irrigation_val), irrigation_str)
@@ -1266,7 +1289,7 @@ def smart_alerts(data: dict):
     print("TOTAL USERS:", len(users))
     #print("USER:", user_id, lat, lon, token)
     market_cache = get_market_price()
-    news_cache = get_agri_news("lang")
+    news_cache = get_agri_news(lang)
     
 
     for u in users:
@@ -1365,7 +1388,29 @@ def smart_alerts(data: dict):
 # 🔥 PRIORITY OVERRIDE
             priority = [a for a in alerts if "Rain" in a[0] or "বৃষ্টি" in a[0]]
 
+            last_rain = prev.get("last_rain")
+            last_rain_time = prev.get("last_rain_time")
+
+            send_rain = False
+
+# 🔥 check if new rain alert
             if priority:
+                current_rain = priority[0][1]
+
+                if current_rain != last_rain:
+                    send_rain = True
+
+# 🔥 cooldown (3 hours)
+            if last_rain_time:
+                try:
+                    last_time = datetime.fromisoformat(last_rain_time)
+                    if now - last_time < timedelta(hours=3):
+                        send_rain = False
+                except:
+                    pass
+
+# 🔥 FINAL DECISION
+            if send_rain:
                 title, body = priority[0]
             else:
                 title, body = alerts[index]
@@ -1383,11 +1428,18 @@ def smart_alerts(data: dict):
             sent += 1
 
 # 🔥 SAVE STATE
-            user_ref.set({
+            save_data = {
                 "ndvi": ndvi,
-                "last_sent": datetime.utcnow().isoformat(),
+                "last_sent": now.isoformat(),
                 "last_index": index
-            }, merge=True)
+}
+
+            # 🔥 save rain memory
+            if send_rain:
+                save_data["last_rain"] = current_rain
+                save_data["last_rain_time"] = now.isoformat()
+
+            user_ref.set(save_data, merge=True)
 
             # ================= SAVE =================
 
