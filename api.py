@@ -45,6 +45,32 @@ def get_yield_prediction(ndvi, temp, humidity):
     except:
         return None
     
+def get_time_period(dt, lang):
+    hour = dt.hour
+
+    if lang == "bn":
+        if 4 <= hour < 10:
+            return "সকাল"
+        elif 10 <= hour < 14:
+            return "দুপুর"
+        elif 14 <= hour < 17:
+            return "বিকাল"
+        elif 17 <= hour < 20:
+            return "সন্ধ্যা"
+        else:
+            return "রাত"
+    else:
+        if 4 <= hour < 10:
+            return "morning"
+        elif 10 <= hour < 14:
+            return "noon"
+        elif 14 <= hour < 17:
+            return "afternoon"
+        elif 17 <= hour < 20:
+            return "evening"
+        else:
+            return "night"
+    
 def get_market_price():
     try:
         url = "https://kishanseva-ai.onrender.com/market-prices?limit=1"
@@ -1014,7 +1040,7 @@ def get_ndvi(lat, lon):
         res = requests.post(
             url,
             json={"lat": lat, "lon": lon},
-            timeout=5  # 🔥 timeout added
+            timeout=3  # 🔥 timeout added
         ).json()
 
         if res.get("latest"):
@@ -1063,17 +1089,17 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
 
             dt_utc = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             dt_ist = dt_utc + timedelta(hours=5, minutes=30)
-            time_str = dt_ist.strftime("%I:%M %p")
+            # 🔥 TIME LOGIC (CLEAN)
+            period = get_time_period(dt_ist, lang)
+
+            time_str = dt_ist.strftime("%I:%M")
 
             if lang == "bn":
-                time_str = (
-                    time_str
-                    .replace("AM", "সকালে")
-                    .replace("PM", "বিকালে")
-                )
                 time_str = to_bengali_number(time_str)
-            today = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
+# 🔥 TODAY CALCULATION
+            today = datetime.utcnow() + timedelta(hours=5, minutes=30)
+                
             if dt_ist.date() == today.date():
                 day_label = "আজ" if lang == "bn" else "Today"
 
@@ -1085,8 +1111,10 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
 
             alerts.append((
                 t("🌧 Rain Alert", "🌧 বৃষ্টি সতর্কতা"),
-                t(f"Rain expected {day_label} at {time_str}",
-                f"{day_label} {time_str} বৃষ্টি হওয়ার সম্ভাবনা আছে")
+                t(
+                    f"Rain expected {day_label} {period} around {time_str}",
+                    f"{day_label} {period} {time_str} বৃষ্টি হওয়ার সম্ভাবনা আছে"
+                )
             ))
             break
 
@@ -1112,7 +1140,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
             ))
 
     rain_soon = False
-    rain_time = None
+    
 
     for item in forecast.get("list", [])[:12]:
         cond = item.get("weather", [{}])[0].get("main", "").lower()
