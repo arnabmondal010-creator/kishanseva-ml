@@ -114,31 +114,31 @@ translation_cache = {}
 
 from deep_translator import GoogleTranslator
 
-def translate_text(text, lang="bn"):
-    if not text:
-        return text
+# def translate_text(text, lang="bn"):
+  #  if not text:
+ #       return text
+#
+ #   # 🔥 NORMALIZE (CRITICAL)
+#    key = f"{text.lower().strip()}_{lang}"
 
-    # 🔥 NORMALIZE (CRITICAL)
-    key = f"{text.lower().strip()}_{lang}"
+  #  # 🔥 CACHE HIT
+ #   if key in translation_cache:
+ #       return translation_cache[key]
+#
+ #   try:
+#        translated = GoogleTranslator(
+   #         source='auto',
+  #          target=lang
+ #       ).translate(text)
+#
+ #       # 🔥 SAVE CACHE
+#        translation_cache[key] = translated
 
-    # 🔥 CACHE HIT
-    if key in translation_cache:
-        return translation_cache[key]
+   #     return translated
 
-    try:
-        translated = GoogleTranslator(
-            source='auto',
-            target=lang
-        ).translate(text)
-
-        # 🔥 SAVE CACHE
-        translation_cache[key] = translated
-
-        return translated
-
-    except Exception as e:
-        print("Translation error:", e)
-        return text
+  ##  except Exception as e:
+    ##    print("Translation error:", e)
+   ##     return text
 
 import requests
 def get_user_lang(user_id):
@@ -1208,7 +1208,7 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
     ))
 
     # ================= 6. 💰 MARKET =================
-    price = market_price()
+    price = market_price
 
     if price:
         alerts.append((
