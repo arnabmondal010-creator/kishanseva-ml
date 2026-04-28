@@ -1289,7 +1289,7 @@ def smart_alerts(data: dict):
     print("TOTAL USERS:", len(users))
     #print("USER:", user_id, lat, lon, token)
     market_cache = get_market_price()
-    news_cache = get_agri_news(lang)
+    
     
 
     for u in users:
@@ -1299,6 +1299,7 @@ def smart_alerts(data: dict):
                 print("❌ Missing user_id → skip")
                 continue
             lang = get_user_lang(user_id)
+            news_cache = get_agri_news(lang)
 
             lat = u.get("lat")
             lon = u.get("lon")
