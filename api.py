@@ -1353,6 +1353,11 @@ def get_ndvi_value(user_id: str):
 
                 except Exception as e:
                     print("NDVI time parse error:", e)
+            return None
+
+    except Exception as e:
+        print("NDVI fetch error:", e)
+        return None
 
 
 
