@@ -539,6 +539,15 @@ def satellite_analysis(req: NDVIRequest):
             "ndwi": round(float(stats.get("NDWI", 0)), 3),
             "savi": round(float(stats.get("SAVI", 0)), 3),
         }
+        # 🔥 SAVE NDVI TO FIRESTORE
+        if req.user_id:
+            try:
+                db.collection("fields").document(req.user_id).set({
+                    "ndvi": latest["ndvi"],
+                    "ndvi_updated": datetime.utcnow().isoformat()
+                }, merge=True)
+            except Exception as e:
+                print("NDVI save error:", e)
 
         # ================= HISTORY =================
         def to_feature(img):
@@ -1032,22 +1041,38 @@ def get_weather(lat, lon, lang="en"):
         return ""
 
 
-def get_ndvi(lat, lon):
+def get_ndvi(lat, lon, user_id=None):
 
-    url = "https://kishanseva-ai.onrender.com/satellite-analysis"
+    # 🔥 1. Try DB FIRST (instant)
+    if user_id:
+        try:
+            doc = db.collection("fields").document(user_id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                ndvi = data.get("ndvi")
 
+                if ndvi is not None:
+                    return ndvi
+        except Exception as e:
+            print("NDVI fetch error:", e)
+
+    # 🔥 2. Fallback → satellite API
     try:
         res = requests.post(
-            url,
-            json={"lat": lat, "lon": lon},
-            timeout=3  # 🔥 timeout added
+            "https://kishanseva-ai.onrender.com/satellite-analysis",
+            json={
+                "lat": lat,
+                "lon": lon,
+                "user_id": user_id
+            },
+            timeout=3
         ).json()
 
         if res.get("latest"):
             return res["latest"]["ndvi"]
 
-    except:
-        return None
+    except Exception as e:
+        print("NDVI API error:", e)
 
     return None
 
@@ -1307,6 +1332,28 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
 
     return alerts[:24]
 
+@app.get("/get-ndvi")
+def get_ndvi_value(user_id: str):
+
+    try:
+        doc = db.collection("fields").document(user_id).get()
+
+        if doc.exists:
+            data = doc.to_dict()
+            ndvi = data.get("ndvi")
+            ndvi_time = data.get("ndvi_updated")
+
+            if ndvi is not None and ndvi_time:
+                try:
+                    last = datetime.fromisoformat(ndvi_time)
+
+            # 🔥 TTL = 6 HOURS
+                    if datetime.utcnow() - last < timedelta(hours=6):
+                        return ndvi
+
+                except Exception as e:
+                    print("NDVI time parse error:", e)
+
 
 
 @app.post("/smart-alerts")
@@ -1360,7 +1407,7 @@ def smart_alerts(data: dict):
 
             # ================= NDVI =================
             try:
-                ndvi = get_ndvi(lat, lon)
+                ndvi = get_ndvi(lat, lon, user_id)
             except:
                 ndvi = None
 
