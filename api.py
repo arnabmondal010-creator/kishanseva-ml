@@ -278,6 +278,7 @@ class NDVIRequest(BaseModel):
     lon: float
     boundary: list | None = None
     user_id: str | None = None
+    field_id: str | None = "default"   # 🔥 ADD THIS
     lang: str = "en"
 
 
@@ -377,7 +378,7 @@ def satellite_analysis(req: NDVIRequest):
         import json
 
         # 🔥 CACHE
-        key = f"{req.lat}_{req.lon}"
+        key = f"{req.user_id or 'guest'}_{req.field_id or 'default'}"
         if key in NDVI_CACHE:
             data, ts = NDVI_CACHE[key]
             if time.time() - ts < CACHE_TTL:
@@ -387,10 +388,17 @@ def satellite_analysis(req: NDVIRequest):
         # 🔥 FETCH FROM DB FIRST (CRITICAL)
         if (not boundary or len(boundary) < 3) and req.user_id:
             try:
-                doc = db.collection("fields").document(req.user_id).get()
+                field_id = getattr(req, "field_id", "default")
+
+                doc = db.collection("fields")\
+                .document(req.user_id)\
+                .collection("user_fields")\
+                .document(field_id)\
+                .get()
+
                 if doc.exists:
                     boundary = doc.to_dict().get("boundary")
-                    print("BOUNDARY FROM DB:", boundary)
+                print("BOUNDARY FROM DB:", boundary)
             except:
                 boundary = None
 
@@ -403,9 +411,15 @@ def satellite_analysis(req: NDVIRequest):
         # ================= GEOMETRY =================
         if isinstance(boundary, list) and len(boundary) >= 3:
             if req.user_id:
-                db.collection("fields").document(req.user_id).set({
-                    "boundary": boundary
-                }, merge=True)
+                field_id = getattr(req, "field_id", "default")
+
+                db.collection("fields")\
+                    .document(req.user_id)\
+                    .collection("user_fields")\
+                    .document(field_id)\
+                    .set({
+                        "boundary": boundary
+                    }, merge=True)
 
             coords = [
                 [float(p["lon"]), float(p["lat"])]
@@ -431,10 +445,6 @@ def satellite_analysis(req: NDVIRequest):
             .filterDate("2024-01-01", "2026-12-31")  # ✅ same as before
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
         )
-        if (not boundary or len(boundary) < 3) and req.user_id:
-            doc = db.collection("fields").document(req.user_id).get()
-            if doc.exists:
-                boundary = doc.to_dict().get("boundary")
 
         if collection.size().getInfo() == 0:
             return {
@@ -542,9 +552,15 @@ def satellite_analysis(req: NDVIRequest):
         # 🔥 SAVE NDVI TO FIRESTORE
         if req.user_id:
             try:
-                db.collection("fields").document(req.user_id).set({
-                    "ndvi": latest["ndvi"],
-                    "ndvi_updated": datetime.utcnow().isoformat()
+                field_id = getattr(req, "field_id", "default")
+
+                db.collection("fields")\
+                    .document(req.user_id)\
+                    .collection("user_fields")\
+                    .document(field_id)\
+                    .set({
+                        "ndvi": latest["ndvi"],
+                        "ndvi_updated": datetime.utcnow().isoformat()
                 }, merge=True)
             except Exception as e:
                 print("NDVI save error:", e)
@@ -1041,41 +1057,23 @@ def get_weather(lat, lon, lang="en"):
         return ""
 
 
-def get_ndvi(lat, lon, user_id=None):
+def get_ndvi(lat, lon, user_id=None, field_id="default"):
 
-    # 🔥 1. Try DB FIRST (instant)
     if user_id:
         try:
-            doc = db.collection("fields").document(user_id).get()
+            doc = db.collection("fields")\
+                .document(user_id)\
+                .collection("user_fields")\
+                .document(field_id)\
+                .get()
+
             if doc.exists:
                 data = doc.to_dict()
-                ndvi = data.get("ndvi")
+                if data.get("ndvi") is not None:
+                    return data.get("ndvi")
 
-                if ndvi is not None:
-                    return ndvi
         except Exception as e:
             print("NDVI fetch error:", e)
-
-    # 🔥 2. Fallback → satellite API
-    try:
-        res = requests.post(
-            "https://kishanseva-ai.onrender.com/satellite-analysis",
-            json={
-                "lat": lat,
-                "lon": lon,
-                "user_id": user_id
-            },
-            timeout=3
-        ).json()
-
-        if res.get("latest"):
-            return res["latest"]["ndvi"]
-
-    except Exception as e:
-        print("NDVI API error:", e)
-
-    return None
-
 
 def get_users():
 
@@ -1333,33 +1331,27 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
     return alerts[:24]
 
 @app.get("/get-ndvi")
-def get_ndvi_value(user_id: str):
+def get_ndvi_value(user_id: str, field_id: str):
 
     try:
-        doc = db.collection("fields").document(user_id).get()
+        doc = db.collection("fields")\
+            .document(user_id)\
+            .collection("user_fields")\
+            .document(field_id)\
+            .get()
 
         if doc.exists:
             data = doc.to_dict()
-            ndvi = data.get("ndvi")
-            ndvi_time = data.get("ndvi_updated")
+            return {
+                "ndvi": data.get("ndvi"),
+                "updated": data.get("ndvi_updated")
+            }
 
-            if ndvi is not None and ndvi_time:
-                try:
-                    last = datetime.fromisoformat(ndvi_time)
-
-            # 🔥 TTL = 6 HOURS
-                    if datetime.utcnow() - last < timedelta(hours=6):
-                        return ndvi
-
-                except Exception as e:
-                    print("NDVI time parse error:", e)
-            return None
+        return {"ndvi": None}
 
     except Exception as e:
         print("NDVI fetch error:", e)
-        return None
-
-
+        return {"ndvi": None}
 
 @app.post("/smart-alerts")
 def smart_alerts(data: dict):
@@ -1412,7 +1404,8 @@ def smart_alerts(data: dict):
 
             # ================= NDVI =================
             try:
-                ndvi = get_ndvi(lat, lon, user_id)
+                field_id = u.get("field_id", "default")
+                ndvi = get_ndvi(lat, lon, user_id, field_id)
             except:
                 ndvi = None
 
