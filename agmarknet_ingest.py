@@ -36,7 +36,7 @@ def fetch_data():
     params = {
         "api-key": API_KEY,
         "format": "json",
-        "limit": 100
+        "limit": 1000
     }
 
     # 🔥 RETRY LOGIC
@@ -62,42 +62,66 @@ def fetch_data():
 
     except Exception as e:
         print("API ERROR:", e)
-        return []
+        return pd.DataFrame()
 
 # ================= CLEAN =================
 def clean_data(data):
 
+    if not data:
+        print("No API data received")
+        return pd.DataFrame()
+
     df = pd.DataFrame(data)
 
-    df = df.rename(columns={
-        "modal_price": "price",
-        "arrival_date": "date"
-    })
+    # 🔥 normalize column names
+    df.columns = df.columns.str.strip().str.lower()
 
+    print("AVAILABLE COLUMNS:", df.columns.tolist())
+
+    # 🔥 flexible rename
+    rename_map = {}
+
+    if "modal_price" in df.columns:
+        rename_map["modal_price"] = "price"
+
+    if "arrival_date" in df.columns:
+        rename_map["arrival_date"] = "date"
+
+    df = df.rename(columns=rename_map)
+
+    # 🔥 required columns check
+    required = ["commodity", "district", "market", "price", "date"]
+
+    missing = [c for c in required if c not in df.columns]
+
+    if missing:
+        print("❌ Missing columns:", missing)
+        return pd.DataFrame()
+
+    # 🔥 safe numeric conversion
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
 
+    # 🔥 safe date parsing
     df["date"] = pd.to_datetime(
         df["date"],
         format="%d/%m/%Y",
         errors="coerce"
     )
 
-    df = df[[
-        "commodity",
-        "district",
-        "market",
-        "price",
-        "date"
-    ]]
+    # 🔥 keep only required columns
+    df = df[required]
 
+    # 🔥 remove invalid rows
     df = df.dropna()
 
+    # 🔥 remove duplicates
     df = df.drop_duplicates(
-    subset=["commodity", "district", "market", "date"],
-    keep="last"
+        subset=["commodity", "district", "market", "date"],
+        keep="last"
     )
 
-    print("Cleaned:", len(df))
+    print("✅ Cleaned rows:", len(df))
+
     return df
 
 # ================= SAVE (UPSERT FIX) =================
