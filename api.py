@@ -1094,6 +1094,76 @@ def get_users():
             })
 
     return data
+def get_scheme_alerts(user_id, lang="en"):
+
+    alerts = []
+
+    try:
+
+        saved = db.collection("users")\
+            .document(user_id)\
+            .collection("savedSchemes")\
+            .stream()
+
+        now = datetime.utcnow()
+
+        for s in saved:
+
+            data = s.to_dict()
+
+            if not data.get(
+                "reminderEnabled",
+                True
+            ):
+                continue
+
+            scheme_doc = db.collection(
+                "schemes"
+            ).document(s.id).get()
+
+            if not scheme_doc.exists:
+                continue
+
+            scheme = scheme_doc.to_dict()
+
+            last_date = scheme.get(
+                "lastDate"
+            )
+
+            if not last_date:
+                continue
+
+            diff = (
+                last_date -
+                now
+            ).days
+
+            if diff in [7, 3, 1]:
+
+                title = (
+                    "📢 Scheme Reminder"
+                    if lang == "en"
+                    else "📢 স্কিম রিমাইন্ডার"
+                )
+
+                body = (
+                    f"{scheme.get('title')} closes in {diff} day(s)"
+                    if lang == "en"
+                    else f"{scheme.get('title')} এর শেষ তারিখ {diff} দিনের মধ্যে"
+                )
+
+                alerts.append(
+                    (title, body)
+                )
+
+    except Exception as e:
+
+        print(
+            "Scheme alert error:",
+            e
+        )
+
+    return alerts
 
 def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_list, market_price):
     price = market_price
@@ -1419,6 +1489,14 @@ def smart_alerts(data: dict):
             # ================= ALERTS =================
             alerts = build_24_notifications(
                 lang, weather, temp, humidity, ndvi, forecast, news_cache, market_cache
+            )
+            scheme_alerts = get_scheme_alerts(
+                user_id,
+                lang,
+            )
+
+            alerts.extend(
+                scheme_alerts
             )
 
             # ================= COOLDOWN =================

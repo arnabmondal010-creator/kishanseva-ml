@@ -39,35 +39,63 @@ def fetch_data():
         "limit": 1000
     }
 
-    # 🔥 RETRY LOGIC
     session = requests.Session()
+
     retries = Retry(
         total=5,
         backoff_factor=2,
-        status_forcelist=[500, 502, 503, 504],
+        status_forcelist=[
+            500,
+            502,
+            503,
+            504
+        ],
     )
-    adapter = HTTPAdapter(max_retries=retries)
-    session.mount("https://", adapter)
+
+    adapter = HTTPAdapter(
+        max_retries=retries
+    )
+
+    session.mount(
+        "https://",
+        adapter
+    )
 
     try:
-        r = session.get(url, params=params, timeout=20)
+
+        r = session.get(
+            url,
+            params=params,
+            timeout=(30, 120)
+        )
 
         if r.status_code != 200:
-            raise Exception(f"API failed: {r.text}")
 
-        data = r.json().get("records", [])
+            raise Exception(
+                f"API failed: {r.text}"
+            )
 
-        print("Fetched:", len(data))
+        data = r.json().get(
+            "records",
+            []
+        )
+
+        print(
+            "Fetched:",
+            len(data)
+        )
+
         return data
 
     except Exception as e:
-        print("API ERROR:", e)
-        return pd.DataFrame()
 
+        print("API ERROR:", e)
+
+        return []
 # ================= CLEAN =================
 def clean_data(data):
 
-    if not data:
+    if data is None or len(data) == 0:
         print("No API data received")
         return pd.DataFrame()
 
@@ -167,6 +195,25 @@ def save_to_db(df):
 if __name__ == "__main__":
 
     raw = fetch_data()
+
+    if not raw:
+
+        print(
+            "❌ No data fetched"
+        )
+
+        exit()
+
     df = clean_data(raw)
+
+    if df.empty:
+
+        print(
+            "❌ No cleaned data"
+        )
+
+        exit()
+
     print(df.head())
+
     save_to_db(df)
