@@ -28,6 +28,12 @@ def to_bengali_number(text):
     table = str.maketrans(en, bn)
     return str(text).translate(table)
 
+def to_hindi_number(text):
+    en = "0123456789"
+    hi = "०१२३४५६७८९"
+    table = str.maketrans(en, hi)
+    return str(text).translate(table)
+
 def get_yield_prediction(ndvi, temp, humidity):
     try:
         url = "https://kishanseva-ai.onrender.com/predict-yield"
@@ -46,28 +52,60 @@ def get_yield_prediction(ndvi, temp, humidity):
         return None
     
 def get_time_period(dt, lang):
+
     hour = dt.hour
 
+    # Bengali
     if lang == "bn":
+
         if 4 <= hour < 10:
             return "সকাল"
+
         elif 10 <= hour < 14:
             return "দুপুর"
+
         elif 14 <= hour < 17:
             return "বিকাল"
+
         elif 17 <= hour < 20:
             return "সন্ধ্যা"
+
         else:
             return "রাত"
+
+    # Hindi
+    elif lang == "hi":
+
+        if 4 <= hour < 10:
+            return "सुबह"
+
+        elif 10 <= hour < 14:
+            return "दोपहर"
+
+        elif 14 <= hour < 17:
+            return "शाम"
+
+        elif 17 <= hour < 20:
+            return "संध्या"
+
+        else:
+            return "रात"
+
+    # English
     else:
+
         if 4 <= hour < 10:
             return "morning"
+
         elif 10 <= hour < 14:
             return "noon"
+
         elif 14 <= hour < 17:
             return "afternoon"
+
         elif 17 <= hour < 20:
             return "evening"
+
         else:
             return "night"
     
@@ -1010,6 +1048,13 @@ def notify_all():
     sent = 0
 
     for user in users:
+        notifications_enabled = data.get(
+            "notifications_enabled",
+            True,
+        )
+
+        if not notifications_enabled:
+            continue
         data = user.to_dict()
         token = data.get("fcm_token")
 
@@ -1041,19 +1086,27 @@ def notify_all():
 # ================= TOPIC =================
 
 @app.post("/notify-topic")
-def notify_topic(title: str, body: str):
+def notify_topic(
+    title: str,
+    body: str,
+    lang: str = "en",
+):
 
     message = messaging.Message(
         notification=messaging.Notification(
             title=title,
             body=body,
         ),
-        topic="all_users",
+
+        topic=f"alerts_{lang}",
     )
 
     messaging.send(message)
 
-    return {"success": True}
+    return {
+        "success": True,
+        "topic": f"alerts_{lang}",
+    }
 
 
 # ================= DAILY =================
@@ -1061,15 +1114,35 @@ def notify_topic(title: str, body: str):
 @app.get("/daily-reminder")
 def daily_reminder():
 
-    message = messaging.Message(
-        notification=messaging.Notification(
-            title="Daily Reminder 🌱",
-            body="Check your crop health today",
-        ),
-        topic="all_users",
-    )
+    langs = ["en", "bn", "hi"]
 
-    messaging.send(message)
+    for lang in langs:
+
+        if lang == "bn":
+
+            title = "দৈনিক অনুস্মারক 🌱"
+            body = "আজ আপনার ফসলের অবস্থা দেখুন"
+
+        elif lang == "hi":
+
+            title = "दैनिक अनुस्मारक 🌱"
+            body = "आज अपनी फसल की स्थिति देखें"
+
+        else:
+
+            title = "Daily Reminder 🌱"
+            body = "Check your crop health today"
+
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+
+            topic=f"alerts_{lang}",
+        )
+
+        messaging.send(message)
 
     return {"sent": True}
 
@@ -1207,8 +1280,15 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
 
     alerts = []
 
-    def t(en, bn):
-        return bn if lang == "bn" else en
+    def t(en, bn, hi=None):
+
+        if lang == "bn":
+            return bn
+
+        elif lang == "hi":
+            return hi if hi else en
+
+    
 
     # ================= 1. 🌧 RAIN TIMING =================
     for item in forecast.get("list", [])[:12]:  # next 24h
@@ -1227,17 +1307,42 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
             if lang == "bn":
                 time_str = to_bengali_number(time_str)
 
+            elif lang == "hi":
+                time_str = to_hindi_number(time_str)
+
 # 🔥 TODAY CALCULATION
             today = datetime.utcnow() + timedelta(hours=5, minutes=30)
                 
             if dt_ist.date() == today.date():
-                day_label = "আজ" if lang == "bn" else "Today"
+                day_label = (
+                        "আজ" if lang == "bn"
+                        else "आज" if lang == "hi"
+                        else "Today"
+                )
 
             elif dt_ist.date() == (today + timedelta(days=1)).date():
-                day_label = "আগামীকাল" if lang == "bn" else "Tomorrow"
+                day_label = (
+                        "আগামীকাল" if lang == "bn"
+                        else "कल" if lang == "hi"
+                        else "Tomorrow"
+                )
 
             else:
-                day_label = dt_ist.strftime("%d %b")
+                (
+                    to_bengali_number(
+                    dt_ist.strftime("%d %b")
+                )
+
+                if lang == "bn"
+
+                else to_hindi_number(
+                    dt_ist.strftime("%d %b")
+                )
+
+                if lang == "hi"
+
+                else dt_ist.strftime("%d %b")
+                )
 
             alerts.append((
                 t("🌧 Rain Alert", "🌧 বৃষ্টি সতর্কতা"),
@@ -1471,10 +1576,18 @@ def smart_alerts(data: dict):
     
     for u in users:
         try:
+            d = u.to_dict()
             user_id = u.get("id")
             if not user_id:
-                print("❌ Missing user_id → skip")
+                notifications_enabled = d.get(
+                    "notifications_enabled",
+                    True,
+                )
+
+            if not notifications_enabled:
                 continue
+            #print("❌ Missing user_id → skip")
+           # continue
             lang = get_user_lang(user_id)
             news_cache = get_agri_news(lang)
 
