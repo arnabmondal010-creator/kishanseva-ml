@@ -685,7 +685,10 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # 🔥 PROMPT
 def build_prompt(crop, lang):
+
+    # Bengali
     if lang == "bn":
+
         return f"""
 তুমি একজন কৃষি বিশেষজ্ঞ।
 
@@ -702,19 +705,46 @@ def build_prompt(crop, lang):
 - সহজ কৃষক-বান্ধব ভাষা ব্যবহার করবে
 - কীটনাশক বা সমাধান বলবে
 """
-    else:
+
+    # Hindi
+    elif lang == "hi":
+
         return f"""
-You are an agriculture expert.
+तुम एक कृषि विशेषज्ञ हो।
 
-Analyze this {crop} leaf image.
+इस {crop} फसल की पत्ती की तस्वीर का विश्लेषण करो।
 
-Give pesticide solution.
-
-Return ONLY JSON:
+सिर्फ JSON फॉर्मेट में उत्तर दो:
 {{
   "disease": "...",
   "advice": "..."
 }}
+
+नियम:
+- पूरा उत्तर हिंदी में होना चाहिए
+- आसान किसान-हितैषी भाषा का उपयोग करो
+- बीमारी और समाधान स्पष्ट बताओ
+- कीटनाशक या उपचार भी बताओ
+"""
+
+    # English
+    else:
+
+        return f"""
+You are an agriculture expert.
+
+Analyze this {crop} crop leaf image.
+
+Return ONLY valid JSON:
+{{
+  "disease": "...",
+  "advice": "..."
+}}
+
+Rules:
+- Respond in English
+- Use farmer-friendly language
+- Mention treatment and pesticide if needed
 """
 
 
@@ -789,8 +819,15 @@ async def predict_disease(
         print("ERROR:", e)
 
         return {
-            "disease": "অজানা" if lang == "bn" else "Unknown",
-            "advice": "সার্ভার সমস্যা" if lang == "bn" else "Server error"
+            "disease":
+                "অজানা" if lang == "bn"
+        else "अज्ञात" if lang == "hi"
+        else "Unknown",
+
+             "advice":
+                "সার্ভার সমস্যা" if lang == "bn"
+        else "सर्वर समस्या" if lang == "hi"
+        else "Server error"
         }
     
 
