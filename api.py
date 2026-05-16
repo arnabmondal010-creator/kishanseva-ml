@@ -1275,7 +1275,17 @@ def get_scheme_alerts(user_id, lang="en"):
 
     return alerts
 
-def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_list, market_price):
+def build_24_notifications(
+    lang,
+    weather,
+    temp,
+    humidity,
+    ndvi,
+    forecast,
+    news_list,
+    market_price,
+):
+
     price = market_price
 
     alerts = []
@@ -1288,256 +1298,664 @@ def build_24_notifications(lang, weather, temp, humidity, ndvi, forecast, news_l
         elif lang == "hi":
             return hi if hi else en
 
-    
+        return en
 
     # ================= 1. 🌧 RAIN TIMING =================
-    for item in forecast.get("list", [])[:12]:  # next 24h
-        cond = item.get("weather", [{}])[0].get("main", "").lower()
+    for item in forecast.get("list", [])[:12]:
+
+        cond = item.get(
+            "weather",
+            [{}]
+        )[0].get(
+            "main",
+            ""
+        ).lower()
 
         if "rain" in cond:
+
             ts = item.get("dt_txt")
 
-            dt_utc = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-            dt_ist = dt_utc + timedelta(hours=5, minutes=30)
-            # 🔥 TIME LOGIC (CLEAN)
-            period = get_time_period(dt_ist, lang)
+            dt_utc = datetime.strptime(
+                ts,
+                "%Y-%m-%d %H:%M:%S"
+            )
 
-            time_str = dt_ist.strftime("%I:%M")
+            dt_ist = dt_utc + timedelta(
+                hours=5,
+                minutes=30,
+            )
+
+            period = get_time_period(
+                dt_ist,
+                lang,
+            )
+
+            time_str = dt_ist.strftime(
+                "%I:%M"
+            )
 
             if lang == "bn":
-                time_str = to_bengali_number(time_str)
 
-            elif lang == "hi":
-                time_str = to_hindi_number(time_str)
-
-# 🔥 TODAY CALCULATION
-            today = datetime.utcnow() + timedelta(hours=5, minutes=30)
-                
-            if dt_ist.date() == today.date():
-                day_label = (
-                        "আজ" if lang == "bn"
-                        else "आज" if lang == "hi"
-                        else "Today"
+                time_str = to_bengali_number(
+                    time_str
                 )
 
-            elif dt_ist.date() == (today + timedelta(days=1)).date():
+            elif lang == "hi":
+
+                time_str = to_hindi_number(
+                    time_str
+                )
+
+            today = datetime.utcnow() + timedelta(
+                hours=5,
+                minutes=30,
+            )
+
+            if dt_ist.date() == today.date():
+
                 day_label = (
-                        "আগামীকাল" if lang == "bn"
-                        else "कल" if lang == "hi"
-                        else "Tomorrow"
+                    "আজ"
+                    if lang == "bn"
+                    else "आज"
+                    if lang == "hi"
+                    else "Today"
+                )
+
+            elif dt_ist.date() == (
+                today + timedelta(days=1)
+            ).date():
+
+                day_label = (
+                    "আগামীকাল"
+                    if lang == "bn"
+                    else "कल"
+                    if lang == "hi"
+                    else "Tomorrow"
                 )
 
             else:
-                (
+
+                day_label = (
                     to_bengali_number(
-                    dt_ist.strftime("%d %b")
-                )
+                        dt_ist.strftime(
+                            "%d %b"
+                        )
+                    )
 
-                if lang == "bn"
+                    if lang == "bn"
 
-                else to_hindi_number(
-                    dt_ist.strftime("%d %b")
-                )
+                    else to_hindi_number(
+                        dt_ist.strftime(
+                            "%d %b"
+                        )
+                    )
 
-                if lang == "hi"
+                    if lang == "hi"
 
-                else dt_ist.strftime("%d %b")
+                    else dt_ist.strftime(
+                        "%d %b"
+                    )
                 )
 
             alerts.append((
-                t("🌧 Rain Alert", "🌧 বৃষ্টি সতর্কতা"),
+
+                t(
+                    "🌧 Rain Alert",
+                    "🌧 বৃষ্টি সতর্কতা",
+                    "🌧 बारिश चेतावनी"
+                ),
+
                 t(
                     f"Rain expected {day_label} {period} around {time_str}",
-                    f"{day_label} {period} {time_str} বৃষ্টি হওয়ার সম্ভাবনা আছে"
+                    f"{day_label} {period} {time_str} বৃষ্টি হওয়ার সম্ভাবনা আছে",
+                    f"{day_label} {period} लगभग {time_str} बजे बारिश की संभावना है"
                 )
             ))
+
             break
 
     # ================= 2. 🚨 NDVI / CROP =================
     if ndvi is not None:
+
         if ndvi < 0.3:
+
             alerts.append((
-                t("🚨 Crop Critical", "🚨 ফসল ঝুঁকিপূর্ণ"),
-                t("Very low vegetation health",
-                  "ফসলের অবস্থা খুব খারাপ")
+
+                t(
+                    "🚨 Crop Critical",
+                    "🚨 ফসল ঝুঁকিপূর্ণ",
+                    "🚨 फसल संकट"
+                ),
+
+                t(
+                    "Very low vegetation health",
+                    "ফসলের অবস্থা খুব খারাপ",
+                    "फसल की स्थिति बहुत खराब है"
+                )
             ))
+
         elif ndvi < 0.5:
+
             alerts.append((
-                t("⚠️ Crop Moderate", "⚠️ মাঝারি ফসল"),
-                t("Moderate crop condition",
-                  "ফসলের অবস্থা মাঝারি")
+
+                t(
+                    "⚠️ Crop Moderate",
+                    "⚠️ মাঝারি ফসল",
+                    "⚠️ मध्यम फसल"
+                ),
+
+                t(
+                    "Moderate crop condition",
+                    "ফসলের অবস্থা মাঝারি",
+                    "फसल की स्थिति मध्यम है"
+                )
             ))
+
         else:
+
             alerts.append((
-                t("✅ Healthy Crop", "✅ ভালো ফসল"),
-                t("Crop health is good",
-                  "ফসলের অবস্থা ভালো")
+
+                t(
+                    "✅ Healthy Crop",
+                    "✅ ভালো ফসল",
+                    "✅ स्वस्थ फसल"
+                ),
+
+                t(
+                    "Crop health is good",
+                    "ফসলের অবস্থা ভালো",
+                    "फसल की स्थिति अच्छी है"
+                )
             ))
-
-    rain_soon = False
-    
-
-    for item in forecast.get("list", [])[:12]:
-        cond = item.get("weather", [{}])[0].get("main", "").lower()
-
-        if "rain" in cond:
-            ts = item.get("dt_txt")
-            dt_utc = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-            dt_ist = dt_utc + timedelta(hours=5, minutes=30)
-
-            now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-
-            if dt_ist <= now_ist + timedelta(hours=6):
-                rain_soon = True
-                rain_time = dt_ist
-                break
 
     # ================= 3. 💧 IRRIGATION =================
-    irrigation = get_irrigation(temp, humidity, ndvi)
+    rain_soon = False
+
+    for item in forecast.get("list", [])[:12]:
+
+        cond = item.get(
+            "weather",
+            [{}]
+        )[0].get(
+            "main",
+            ""
+        ).lower()
+
+        if "rain" in cond:
+
+            ts = item.get("dt_txt")
+
+            dt_utc = datetime.strptime(
+                ts,
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            dt_ist = dt_utc + timedelta(
+                hours=5,
+                minutes=30,
+            )
+
+            now_ist = datetime.utcnow() + timedelta(
+                hours=5,
+                minutes=30,
+            )
+
+            if dt_ist <= now_ist + timedelta(hours=6):
+
+                rain_soon = True
+
+                break
+
+    irrigation = get_irrigation(
+        temp,
+        humidity,
+        ndvi,
+    )
 
     if irrigation is not None:
 
-        irrigation_val = round(float(irrigation), 1)
+        irrigation_val = round(
+            float(irrigation),
+            1,
+        )
 
-    # 🔥 RAIN-AWARE DECISION (critical upgrade)
         if rain_soon:
-            en_msg = "Rain expected soon → skip irrigation"
-            bn_msg = "শীঘ্রই বৃষ্টি হবে → সেচ বন্ধ রাখুন"
+
+            en_msg = (
+                "Rain expected soon → skip irrigation"
+            )
+
+            bn_msg = (
+                "শীঘ্রই বৃষ্টি হবে → সেচ বন্ধ রাখুন"
+            )
+
+            hi_msg = (
+                "जल्द बारिश होगी → सिंचाई रोकें"
+            )
 
         elif irrigation_val < 5:
-            en_msg = "No irrigation needed"
-            bn_msg = "এখন সেচ প্রয়োজন নেই"
+
+            en_msg = (
+                "No irrigation needed"
+            )
+
+            bn_msg = (
+                "এখন সেচ প্রয়োজন নেই"
+            )
+
+            hi_msg = (
+                "अभी सिंचाई की आवश्यकता नहीं है"
+            )
 
         elif irrigation_val < 15:
-            en_msg = f"Light irrigation: {irrigation_val} mm"
-            bn_msg = f"হালকা জলসেচ করুন: {irrigation_val} মিমি"
+
+            en_msg = (
+                f"Light irrigation: {irrigation_val} mm"
+            )
+
+            bn_msg = (
+                f"হালকা জলসেচ করুন: {irrigation_val} মিমি"
+            )
+
+            hi_msg = (
+                f"हल्की सिंचाई करें: {irrigation_val} मिमी"
+            )
 
         else:
-            en_msg = f"Apply irrigation: {irrigation_val} mm"
-            bn_msg = f"{irrigation_val} মিমি জলসেচ করুন"
 
-    # 🔥 Bengali number localization
+            en_msg = (
+                f"Apply irrigation: {irrigation_val} mm"
+            )
+
+            bn_msg = (
+                f"{irrigation_val} মিমি জলসেচ করুন"
+            )
+
+            hi_msg = (
+                f"{irrigation_val} मिमी सिंचाई करें"
+            )
+
         if lang == "bn":
-            irrigation_str = to_bengali_number(str(irrigation_val))
-            bn_msg = bn_msg.replace(str(irrigation_val), irrigation_str)
+
+            irrigation_str = to_bengali_number(
+                str(irrigation_val)
+            )
+
+            bn_msg = bn_msg.replace(
+                str(irrigation_val),
+                irrigation_str,
+            )
+
+        elif lang == "hi":
+
+            irrigation_str = to_hindi_number(
+                str(irrigation_val)
+            )
+
+            hi_msg = hi_msg.replace(
+                str(irrigation_val),
+                irrigation_str,
+            )
 
         alerts.append((
-            t("💧 Irrigation Advice", "💧 সেচ পরামর্শ"),
-            t(en_msg, bn_msg)
+
+            t(
+                "💧 Irrigation Advice",
+                "💧 সেচ পরামর্শ",
+                "💧 सिंचाई सलाह"
+            ),
+
+            t(
+                en_msg,
+                bn_msg,
+                hi_msg,
+            )
         ))
 
     # ================= 4. 🌾 YIELD =================
     if ndvi is not None:
 
-        yield_est = get_yield_prediction(ndvi, temp, 60)
+        yield_est = get_yield_prediction(
+            ndvi,
+            temp,
+            60,
+        )
 
         if yield_est is not None:
 
-        # 🔥 round value
-            y = round(float(yield_est), 2)
+            y = round(
+                float(yield_est),
+                2,
+            )
 
-        # 🔥 interpretation (VERY IMPORTANT)
             if y < 2:
-                en_msg = f"Low yield expected: {y} t/ha"
-                bn_msg = f"কম ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+
+                en_msg = (
+                    f"Low yield expected: {y} t/ha"
+                )
+
+                bn_msg = (
+                    f"কম ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+                )
+
+                hi_msg = (
+                    f"कम उत्पादन की संभावना: {y} टन/हेक्टेयर"
+                )
+
             elif y < 4:
-                en_msg = f"Moderate yield expected: {y} t/ha"
-                bn_msg = f"মাঝারি ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+
+                en_msg = (
+                    f"Moderate yield expected: {y} t/ha"
+                )
+
+                bn_msg = (
+                    f"মাঝারি ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+                )
+
+                hi_msg = (
+                    f"मध्यम उत्पादन की संभावना: {y} टन/हेक्टेयर"
+                )
+
             else:
-                en_msg = f"Good yield expected: {y} t/ha"
-                bn_msg = f"ভালো ফলনের সম্ভাবনা: {y} টন/হেক্টর"
 
-        # 🔥 number localization
-            if lang == "bn":
-                y_str = to_bengali_number(str(y))
-                bn_msg = bn_msg.replace(str(y), y_str)
+                en_msg = (
+                    f"Good yield expected: {y} t/ha"
+                )
 
-            alerts.append((
-                t("🌾 Yield Forecast", "🌾 ফলন পূর্বাভাস"),
-                t(en_msg, bn_msg)
-            ))
+                bn_msg = (
+                    f"ভালো ফলনের সম্ভাবনা: {y} টন/হেক্টর"
+                )
 
-    # ================= 5. 🌤 WEATHER =================
+                hi_msg = (
+                    f"अच्छे उत्पादन की संभावना: {y} टन/हेक्टेयर"
+                )
+
+        alerts.append((
+
+            t(
+                "🌾 Yield Forecast",
+                "🌾 ফলন পূর্বাভাস",
+                "🌾 उत्पादन पूर्वानुमान"
+            ),
+
+            t(
+                en_msg,
+                bn_msg,
+                hi_msg,
+            )
+        ))
+
+   
+
+        temp_str = str(temp)
+
+        if lang == "bn":
+
+            temp_str = to_bengali_number(
+                temp_str
+            )
+        elif lang == "hi":
+
+            temp_str = to_hindi_number(
+                temp_str
+            )
+
+        weather_msg = (
+            f"{weather}, {temp_str}°C"
+        )
+
+        alerts.append((
+
+            t(
+                "🌤 Weather Update",
+                "🌤 আবহাওয়ার আপডেট",
+                "🌤 मौसम अपडेट"
+            ),
+
+            weather_msg
+        ))
+            
+
+
     alerts.append((
-        t("🌤 Weather Update", "🌤 আবহাওয়ার আপডেট"),
-        t(f"{weather}, {temp}°C",
-          f"{weather}, {temp}°C")
-    ))
 
-    alerts.append((
-        t("🌙 Tomorrow Planning", "🌙 আগামী দিনের পরিকল্পনা"),
-        t("Prepare for tomorrow farming",
-          "আগামীকালের কৃষিকাজের জন্য প্রস্তুতি নিন")
+        t(
+            "🌙 Tomorrow Planning",
+            "🌙 আগামী দিনের পরিকল্পনা",
+            "🌙 कल की योजना"
+        ),
+
+        t(
+            "Prepare for tomorrow farming",
+            "আগামীকালের কৃষিকাজের জন্য প্রস্তুতি নিন",
+            "कल की खेती की तैयारी करें"
+        )
     ))
 
     # ================= 6. 💰 MARKET =================
-    price = market_price
 
-    if price:
-        alerts.append((
-            t("💰 Market Price", "💰 বাজার মূল্য"),
-            price
-        ))
     
+    
+    if price:
+
+        if lang == "bn":
+
+            price = to_bengali_number(
+                str(price)
+            )
+
+        elif lang == "hi":
+
+            price = to_hindi_number(
+                str(price)
+            )
+
+            alerts.append((
+
+                t(
+                    "💰 Market Price",
+                    "💰 বাজার মূল্য",
+                    "💰 बाजार मूल्य"
+                ),
+
+                price
+            ))
 
         alerts.append((
-            t("📈 Sell Opportunity", "📈 বিক্রির সুযোগ"),
-            t("Prices may increase today",
-          "আজ দাম বাড়তে পারে")
+
+            t(
+                "📈 Sell Opportunity",
+                "📈 বিক্রির সুযোগ",
+                "📈 बिक्री का अवसर"
+            ),
+
+            t(
+                "Prices may increase today",
+                "আজ দাম বাড়তে পারে",
+                "आज कीमत बढ़ सकती है"
+            )
         ))
 
     # ================= 7. 📰 NEWS =================
     if news_list:
+
         for n in news_list[:2]:
+
             alerts.append((
-                t("📰 Agri News", "📰 কৃষি সংবাদ"),
+
+                t(
+                    "📰 Agri News",
+                    "📰 কৃষি সংবাদ",
+                    "📰 कृषि समाचार"
+                ),
+
                 n
             ))
+
     else:
+
         alerts.append((
-            t("📰 Agri News", "📰 কৃষি সংবাদ"),
-            t("Latest farming updates available",
-              "নতুন কৃষি সংবাদ দেখুন")
+
+            t(
+                "📰 Agri News",
+                "📰 কৃষি সংবাদ",
+                "📰 कृषि समाचार"
+            ),
+
+            t(
+                "Latest farming updates available",
+                "নতুন কৃষি সংবাদ দেখুন",
+                "नई कृषि जानकारी देखें"
+            )
         ))
 
+    # ================= 8. 🚨 STRESS =================
     if ndvi is not None and temp is not None:
+
         if ndvi < 0.4 and temp > 30:
+
             alerts.append((
-                t("🚨 Crop Stress", "🚨 ফসলের চাপ"),
-                t("Low NDVI + high temp → irrigate today",
-                "কম NDVI + বেশি তাপ → আজই জলসেচ করুন")
+
+                t(
+                    "🚨 Crop Stress",
+                    "🚨 ফসলের চাপ",
+                    "🚨 फसल तनाव"
+                ),
+
+                t(
+                    "Low NDVI + high temp → irrigate today",
+                    "কম NDVI + বেশি তাপ → আজই জলসেচ করুন",
+                    "कम NDVI + अधिक तापमान → आज सिंचाई करें"
+                )
             ))
 
-    # ================= 8. 📊 ENGAGEMENT =================
+    # ================= 9. 📊 ENGAGEMENT =================
     alerts += [
-        (t("📊 NDVI Check", "📊 NDVI চেক করুন"),
-         t("See your crop health map", "আপনার জমির অবস্থা দেখুন")),
 
-        (t("📱 Open App", "📱 অ্যাপ খুলুন"),
-         t("Check farm insights now", "এখনই ফসলের তথ্য দেখুন")),
+        (
+            t(
+                "📊 NDVI Check",
+                "📊 NDVI চেক করুন",
+                "📊 NDVI जांचें"
+            ),
 
-        (t("🧠 Smart Tip", "🧠 স্মার্ট পরামর্শ"),
-         t("AI can improve your yield", "AI ব্যবহার করে ফলন বাড়ান")),
+            t(
+                "See your crop health map",
+                "আপনার জমির অবস্থা দেখুন",
+                "अपनी फसल की स्थिति देखें"
+            )
+        ),
+
+        (
+            t(
+                "📱 Open App",
+                "📱 অ্যাপ খুলুন",
+                "📱 ऐप खोलें"
+            ),
+
+            t(
+                "Check farm insights now",
+                "এখনই ফসলের তথ্য দেখুন",
+                "अभी खेती की जानकारी देखें"
+            )
+        ),
+
+        (
+            t(
+                "🧠 Smart Tip",
+                "🧠 স্মার্ট পরামর্শ",
+                "🧠 स्मार्ट सलाह"
+            ),
+
+            t(
+                "AI can improve your yield",
+                "AI ব্যবহার করে ফলন বাড়ান",
+                "AI से उत्पादन बढ़ाएं"
+            )
+        ),
     ]
 
-    # ================= 9. 🌱 PRODUCTIVE TIPS =================
+    # ================= 10. 🌱 TIPS =================
     tips = [
-        ("Monitor crop daily", "নিয়মিত ফসল দেখুন"),
-        ("Check soil moisture", "মাটির আর্দ্রতা পরীক্ষা করুন"),
-        ("Apply fertilizer if needed", "প্রয়োজনে সার দিন"),
-        ("Check pest attack", "পোকামাকড় দেখুন"),
-        ("Update farm diary", "ফার্ম ডায়েরি আপডেট করুন"),
-        ("Use satellite insights", "স্যাটেলাইট ডাটা ব্যবহার করুন"),
+
+        (
+            "Monitor crop daily",
+            "নিয়মিত ফসল দেখুন",
+            "फसल की नियमित निगरानी करें"
+        ),
+
+        (
+            "Check soil moisture",
+            "মাটির আর্দ্রতা পরীক্ষা করুন",
+            "मिट्टी की नमी जांचें"
+        ),
+
+        (
+            "Apply fertilizer if needed",
+            "প্রয়োজনে সার দিন",
+            "जरूरत होने पर उर्वरक दें"
+        ),
+
+        (
+            "Check pest attack",
+            "পোকামাকড় দেখুন",
+            "कीट आक्रमण जांचें"
+        ),
+
+        (
+            "Update farm diary",
+            "ফার্ম ডায়েরি আপডেট করুন",
+            "फार्म डायरी अपडेट करें"
+        ),
+
+        (
+            "Use satellite insights",
+            "স্যাটেলাইট ডাটা ব্যবহার করুন",
+            "सैटेलाइट डेटा का उपयोग करें"
+        ),
     ]
 
-    for en, bn in tips:
-        alerts.append((t("🌱 Tip", "🌱 পরামর্শ"), t(en, bn)))
+    for en, bn, hi in tips:
 
-    # ================= 10. FILL TO 24 =================
+        alerts.append((
+
+            t(
+                "🌱 Tip",
+                "🌱 পরামর্শ",
+                "🌱 सलाह"
+            ),
+
+            t(
+                en,
+                bn,
+                hi,
+            )
+        ))
+
+    # ================= 11. FILL TO 24 =================
     i = 0
+
     while len(alerts) < 24:
-        en, bn = tips[i % len(tips)]
-        alerts.append((t("🌱 Tip", "🌱 পরামর্শ"), t(en, bn)))
+
+        en, bn, hi = tips[
+            i % len(tips)
+        ]
+
+        alerts.append((
+
+            t(
+                "🌱 Tip",
+                "🌱 পরামর্শ",
+                "🌱 सलाह"
+            ),
+
+            t(
+                en,
+                bn,
+                hi,
+            )
+        ))
+
         i += 1
 
     return alerts[:24]
@@ -1565,6 +1983,10 @@ def get_ndvi_value(user_id: str, field_id: str):
         print("NDVI fetch error:", e)
         return {"ndvi": None}
 
+
+    
+    
+
 @app.post("/smart-alerts")
 def smart_alerts(data: dict):
 
@@ -1578,16 +2000,27 @@ def smart_alerts(data: dict):
         try:
             d = u.to_dict()
             user_id = u.get("id")
+            notifications_enabled = d.get(
+                "notifications_enabled",
+                True,
+            )
+
             if not user_id:
-                notifications_enabled = d.get(
-                    "notifications_enabled",
-                    True,
-                )
+                continue
+
+            if not notifications_enabled:
+                continue
 
             if not notifications_enabled:
                 continue
             #print("❌ Missing user_id → skip")
            # continue
+            print(
+                "USER:",
+                user_id,
+                "LANG:",
+                lang,
+            )
             lang = get_user_lang(user_id)
             news_cache = get_agri_news(lang)
 
@@ -1682,8 +2115,16 @@ def smart_alerts(data: dict):
                 index = random.randint(0, len(alerts) - 1)
 
 # 🔥 PRIORITY OVERRIDE
-            priority = [a for a in alerts if "Rain" in a[0] or "বৃষ্টি" in a[0]]
+            priority = [
 
+                a for a in alerts
+
+                if (
+                    "Rain" in a[0]
+                    or "বৃষ্টি" in a[0]
+                    or "बारिश" in a[0]
+                )
+            ]
             last_rain = prev.get("last_rain")
             last_rain_time = prev.get("last_rain_time")
 
