@@ -1991,6 +1991,7 @@ def get_ndvi_value(user_id: str, field_id: str):
 def smart_alerts(data: dict):
 
     users = get_users()
+    print(users)
     sent = 0
     print("TOTAL USERS:", len(users))
     #print("USER:", user_id, lat, lon, token)
@@ -2015,19 +2016,28 @@ def smart_alerts(data: dict):
                 continue
             #print("❌ Missing user_id → skip")
            # continue
+            lang = get_user_lang(user_id)
             print(
                 "USER:",
                 user_id,
                 "LANG:",
                 lang,
             )
-            lang = get_user_lang(user_id)
+            
             news_cache = get_agri_news(lang)
 
             lat = u.get("lat")
             lon = u.get("lon")
-            token = u.get("token")
-
+            token = (
+                u.get("token")
+                or u.get("fcm_token")
+                or u.get("device_token")
+            
+            )
+            print(
+                "TOKEN EXISTS:",
+                bool(token)
+            )
             # 🔥 HARD FILTER
             if not token or lat is None or lon is None:
                 continue
@@ -2181,7 +2191,13 @@ def smart_alerts(data: dict):
             # ================= SAVE =================
 
         except Exception as e:
+
+            import traceback
+
             print("❌ Error:", e)
+
+            traceback.print_exc()
+
             continue
 
     return {"sent": sent}
