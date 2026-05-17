@@ -1999,8 +1999,13 @@ def smart_alerts(data: dict):
     
     for u in users:
         try:
-            d = u.to_dict()
-            user_id = u.get("id")
+            d = u
+            print("USER DATA:", u)
+            user_id = (
+                u.get("id")
+                or u.get("user_id")
+                or u.get("uid")
+            )
             notifications_enabled = d.get(
                 "notifications_enabled",
                 True,
@@ -2039,7 +2044,16 @@ def smart_alerts(data: dict):
                 bool(token)
             )
             # 🔥 HARD FILTER
-            if not token or lat is None or lon is None:
+            if not token:
+
+                print("❌ Missing token")
+
+                continue
+
+            if lat is None or lon is None:
+
+                print("❌ Missing lat/lon")
+
                 continue
 
             now = datetime.utcnow() + timedelta(hours=5, minutes=30)  # convert to IST
