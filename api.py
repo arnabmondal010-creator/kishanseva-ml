@@ -2202,6 +2202,7 @@ def smart_alerts(data: dict):
 
 # 🔥 SEND
             message = messaging.Message(
+                
                 notification=messaging.Notification(
                     title=title,
                     body=body,
@@ -2210,6 +2211,7 @@ def smart_alerts(data: dict):
             )
 
             messaging.send(message)
+            print("✅ SENT TO:", user_id)
             sent += 1
 
 # 🔥 SAVE STATE
@@ -2229,6 +2231,9 @@ def smart_alerts(data: dict):
             # ================= SAVE =================
 
         except Exception as e:
+            print("FAILED USER:", user_id)
+            print("TOKEN:", token)
+            print("ERROR:", str(e))
 
             import traceback
 
