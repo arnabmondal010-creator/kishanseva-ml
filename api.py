@@ -1048,6 +1048,9 @@ def notify_all():
     sent = 0
 
     for user in users:
+
+        data = user.to_dict()
+
         notifications_enabled = data.get(
             "notifications_enabled",
             True,
@@ -1075,7 +1078,7 @@ def notify_all():
 
         except Exception as e:
             if "Requested entity was not found" in str(e):
-                db.collection("farmers").document(token).update({
+                db.collection("farmers").document(user.id).update({
                     "fcm_token": None
                 })
                 print("🧹 Removed invalid token")
@@ -1192,16 +1195,23 @@ def get_users():
     data = []
 
     for u in users:
+
         d = u.to_dict()
 
-        if d.get("lat") and d.get("lon"):
-
-            data.append({
-                "id": u.id,
-                "token": d.get("fcm_token"),
-                "lat": d.get("lat"),
-                "lon": d.get("lon"),
-            })
+        data.append({
+            "id": u.id,
+            "token": d.get("fcm_token"),
+            "lat": d.get("lat"),
+            "lon": d.get("lon"),
+            "notifications_enabled": d.get(
+                "notifications_enabled",
+                True
+            ),
+            "field_id": d.get(
+                "field_id",
+                "default"
+            )
+        })
 
     return data
 def get_scheme_alerts(user_id, lang="en"):
@@ -1991,6 +2001,14 @@ def get_ndvi_value(user_id: str, field_id: str):
 def smart_alerts(data: dict):
 
     users = get_users()
+    print("TOTAL USERS:", len(users))
+
+    valid_tokens = sum(
+        1 for u in users
+        if u.get("token")
+    )
+
+    print("USERS WITH TOKENS:", valid_tokens)
     print(users)
     sent = 0
     print("TOTAL USERS:", len(users))
@@ -2052,12 +2070,18 @@ def smart_alerts(data: dict):
 
             if lat is None or lon is None:
 
-                print("❌ Missing lat/lon")
+                print("⚠️ Missing lat/lon")
 
-                continue
+                weather = ""
+                temp = 30
+                humidity = 60
+                forecast = {}
+                ndvi = None
 
-            now = datetime.utcnow() + timedelta(hours=5, minutes=30)  # convert to IST
-            hour = now.hour
+            else:
+
+                now = datetime.utcnow() + timedelta(hours=5, minutes=30)  # convert to IST
+                hour = now.hour
 
             # ================= WEATHER =================
             key = os.getenv("OPENWEATHER_API_KEY")
