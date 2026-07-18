@@ -11,6 +11,7 @@ import feedparser
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import razorpay
 
 from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
@@ -1036,6 +1037,198 @@ db = firestore.Client(
     credentials=credentials_fs,
     project=firebase_key["project_id"],
 )
+# ================= RAZORPAY =================
+
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+
+if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+    raise Exception("Razorpay credentials not configured")
+
+razorpay_client = razorpay.Client(
+    auth=(
+        RAZORPAY_KEY_ID,
+        RAZORPAY_KEY_SECRET,
+    )
+)
+
+print("Razorpay initialized")
+class CreateRazorpayOrderRequest(BaseModel):
+    listingId: str
+
+def verify_firebase_token(
+    authorization: str = Header(...),
+):
+
+    try:
+
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authorization header",
+            )
+
+        token = authorization.split(
+            "Bearer ",
+            1,
+        )[1]
+
+        decoded_token = auth.verify_id_token(
+            token
+        )
+
+        return decoded_token
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired authentication token",
+        )
+    
+    @app.post("/payments/razorpay/create-order")
+async def create_razorpay_order(
+    request: CreateRazorpayOrderRequest,
+    user=Depends(verify_firebase_token),
+):
+
+    try:
+
+        # Logged-in buyer UID comes from Firebase token
+        buyer_id = user["uid"]
+
+        # ==============================
+        # GET LISTING FROM FIRESTORE
+        # ==============================
+
+        listing_ref = (
+            db.collection("commerce_listings")
+            .document(request.listingId)
+        )
+
+        listing_doc = listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Listing not found",
+            )
+
+        listing = listing_doc.to_dict()
+
+        # ==============================
+        # VALIDATE LISTING
+        # ==============================
+
+        if listing.get("status") != "active":
+            raise HTTPException(
+                status_code=400,
+                detail="Listing is not active",
+            )
+
+        if listing.get("sold", False) is True:
+            raise HTTPException(
+                status_code=400,
+                detail="Listing already sold",
+            )
+
+        if listing.get(
+            "instantBuyEnabled",
+            False,
+        ) is not True:
+            raise HTTPException(
+                status_code=400,
+                detail="Instant Buy is not available",
+            )
+
+        # ==============================
+        # GET PRICE SERVER-SIDE
+        # ==============================
+
+        price = listing.get(
+            "instantBuyPrice"
+        )
+
+        if price is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Instant Buy price missing",
+            )
+
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Instant Buy price",
+            )
+
+        if price <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Instant Buy price",
+            )
+
+        amount_paise = int(
+            round(price * 100)
+        )
+
+        # ==============================
+        # CREATE RAZORPAY ORDER
+        # ==============================
+
+        razorpay_order = (
+            razorpay_client.order.create(
+                data={
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "receipt":
+                        f"ks_{request.listingId[:25]}",
+                    "notes": {
+                        "listingId":
+                            request.listingId,
+                        "buyerId":
+                            buyer_id,
+                    },
+                }
+            )
+        )
+
+        return {
+            "success": True,
+
+            "razorpayOrderId":
+                razorpay_order["id"],
+
+            "keyId":
+                RAZORPAY_KEY_ID,
+
+            "amount":
+                razorpay_order["amount"],
+
+            "currency":
+                razorpay_order["currency"],
+
+            "listingId":
+                request.listingId,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "RAZORPAY CREATE ORDER ERROR:",
+            str(e),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to create payment order",
+        )
 
 
 # ================= NOTIFY ALL =================
