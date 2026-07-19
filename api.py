@@ -1219,221 +1219,586 @@ async def create_razorpay_order(
             status_code=500,
             detail="Unable to create payment order",
         )
-@app.post("/payments/razorpay/verify")
-async def verify_razorpay_payment(
-    request: VerifyRazorpayPaymentRequest,
-    user=Depends(verify_firebase_token),
+def refund_failed_instant_buy(
+    payment_id: str,
+    razorpay_order_id: str,
+    listing_id: str,
+    buyer_id: str,
+    reason: str,
 ):
-    try:
-        buyer_id = user["uid"]
+    """
+    Refund a captured payment when the listing
+    cannot be fulfilled after successful payment.
+    """
 
-        # ==============================
-        # VERIFY RAZORPAY SIGNATURE
-        # ==============================
+    refund_lock_ref = (
+        db.collection("commerce_refund_locks")
+        .document(payment_id)
+    )
 
-        try:
-            razorpay_client.utility.verify_payment_signature({
-                "razorpay_order_id":
-                    request.razorpay_order_id,
+    # Prevent duplicate refund requests
+    existing_lock = refund_lock_ref.get()
 
-                "razorpay_payment_id":
-                    request.razorpay_payment_id,
+    if existing_lock.exists:
+        data = existing_lock.to_dict() or {}
 
-                "razorpay_signature":
-                    request.razorpay_signature,
-            })
+        return {
+            "success": True,
+            "alreadyRequested": True,
+            "refundId": data.get("refundId"),
+            "status": data.get("status"),
+        }
 
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail="Payment verification failed",
-            )
+    # Fetch payment directly from Razorpay
+    payment = razorpay_client.payment.fetch(
+        payment_id
+    )
 
-        # ==============================
-        # FETCH RAZORPAY PAYMENT
-        # ==============================
-
-        payment = razorpay_client.payment.fetch(
-            request.razorpay_payment_id
+    if payment.get("order_id") != razorpay_order_id:
+        raise Exception(
+            "Refund payment order mismatch"
         )
 
-        if payment.get("order_id") != request.razorpay_order_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Payment order mismatch",
-            )
+    payment_status = payment.get("status")
 
-        if payment.get("status") not in [
-            "authorized",
-            "captured",
-        ]:
-            raise HTTPException(
-                status_code=400,
-                detail="Payment is not successful",
-            )
-
-        # ==============================
-        # FETCH RAZORPAY ORDER
-        # ==============================
-
-        razorpay_order = razorpay_client.order.fetch(
-            request.razorpay_order_id
+    if payment_status != "captured":
+        raise Exception(
+            f"Payment cannot be refunded in status: "
+            f"{payment_status}"
         )
 
-        notes = razorpay_order.get("notes") or {}
+    # Request full refund
+    refund = razorpay_client.payment.refund(
+        payment_id,
+        {}
+    )
 
-        if notes.get("listingId") != request.listingId:
-            raise HTTPException(
-                status_code=400,
-                detail="Listing mismatch",
-            )
+    refund_id = refund.get("id")
 
-        if notes.get("buyerId") != buyer_id:
-            raise HTTPException(
-                status_code=403,
-                detail="Buyer mismatch",
-            )
+    refund_lock_ref.set({
+        "paymentId":
+            payment_id,
 
-        # ==============================
-        # FETCH LISTING
-        # ==============================
+        "razorpayOrderId":
+            razorpay_order_id,
 
-        listing_ref = (
-            db.collection("commerce_listings")
-            .document(request.listingId)
+        "listingId":
+            listing_id,
+
+        "buyerId":
+            buyer_id,
+
+        "refundId":
+            refund_id,
+
+        "status":
+            refund.get(
+                "status",
+                "requested",
+            ),
+
+        "reason":
+            reason,
+
+        "createdAt":
+            firestore.SERVER_TIMESTAMP,
+
+        "updatedAt":
+            firestore.SERVER_TIMESTAMP,
+    })
+
+    return {
+        "success": True,
+        "alreadyRequested": False,
+        "refundId": refund_id,
+        "status": refund.get(
+            "status",
+            "requested",
+        ),
+    }
+
+def finalize_instant_buy(
+    razorpay_order_id: str,
+    payment_id: str,
+    listing_id: str,
+    buyer_id: str,
+):
+    """
+    Idempotently finalize an Instant Buy payment.
+
+    Uses:
+    commerce_payment_locks/{razorpay_order_id}
+
+    Both /verify and /webhook can safely call this function.
+    """
+
+    # ==========================================
+    # 1. VALIDATE INPUT
+    # ==========================================
+
+    if not razorpay_order_id:
+        raise Exception(
+            "Missing Razorpay order ID"
         )
 
-        listing_doc = listing_ref.get()
-
-        if not listing_doc.exists:
-            raise HTTPException(
-                status_code=404,
-                detail="Listing not found",
-            )
-
-        listing = listing_doc.to_dict()
-
-        # ==============================
-        # VERIFY PAYMENT AMOUNT
-        # ==============================
-
-        price = float(
-            listing.get("instantBuyPrice", 0)
+    if not payment_id:
+        raise Exception(
+            "Missing Razorpay payment ID"
         )
 
-        expected_amount = int(
-            round(price * 100)
+    if not listing_id:
+        raise Exception(
+            "Missing listing ID"
         )
 
-        if int(payment.get("amount", 0)) != expected_amount:
-            raise HTTPException(
-                status_code=400,
-                detail="Payment amount mismatch",
-            )
-
-        if int(razorpay_order.get("amount", 0)) != expected_amount:
-            raise HTTPException(
-                status_code=400,
-                detail="Order amount mismatch",
-            )
-
-        # ==============================
-        # IDEMPOTENCY CHECK
-        # ==============================
-
-        existing_orders = (
-            db.collection("commerce_orders")
-            .where(
-                "paymentId",
-                "==",
-                request.razorpay_payment_id,
-            )
-            .limit(1)
-            .stream()
+    if not buyer_id:
+        raise Exception(
+            "Missing buyer ID"
         )
 
-        for existing in existing_orders:
-            existing_data = existing.to_dict()
+    # ==========================================
+    # 2. DEFINE FIRESTORE REFERENCES
+    # ==========================================
 
+    listing_ref = (
+        db.collection(
+            "commerce_listings"
+        )
+        .document(
+            listing_id
+        )
+    )
+
+    payment_lock_ref = (
+        db.collection(
+            "commerce_payment_locks"
+        )
+        .document(
+            razorpay_order_id
+        )
+    )
+
+    # ==========================================
+    # 3. FAST IDEMPOTENCY CHECK
+    # ==========================================
+
+    existing_lock = (
+        payment_lock_ref.get()
+    )
+
+    if existing_lock.exists:
+
+        lock_data = (
+            existing_lock.to_dict()
+            or {}
+        )
+
+        if (
+            lock_data.get("status")
+            == "finalized"
+            and lock_data.get(
+                "commerceOrderId"
+            )
+        ):
             return {
-                "success": True,
-                "alreadyProcessed": True,
-                "orderId": existing.id,
+                "success":
+                    True,
+
+                "alreadyProcessed":
+                    True,
+
+                "orderId":
+                    lock_data[
+                        "commerceOrderId"
+                    ],
+
                 "orderStatus":
-                    existing_data.get(
-                        "orderStatus",
-                        "confirmed",
-                    ),
+                    "confirmed",
             }
 
-        # ==============================
-        # CHECK LISTING AVAILABILITY
-        # ==============================
+    # ==========================================
+    # 4. FETCH PAYMENT FROM RAZORPAY
+    # ==========================================
 
-        if listing.get("sold", False):
-            raise HTTPException(
-                status_code=409,
-                detail="Listing already sold",
-            )
+    payment = (
+        razorpay_client
+        .payment
+        .fetch(
+            payment_id
+        )
+    )
 
-        if listing.get("status") != "active":
-            raise HTTPException(
-                status_code=409,
-                detail="Listing is no longer active",
-            )
+    if (
+        payment.get("order_id")
+        != razorpay_order_id
+    ):
+        raise Exception(
+            "Payment order mismatch"
+        )
 
-        # ==============================
-        # CREATE ORDER
-        # ==============================
+    if payment.get("status") not in [
+        "authorized",
+        "captured",
+    ]:
+        raise Exception(
+            "Payment is not successful"
+        )
 
-        import random
+    # ==========================================
+    # 5. FETCH RAZORPAY ORDER
+    # ==========================================
 
-        pickup_otp = str(
-            random.randint(
-                100000,
-                999999,
+    razorpay_order = (
+        razorpay_client
+        .order
+        .fetch(
+            razorpay_order_id
+        )
+    )
+
+    notes = (
+        razorpay_order.get("notes")
+        or {}
+    )
+
+    if (
+        notes.get("listingId")
+        != listing_id
+    ):
+        raise Exception(
+            "Listing mismatch"
+        )
+
+    if (
+        notes.get("buyerId")
+        != buyer_id
+    ):
+        raise Exception(
+            "Buyer mismatch"
+        )
+
+    # ==========================================
+    # 6. FETCH LISTING FOR AMOUNT CHECK
+    # ==========================================
+
+    listing_doc = (
+        listing_ref.get()
+    )
+
+    if not listing_doc.exists:
+        raise Exception(
+            "Listing not found"
+        )
+
+    listing = (
+        listing_doc.to_dict()
+        or {}
+    )
+
+    try:
+        price = float(
+            listing.get(
+                "instantBuyPrice",
+                0,
             )
         )
 
-        order_ref = (
-            db.collection("commerce_orders")
-            .document()
+    except (
+        TypeError,
+        ValueError,
+    ):
+        raise Exception(
+            "Invalid Instant Buy price"
         )
 
-        batch = db.batch()
+    if price <= 0:
+        raise Exception(
+            "Invalid Instant Buy price"
+        )
 
-        batch.set(
+    expected_amount = int(
+        round(
+            price * 100
+        )
+    )
+
+    if (
+        int(
+            payment.get(
+                "amount",
+                0,
+            )
+        )
+        != expected_amount
+    ):
+        raise Exception(
+            "Payment amount mismatch"
+        )
+
+    if (
+        int(
+            razorpay_order.get(
+                "amount",
+                0,
+            )
+        )
+        != expected_amount
+    ):
+        raise Exception(
+            "Razorpay order amount mismatch"
+        )
+
+    # ==========================================
+    # 7. GENERATE ORDER ID + PICKUP OTP
+    # ==========================================
+
+    import secrets
+
+    pickup_otp = str(
+        secrets.randbelow(
+            900000
+        )
+        + 100000
+    )
+
+    order_ref = (
+        db.collection(
+            "commerce_orders"
+        )
+        .document()
+    )
+
+    # ==========================================
+    # 8. FIRESTORE TRANSACTION
+    # ==========================================
+
+    transaction = (
+        db.transaction()
+    )
+
+    @firestore.transactional
+    def finalize_transaction(
+        transaction,
+    ):
+
+        # IMPORTANT:
+        # All transactional reads happen
+        # before transactional writes.
+
+        current_lock_doc = (
+            payment_lock_ref.get(
+                transaction=transaction
+            )
+        )
+
+        current_listing_doc = (
+            listing_ref.get(
+                transaction=transaction
+            )
+        )
+
+        # ======================================
+        # PAYMENT LOCK ALREADY EXISTS
+        # ======================================
+
+        if current_lock_doc.exists:
+
+            lock_data = (
+                current_lock_doc.to_dict()
+                or {}
+            )
+
+            # Validate that the lock belongs
+            # to this exact payment context.
+
+            locked_payment_id = (
+                lock_data.get(
+                    "paymentId"
+                )
+            )
+
+            locked_listing_id = (
+                lock_data.get(
+                    "listingId"
+                )
+            )
+
+            locked_buyer_id = (
+                lock_data.get(
+                    "buyerId"
+                )
+            )
+
+            if (
+                locked_payment_id
+                and
+                locked_payment_id
+                != payment_id
+            ):
+                raise Exception(
+                    "Payment lock payment mismatch"
+                )
+
+            if (
+                locked_listing_id
+                and
+                locked_listing_id
+                != listing_id
+            ):
+                raise Exception(
+                    "Payment lock listing mismatch"
+                )
+
+            if (
+                locked_buyer_id
+                and
+                locked_buyer_id
+                != buyer_id
+            ):
+                raise Exception(
+                    "Payment lock buyer mismatch"
+                )
+
+            if (
+                lock_data.get(
+                    "status"
+                )
+                == "finalized"
+                and
+                lock_data.get(
+                    "commerceOrderId"
+                )
+            ):
+                return {
+                    "alreadyProcessed":
+                        True,
+
+                    "orderId":
+                        lock_data[
+                            "commerceOrderId"
+                        ],
+                }
+
+        # ======================================
+        # CHECK LISTING
+        # ======================================
+
+        if not current_listing_doc.exists:
+            raise Exception(
+                "Listing not found"
+            )
+
+        current_listing = (
+            current_listing_doc.to_dict()
+            or {}
+        )
+
+        if current_listing.get(
+            "sold",
+            False,
+        ):
+            raise Exception(
+                "Listing already sold"
+            )
+
+        if (
+            current_listing.get(
+                "status"
+            )
+            != "active"
+        ):
+            raise Exception(
+                "Listing is no longer active"
+            )
+
+        if not current_listing.get(
+            "instantBuyEnabled",
+            False,
+        ):
+            raise Exception(
+                "Instant Buy is no longer available"
+            )
+
+        # ======================================
+        # RECHECK PRICE INSIDE TRANSACTION
+        # ======================================
+
+        try:
+            current_price = float(
+                current_listing.get(
+                    "instantBuyPrice",
+                    0,
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            raise Exception(
+                "Invalid Instant Buy price"
+            )
+
+        current_expected_amount = int(
+            round(
+                current_price * 100
+            )
+        )
+
+        if (
+            current_expected_amount
+            != expected_amount
+        ):
+            raise Exception(
+                "Listing price changed"
+            )
+
+        # ======================================
+        # CREATE COMMERCE ORDER
+        # ======================================
+
+        transaction.set(
             order_ref,
             {
                 "orderId":
                     order_ref.id,
 
                 "listingId":
-                    request.listingId,
+                    listing_id,
 
                 "buyerId":
                     buyer_id,
 
                 "sellerId":
-                    listing.get("sellerId"),
+                    current_listing.get(
+                        "sellerId"
+                    ),
 
                 "cropName":
-                    listing.get("cropName"),
+                    current_listing.get(
+                        "cropName"
+                    ),
 
                 "image":
-                    listing.get("cropImage"),
+                    current_listing.get(
+                        "cropImage"
+                    ),
 
                 "quantity":
-                    listing.get("quantity"),
+                    current_listing.get(
+                        "quantity"
+                    ),
 
                 "unit":
-                    listing.get("unit"),
+                    current_listing.get(
+                        "unit"
+                    ),
 
                 "amount":
-                    price,
+                    current_price,
 
                 "orderAmount":
-                    price,
+                    current_price,
 
                 "pickupOtp":
                     pickup_otp,
@@ -1451,10 +1816,10 @@ async def verify_razorpay_payment(
                     "",
 
                 "paymentId":
-                    request.razorpay_payment_id,
+                    payment_id,
 
                 "razorpayOrderId":
-                    request.razorpay_order_id,
+                    razorpay_order_id,
 
                 "paymentStatus":
                     "paid",
@@ -1472,13 +1837,19 @@ async def verify_razorpay_payment(
                     False,
 
                 "sellerLatitude":
-                    listing.get("latitude"),
+                    current_listing.get(
+                        "latitude"
+                    ),
 
                 "sellerLongitude":
-                    listing.get("longitude"),
+                    current_listing.get(
+                        "longitude"
+                    ),
 
                 "sellerLocation":
-                    listing.get("locationName"),
+                    current_listing.get(
+                        "locationName"
+                    ),
 
                 "buyerNote":
                     "",
@@ -1504,6 +1875,9 @@ async def verify_razorpay_payment(
                 "deliveryAcceptedAt":
                     None,
 
+                "webhookConfirmed":
+                    False,
+
                 "createdAt":
                     firestore.SERVER_TIMESTAMP,
 
@@ -1512,11 +1886,11 @@ async def verify_razorpay_payment(
             },
         )
 
-        # ==============================
-        # MARK LISTING SOLD
-        # ==============================
+        # ======================================
+        # LOCK / MARK LISTING SOLD
+        # ======================================
 
-        batch.update(
+        transaction.update(
             listing_ref,
             {
                 "sold":
@@ -1545,16 +1919,73 @@ async def verify_razorpay_payment(
             },
         )
 
-        # ==============================
-        # OUTBID ACTIVE BIDS
-        # ==============================
+        # ======================================
+        # CREATE PAYMENT IDEMPOTENCY LOCK
+        # ======================================
+
+        transaction.set(
+            payment_lock_ref,
+            {
+                "razorpayOrderId":
+                    razorpay_order_id,
+
+                "paymentId":
+                    payment_id,
+
+                "listingId":
+                    listing_id,
+
+                "buyerId":
+                    buyer_id,
+
+                "commerceOrderId":
+                    order_ref.id,
+
+                "status":
+                    "finalized",
+
+                "createdAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        return {
+            "alreadyProcessed":
+                False,
+
+            "orderId":
+                order_ref.id,
+        }
+
+    # ==========================================
+    # 9. EXECUTE TRANSACTION
+    # ==========================================
+
+    result = (
+        finalize_transaction(
+            transaction
+        )
+    )
+
+    # ==========================================
+    # 10. UPDATE ACTIVE BIDS AFTER TRANSACTION
+    # ==========================================
+
+    if not result[
+        "alreadyProcessed"
+    ]:
 
         active_bids = (
-            db.collection("commerce_bids")
+            db.collection(
+                "commerce_bids"
+            )
             .where(
                 "listingId",
                 "==",
-                request.listingId,
+                listing_id,
             )
             .where(
                 "status",
@@ -1564,38 +1995,386 @@ async def verify_razorpay_payment(
             .stream()
         )
 
+        bid_batch = (
+            db.batch()
+        )
+
+        has_bids = False
+
         for bid in active_bids:
-            batch.update(
+
+            has_bids = True
+
+            bid_batch.update(
                 bid.reference,
                 {
                     "status":
                         "outbid",
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
                 },
             )
 
-        await asyncio.to_thread(
-            batch.commit
+        if has_bids:
+            bid_batch.commit()
+
+    # ==========================================
+    # 11. RETURN FINAL RESULT
+    # ==========================================
+
+    return {
+        "success":
+            True,
+
+        "alreadyProcessed":
+            result[
+                "alreadyProcessed"
+            ],
+
+        "orderId":
+            result[
+                "orderId"
+            ],
+
+        "orderStatus":
+            "confirmed",
+    }
+
+@app.post("/payments/razorpay/verify")
+async def verify_razorpay_payment(
+    request: VerifyRazorpayPaymentRequest,
+    user=Depends(verify_firebase_token),
+):
+    try:
+        # ==========================================
+        # 1. GET AUTHENTICATED BUYER
+        # ==========================================
+
+        buyer_id = user["uid"]
+
+        # ==========================================
+        # 2. VALIDATE REQUIRED PAYMENT DATA
+        # ==========================================
+
+        if not request.razorpay_order_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing Razorpay order ID",
+            )
+
+        if not request.razorpay_payment_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing Razorpay payment ID",
+            )
+
+        if not request.razorpay_signature:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing Razorpay signature",
+            )
+
+        if not request.listingId:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing listing ID",
+            )
+
+        # ==========================================
+        # 3. VERIFY RAZORPAY CHECKOUT SIGNATURE
+        # ==========================================
+
+        try:
+            razorpay_client.utility.verify_payment_signature(
+                {
+                    "razorpay_order_id":
+                        request.razorpay_order_id,
+
+                    "razorpay_payment_id":
+                        request.razorpay_payment_id,
+
+                    "razorpay_signature":
+                        request.razorpay_signature,
+                }
+            )
+
+        except Exception as signature_error:
+
+            print(
+                "RAZORPAY SIGNATURE VERIFICATION FAILED:",
+                str(signature_error),
+            )
+
+            raise HTTPException(
+                status_code=400,
+                detail="Payment verification failed",
+            )
+
+        # ==========================================
+        # 4. CALL SHARED PAYMENT FINALIZATION
+        # ==========================================
+        #
+        # finalize_instant_buy() handles:
+        #
+        # - Razorpay payment verification
+        # - Razorpay order verification
+        # - Buyer ID verification
+        # - Listing ID verification
+        # - Payment amount verification
+        # - Existing order/idempotency check
+        # - Firestore transaction
+        # - Order creation
+        # - Listing sold/locked state
+        # - Active bid updates
+        #
+        # Both Flutter /verify and Razorpay webhook
+        # now use the same finalization function.
+        # ==========================================
+
+        result = await asyncio.to_thread(
+            finalize_instant_buy,
+            request.razorpay_order_id,
+            request.razorpay_payment_id,
+            request.listingId,
+            buyer_id,
         )
 
+        # ==========================================
+        # 5. RETURN FINAL ORDER RESULT
+        # ==========================================
+
         return {
-            "success": True,
-            "alreadyProcessed": False,
-            "orderId": order_ref.id,
-            "orderStatus": "confirmed",
+            "success":
+                True,
+
+            "alreadyProcessed":
+                result.get(
+                    "alreadyProcessed",
+                    False,
+                ),
+
+            "orderId":
+                result.get(
+                    "orderId"
+                ),
+
+            "orderStatus":
+                result.get(
+                    "orderStatus",
+                    "confirmed",
+                ),
         }
 
     except HTTPException:
         raise
 
     except Exception as e:
+
+        error_message = str(e)
+
         print(
             "RAZORPAY VERIFY ERROR:",
-            str(e),
+            error_message,
         )
+
+                # ==========================================
+        # LISTING UNAVAILABLE AFTER PAYMENT
+        # ==========================================
+
+        if (
+            "already sold"
+            in error_message.lower()
+            or
+            "no longer active"
+            in error_message.lower()
+            or
+            "instant buy is no longer available"
+            in error_message.lower()
+        ):
+
+            try:
+                # ----------------------------------
+                # INITIATE AUTOMATIC REFUND
+                # ----------------------------------
+
+                refund_result = await asyncio.to_thread(
+                    refund_failed_instant_buy,
+                    request.razorpay_payment_id,
+                    request.razorpay_order_id,
+                    request.listingId,
+                    buyer_id,
+                    "Listing became unavailable after payment",
+                )
+
+                print(
+                    "RAZORPAY REFUND INITIATED:",
+                    request.razorpay_payment_id,
+                    refund_result.get(
+                        "refundId"
+                    ),
+                )
+
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code":
+                            "LISTING_UNAVAILABLE_REFUND_INITIATED",
+
+                        "message":
+                            (
+                                "This listing was purchased "
+                                "by another buyer. Your payment "
+                                "refund has been initiated."
+                            ),
+
+                        "refundId":
+                            refund_result.get(
+                                "refundId"
+                            ),
+
+                        "refundStatus":
+                            refund_result.get(
+                                "status"
+                            ),
+                    },
+                )
+
+            except HTTPException:
+                raise
+
+            except Exception as refund_error:
+
+                print(
+                    "CRITICAL RAZORPAY REFUND ERROR:",
+                    request.razorpay_payment_id,
+                    str(refund_error),
+                )
+
+                # ----------------------------------
+                # SAVE FOR MANUAL RECONCILIATION
+                # ----------------------------------
+
+                reconciliation_ref = (
+                    db.collection(
+                        "commerce_payment_reconciliation"
+                    )
+                    .document(
+                        request.razorpay_payment_id
+                    )
+                )
+
+                reconciliation_ref.set(
+                    {
+                        "paymentId":
+                            request.razorpay_payment_id,
+
+                        "razorpayOrderId":
+                            request.razorpay_order_id,
+
+                        "listingId":
+                            request.listingId,
+
+                        "buyerId":
+                            buyer_id,
+
+                        "reason":
+                            (
+                                "Listing unavailable "
+                                "after successful payment"
+                            ),
+
+                        "refundError":
+                            str(
+                                refund_error
+                            )[:500],
+
+                        "status":
+                            "manual_review_required",
+
+                        "createdAt":
+                            firestore.SERVER_TIMESTAMP,
+
+                        "updatedAt":
+                            firestore.SERVER_TIMESTAMP,
+                    },
+                    merge=True,
+                )
+
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "code":
+                            "REFUND_REQUIRES_REVIEW",
+
+                        "message":
+                            (
+                                "Your payment was successful, "
+                                "but the order could not be completed. "
+                                "The payment has been flagged for "
+                                "refund review."
+                            ),
+                    },
+                )
+
+        # ==========================================
+        # PAYMENT / ORDER MISMATCH
+        # ==========================================
+
+        if (
+            "payment order mismatch"
+            in error_message.lower()
+            or
+            "payment amount mismatch"
+            in error_message.lower()
+            or
+            "razorpay order amount mismatch"
+            in error_message.lower()
+            or
+            "listing mismatch"
+            in error_message.lower()
+            or
+            "buyer mismatch"
+            in error_message.lower()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=error_message,
+            )
+
+        # ==========================================
+        # PAYMENT NOT SUCCESSFUL
+        # ==========================================
+
+        if (
+            "payment is not successful"
+            in error_message.lower()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Payment is not successful",
+            )
+
+        # ==========================================
+        # LISTING NOT FOUND
+        # ==========================================
+
+        if (
+            "listing not found"
+            in error_message.lower()
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail="Listing not found",
+            )
+
+        # ==========================================
+        # UNKNOWN SERVER ERROR
+        # ==========================================
 
         raise HTTPException(
             status_code=500,
-            detail="Unable to verify payment",
+            detail="Unable to finalize payment",
         )
     
 @app.post("/payments/razorpay/webhook")
@@ -1749,7 +2528,6 @@ async def razorpay_webhook(
         "createdAt":
             firestore.SERVER_TIMESTAMP,
     })
-
     try:
 
         # ==============================
@@ -1761,6 +2539,10 @@ async def razorpay_webhook(
             "order.paid",
         ]:
 
+            # --------------------------
+            # VALIDATE PAYMENT DATA
+            # --------------------------
+
             if not razorpay_order_id:
 
                 event_ref.update({
@@ -1769,6 +2551,24 @@ async def razorpay_webhook(
 
                     "reason":
                         "Missing Razorpay order ID",
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                return {
+                    "success": True,
+                    "ignored": True,
+                }
+
+            if not payment_id:
+
+                event_ref.update({
+                    "status":
+                        "ignored",
+
+                    "reason":
+                        "Missing Razorpay payment ID",
 
                     "processedAt":
                         firestore.SERVER_TIMESTAMP,
@@ -1805,6 +2605,10 @@ async def razorpay_webhook(
                 "buyerId"
             )
 
+            # --------------------------
+            # VALIDATE KISHANSEVA DATA
+            # --------------------------
+
             if (
                 not listing_id
                 or not buyer_id
@@ -1826,77 +2630,74 @@ async def razorpay_webhook(
                     "ignored": True,
                 }
 
-            # --------------------------
-            # CHECK EXISTING ORDER
-            # --------------------------
+            # ======================================
+            # SHARED INSTANT BUY FINALIZATION
+            # ======================================
+            #
+            # This is the SAME function used by
+            # /payments/razorpay/verify.
+            #
+            # If /verify already created the order,
+            # it returns the existing order.
+            #
+            # If webhook arrives first,
+            # it creates the order and locks listing.
+            # ======================================
 
-            existing_orders = (
+            result = await asyncio.to_thread(
+                finalize_instant_buy,
+                razorpay_order_id,
+                payment_id,
+                listing_id,
+                buyer_id,
+            )
+
+            order_id = result.get(
+                "orderId"
+            )
+
+            if not order_id:
+                raise Exception(
+                    "Order finalization returned no order ID"
+                )
+
+            # ======================================
+            # MARK ORDER AS WEBHOOK CONFIRMED
+            # ======================================
+
+            order_ref = (
                 db.collection(
                     "commerce_orders"
                 )
-                .where(
-                    "razorpayOrderId",
-                    "==",
-                    razorpay_order_id,
+                .document(
+                    order_id
                 )
-                .limit(1)
-                .stream()
             )
 
-            existing_order = None
+            order_ref.update({
+                "paymentStatus":
+                    "paid",
 
-            for order in existing_orders:
-                existing_order = order
-                break
+                "webhookConfirmed":
+                    True,
 
-            if existing_order:
+                "webhookEventId":
+                    x_razorpay_event_id,
 
-                # Order was already created
-                # by /verify endpoint.
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            })
 
-                existing_order.reference.update({
-                    "paymentStatus":
-                        "paid",
-
-                    "webhookConfirmed":
-                        True,
-
-                    "webhookEventId":
-                        x_razorpay_event_id,
-
-                    "updatedAt":
-                        firestore.SERVER_TIMESTAMP,
-                })
-
-                event_ref.update({
-                    "status":
-                        "processed",
-
-                    "orderId":
-                        existing_order.id,
-
-                    "processedAt":
-                        firestore.SERVER_TIMESTAMP,
-                })
-
-                return {
-                    "success": True,
-                    "orderExists": True,
-                }
-
-            # --------------------------------
-            # NO ORDER EXISTS
-            # --------------------------------
-            #
-            # This can happen when:
-            # Payment succeeded but Flutter
-            # never called /verify.
-            #
-            # Do NOT silently lose payment.
+            # ======================================
+            # MARK WEBHOOK EVENT PROCESSED
+            # ======================================
 
             event_ref.update({
                 "status":
-                    "payment_confirmed_order_missing",
+                    "processed",
+
+                "orderId":
+                    order_id,
 
                 "listingId":
                     listing_id,
@@ -1904,22 +2705,49 @@ async def razorpay_webhook(
                 "buyerId":
                     buyer_id,
 
+                "paymentId":
+                    payment_id,
+
+                "razorpayOrderId":
+                    razorpay_order_id,
+
+                "alreadyProcessed":
+                    result.get(
+                        "alreadyProcessed",
+                        False,
+                    ),
+
                 "processedAt":
                     firestore.SERVER_TIMESTAMP,
             })
 
             print(
-                "CRITICAL: PAID PAYMENT "
-                "WITHOUT COMMERCE ORDER",
+                "RAZORPAY WEBHOOK PROCESSED:",
+                "event=",
+                x_razorpay_event_id,
+                "order=",
+                order_id,
+                "payment=",
                 payment_id,
-                razorpay_order_id,
-                listing_id,
+                "alreadyProcessed=",
+                result.get(
+                    "alreadyProcessed",
+                    False,
+                ),
             )
 
             return {
-                "success": True,
-                "paymentConfirmed": True,
-                "orderMissing": True,
+                "success":
+                    True,
+
+                "orderId":
+                    order_id,
+
+                "alreadyProcessed":
+                    result.get(
+                        "alreadyProcessed",
+                        False,
+                    ),
             }
 
         # ==============================
@@ -1935,13 +2763,22 @@ async def razorpay_webhook(
                 "paymentStatus":
                     "failed",
 
+                "paymentId":
+                    payment_id,
+
+                "razorpayOrderId":
+                    razorpay_order_id,
+
                 "processedAt":
                     firestore.SERVER_TIMESTAMP,
             })
 
             return {
-                "success": True,
-                "paymentFailed": True,
+                "success":
+                    True,
+
+                "paymentFailed":
+                    True,
             }
 
         # ==============================
@@ -1954,20 +2791,28 @@ async def razorpay_webhook(
                 "status":
                     "ignored",
 
+                "eventType":
+                    event_type,
+
                 "processedAt":
                     firestore.SERVER_TIMESTAMP,
             })
 
             return {
-                "success": True,
-                "ignored": True,
+                "success":
+                    True,
+
+                "ignored":
+                    True,
             }
 
     except Exception as e:
 
+        error_message = str(e)
+
         print(
             "RAZORPAY WEBHOOK ERROR:",
-            str(e),
+            error_message,
         )
 
         event_ref.update({
@@ -1975,13 +2820,18 @@ async def razorpay_webhook(
                 "processing_failed",
 
             "error":
-                str(e)[:500],
+                error_message[:500],
+
+            "failedAt":
+                firestore.SERVER_TIMESTAMP,
         })
 
-        # Return 500 so Razorpay retries.
+        # Return 500.
+        # Razorpay can retry the webhook.
         raise HTTPException(
             status_code=500,
-            detail="Webhook processing failed",
+            detail=
+                "Webhook processing failed",
         )
 # ================= NOTIFY ALL =================
 
