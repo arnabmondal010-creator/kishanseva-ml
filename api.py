@@ -9,6 +9,7 @@ import joblib
 import feedparser
 import hmac
 import hashlib
+import asyncio
 
 from fastapi import (
     FastAPI,
