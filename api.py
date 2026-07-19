@@ -7,6 +7,8 @@ import ee
 import pandas as pd
 import joblib
 import feedparser
+import hmac
+import hashlib
 
 from fastapi import (
     FastAPI,
@@ -1059,6 +1061,14 @@ razorpay_client = razorpay.Client(
 )
 
 print("Razorpay initialized")
+RAZORPAY_WEBHOOK_SECRET = os.getenv(
+    "RAZORPAY_WEBHOOK_SECRET"
+)
+
+if not RAZORPAY_WEBHOOK_SECRET:
+    raise Exception(
+        "Razorpay webhook secret not configured"
+    )
 
 
 class CreateRazorpayOrderRequest(BaseModel):
@@ -1584,6 +1594,392 @@ async def verify_razorpay_payment(
         raise HTTPException(
             status_code=500,
             detail="Unable to verify payment",
+        )
+    
+@app.post("/payments/razorpay/webhook")
+async def razorpay_webhook(
+    request: Request,
+    x_razorpay_signature: str = Header(
+        None,
+        alias="X-Razorpay-Signature",
+    ),
+    x_razorpay_event_id: str = Header(
+        None,
+        alias="X-Razorpay-Event-Id",
+    ),
+):
+    # --------------------------------
+    # 1. READ RAW BODY
+    # --------------------------------
+
+    raw_body = await request.body()
+
+    if not x_razorpay_signature:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Razorpay signature",
+        )
+
+    # --------------------------------
+    # 2. VERIFY WEBHOOK SIGNATURE
+    # --------------------------------
+
+    expected_signature = hmac.new(
+        RAZORPAY_WEBHOOK_SECRET.encode(
+            "utf-8"
+        ),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(
+        expected_signature,
+        x_razorpay_signature,
+    ):
+        print(
+            "RAZORPAY WEBHOOK: "
+            "INVALID SIGNATURE"
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid webhook signature",
+        )
+
+    # --------------------------------
+    # 3. PARSE ONLY AFTER VERIFICATION
+    # --------------------------------
+
+    try:
+        payload = json.loads(
+            raw_body.decode("utf-8")
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid webhook payload",
+        )
+
+    event_type = payload.get(
+        "event",
+        "",
+    )
+
+    # --------------------------------
+    # 4. REQUIRE EVENT ID
+    # --------------------------------
+
+    if not x_razorpay_event_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Razorpay event ID",
+        )
+
+    event_ref = (
+        db.collection(
+            "commerce_webhook_events"
+        )
+        .document(
+            x_razorpay_event_id
+        )
+    )
+
+    # --------------------------------
+    # 5. IDEMPOTENCY CHECK
+    # --------------------------------
+
+    existing_event = event_ref.get()
+
+    if existing_event.exists:
+
+        print(
+            "RAZORPAY WEBHOOK DUPLICATE:",
+            x_razorpay_event_id,
+        )
+
+        return {
+            "success": True,
+            "duplicate": True,
+        }
+
+    # --------------------------------
+    # 6. EXTRACT PAYMENT
+    # --------------------------------
+
+    payment_entity = (
+        payload
+        .get("payload", {})
+        .get("payment", {})
+        .get("entity", {})
+    )
+
+    payment_id = payment_entity.get(
+        "id"
+    )
+
+    razorpay_order_id = (
+        payment_entity.get(
+            "order_id"
+        )
+    )
+
+    # --------------------------------
+    # 7. STORE EVENT FIRST
+    # --------------------------------
+
+    event_ref.set({
+        "eventId":
+            x_razorpay_event_id,
+
+        "eventType":
+            event_type,
+
+        "paymentId":
+            payment_id,
+
+        "razorpayOrderId":
+            razorpay_order_id,
+
+        "status":
+            "received",
+
+        "createdAt":
+            firestore.SERVER_TIMESTAMP,
+    })
+
+    try:
+
+        # ==============================
+        # PAYMENT CAPTURED / ORDER PAID
+        # ==============================
+
+        if event_type in [
+            "payment.captured",
+            "order.paid",
+        ]:
+
+            if not razorpay_order_id:
+
+                event_ref.update({
+                    "status":
+                        "ignored",
+
+                    "reason":
+                        "Missing Razorpay order ID",
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                return {
+                    "success": True,
+                    "ignored": True,
+                }
+
+            # --------------------------
+            # FETCH RAZORPAY ORDER
+            # --------------------------
+
+            razorpay_order = (
+                razorpay_client
+                .order
+                .fetch(
+                    razorpay_order_id
+                )
+            )
+
+            notes = (
+                razorpay_order.get(
+                    "notes"
+                ) or {}
+            )
+
+            listing_id = notes.get(
+                "listingId"
+            )
+
+            buyer_id = notes.get(
+                "buyerId"
+            )
+
+            if (
+                not listing_id
+                or not buyer_id
+            ):
+
+                event_ref.update({
+                    "status":
+                        "ignored",
+
+                    "reason":
+                        "Missing Kishanseva metadata",
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                return {
+                    "success": True,
+                    "ignored": True,
+                }
+
+            # --------------------------
+            # CHECK EXISTING ORDER
+            # --------------------------
+
+            existing_orders = (
+                db.collection(
+                    "commerce_orders"
+                )
+                .where(
+                    "razorpayOrderId",
+                    "==",
+                    razorpay_order_id,
+                )
+                .limit(1)
+                .stream()
+            )
+
+            existing_order = None
+
+            for order in existing_orders:
+                existing_order = order
+                break
+
+            if existing_order:
+
+                # Order was already created
+                # by /verify endpoint.
+
+                existing_order.reference.update({
+                    "paymentStatus":
+                        "paid",
+
+                    "webhookConfirmed":
+                        True,
+
+                    "webhookEventId":
+                        x_razorpay_event_id,
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                event_ref.update({
+                    "status":
+                        "processed",
+
+                    "orderId":
+                        existing_order.id,
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                return {
+                    "success": True,
+                    "orderExists": True,
+                }
+
+            # --------------------------------
+            # NO ORDER EXISTS
+            # --------------------------------
+            #
+            # This can happen when:
+            # Payment succeeded but Flutter
+            # never called /verify.
+            #
+            # Do NOT silently lose payment.
+
+            event_ref.update({
+                "status":
+                    "payment_confirmed_order_missing",
+
+                "listingId":
+                    listing_id,
+
+                "buyerId":
+                    buyer_id,
+
+                "processedAt":
+                    firestore.SERVER_TIMESTAMP,
+            })
+
+            print(
+                "CRITICAL: PAID PAYMENT "
+                "WITHOUT COMMERCE ORDER",
+                payment_id,
+                razorpay_order_id,
+                listing_id,
+            )
+
+            return {
+                "success": True,
+                "paymentConfirmed": True,
+                "orderMissing": True,
+            }
+
+        # ==============================
+        # PAYMENT FAILED
+        # ==============================
+
+        elif event_type == "payment.failed":
+
+            event_ref.update({
+                "status":
+                    "processed",
+
+                "paymentStatus":
+                    "failed",
+
+                "processedAt":
+                    firestore.SERVER_TIMESTAMP,
+            })
+
+            return {
+                "success": True,
+                "paymentFailed": True,
+            }
+
+        # ==============================
+        # OTHER EVENTS
+        # ==============================
+
+        else:
+
+            event_ref.update({
+                "status":
+                    "ignored",
+
+                "processedAt":
+                    firestore.SERVER_TIMESTAMP,
+            })
+
+            return {
+                "success": True,
+                "ignored": True,
+            }
+
+    except Exception as e:
+
+        print(
+            "RAZORPAY WEBHOOK ERROR:",
+            str(e),
+        )
+
+        event_ref.update({
+            "status":
+                "processing_failed",
+
+            "error":
+                str(e)[:500],
+        })
+
+        # Return 500 so Razorpay retries.
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook processing failed",
         )
 # ================= NOTIFY ALL =================
 
