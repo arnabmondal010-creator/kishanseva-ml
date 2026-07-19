@@ -1063,6 +1063,11 @@ print("Razorpay initialized")
 
 class CreateRazorpayOrderRequest(BaseModel):
     listingId: str
+class VerifyRazorpayPaymentRequest(BaseModel):
+    razorpay_payment_id: str
+    razorpay_order_id: str
+    razorpay_signature: str
+    listingId: str
 
 
 def verify_firebase_token(
@@ -1201,6 +1206,384 @@ async def create_razorpay_order(
         raise HTTPException(
             status_code=500,
             detail="Unable to create payment order",
+        )
+@app.post("/payments/razorpay/verify")
+async def verify_razorpay_payment(
+    request: VerifyRazorpayPaymentRequest,
+    user=Depends(verify_firebase_token),
+):
+    try:
+        buyer_id = user["uid"]
+
+        # ==============================
+        # VERIFY RAZORPAY SIGNATURE
+        # ==============================
+
+        try:
+            razorpay_client.utility.verify_payment_signature({
+                "razorpay_order_id":
+                    request.razorpay_order_id,
+
+                "razorpay_payment_id":
+                    request.razorpay_payment_id,
+
+                "razorpay_signature":
+                    request.razorpay_signature,
+            })
+
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Payment verification failed",
+            )
+
+        # ==============================
+        # FETCH RAZORPAY PAYMENT
+        # ==============================
+
+        payment = razorpay_client.payment.fetch(
+            request.razorpay_payment_id
+        )
+
+        if payment.get("order_id") != request.razorpay_order_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Payment order mismatch",
+            )
+
+        if payment.get("status") not in [
+            "authorized",
+            "captured",
+        ]:
+            raise HTTPException(
+                status_code=400,
+                detail="Payment is not successful",
+            )
+
+        # ==============================
+        # FETCH RAZORPAY ORDER
+        # ==============================
+
+        razorpay_order = razorpay_client.order.fetch(
+            request.razorpay_order_id
+        )
+
+        notes = razorpay_order.get("notes") or {}
+
+        if notes.get("listingId") != request.listingId:
+            raise HTTPException(
+                status_code=400,
+                detail="Listing mismatch",
+            )
+
+        if notes.get("buyerId") != buyer_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Buyer mismatch",
+            )
+
+        # ==============================
+        # FETCH LISTING
+        # ==============================
+
+        listing_ref = (
+            db.collection("commerce_listings")
+            .document(request.listingId)
+        )
+
+        listing_doc = listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Listing not found",
+            )
+
+        listing = listing_doc.to_dict()
+
+        # ==============================
+        # VERIFY PAYMENT AMOUNT
+        # ==============================
+
+        price = float(
+            listing.get("instantBuyPrice", 0)
+        )
+
+        expected_amount = int(
+            round(price * 100)
+        )
+
+        if int(payment.get("amount", 0)) != expected_amount:
+            raise HTTPException(
+                status_code=400,
+                detail="Payment amount mismatch",
+            )
+
+        if int(razorpay_order.get("amount", 0)) != expected_amount:
+            raise HTTPException(
+                status_code=400,
+                detail="Order amount mismatch",
+            )
+
+        # ==============================
+        # IDEMPOTENCY CHECK
+        # ==============================
+
+        existing_orders = (
+            db.collection("commerce_orders")
+            .where(
+                "paymentId",
+                "==",
+                request.razorpay_payment_id,
+            )
+            .limit(1)
+            .stream()
+        )
+
+        for existing in existing_orders:
+            existing_data = existing.to_dict()
+
+            return {
+                "success": True,
+                "alreadyProcessed": True,
+                "orderId": existing.id,
+                "orderStatus":
+                    existing_data.get(
+                        "orderStatus",
+                        "confirmed",
+                    ),
+            }
+
+        # ==============================
+        # CHECK LISTING AVAILABILITY
+        # ==============================
+
+        if listing.get("sold", False):
+            raise HTTPException(
+                status_code=409,
+                detail="Listing already sold",
+            )
+
+        if listing.get("status") != "active":
+            raise HTTPException(
+                status_code=409,
+                detail="Listing is no longer active",
+            )
+
+        # ==============================
+        # CREATE ORDER
+        # ==============================
+
+        import random
+
+        pickup_otp = str(
+            random.randint(
+                100000,
+                999999,
+            )
+        )
+
+        order_ref = (
+            db.collection("commerce_orders")
+            .document()
+        )
+
+        batch = db.batch()
+
+        batch.set(
+            order_ref,
+            {
+                "orderId":
+                    order_ref.id,
+
+                "listingId":
+                    request.listingId,
+
+                "buyerId":
+                    buyer_id,
+
+                "sellerId":
+                    listing.get("sellerId"),
+
+                "cropName":
+                    listing.get("cropName"),
+
+                "image":
+                    listing.get("cropImage"),
+
+                "quantity":
+                    listing.get("quantity"),
+
+                "unit":
+                    listing.get("unit"),
+
+                "amount":
+                    price,
+
+                "orderAmount":
+                    price,
+
+                "pickupOtp":
+                    pickup_otp,
+
+                "acceptedAmount":
+                    None,
+
+                "pickupDate":
+                    None,
+
+                "pickupTime":
+                    "",
+
+                "pickupLocation":
+                    "",
+
+                "paymentId":
+                    request.razorpay_payment_id,
+
+                "razorpayOrderId":
+                    request.razorpay_order_id,
+
+                "paymentStatus":
+                    "paid",
+
+                "orderStatus":
+                    "confirmed",
+
+                "type":
+                    "instant_buy",
+
+                "pickupScheduled":
+                    False,
+
+                "otpVerified":
+                    False,
+
+                "sellerLatitude":
+                    listing.get("latitude"),
+
+                "sellerLongitude":
+                    listing.get("longitude"),
+
+                "sellerLocation":
+                    listing.get("locationName"),
+
+                "buyerNote":
+                    "",
+
+                "buyerNoteStatus":
+                    "none",
+
+                "deliveryRequested":
+                    False,
+
+                "deliveryRequestStatus":
+                    "none",
+
+                "deliveryCharge":
+                    0,
+
+                "deliveryMessage":
+                    "",
+
+                "deliveryAddress":
+                    "",
+
+                "deliveryAcceptedAt":
+                    None,
+
+                "createdAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        # ==============================
+        # MARK LISTING SOLD
+        # ==============================
+
+        batch.update(
+            listing_ref,
+            {
+                "sold":
+                    True,
+
+                "status":
+                    "sold",
+
+                "soldType":
+                    "instant_buy",
+
+                "soldTo":
+                    buyer_id,
+
+                "biddingEnabled":
+                    False,
+
+                "instantBuyEnabled":
+                    False,
+
+                "orderLocked":
+                    True,
+
+                "soldAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        # ==============================
+        # OUTBID ACTIVE BIDS
+        # ==============================
+
+        active_bids = (
+            db.collection("commerce_bids")
+            .where(
+                "listingId",
+                "==",
+                request.listingId,
+            )
+            .where(
+                "status",
+                "==",
+                "active",
+            )
+            .stream()
+        )
+
+        for bid in active_bids:
+            batch.update(
+                bid.reference,
+                {
+                    "status":
+                        "outbid",
+                },
+            )
+
+        await asyncio.to_thread(
+            batch.commit
+        )
+
+        return {
+            "success": True,
+            "alreadyProcessed": False,
+            "orderId": order_ref.id,
+            "orderStatus": "confirmed",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(
+            "RAZORPAY VERIFY ERROR:",
+            str(e),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to verify payment",
         )
 # ================= NOTIFY ALL =================
 
