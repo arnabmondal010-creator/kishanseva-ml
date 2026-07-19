@@ -32,6 +32,7 @@ from firebase_admin import auth
 from deep_translator import GoogleTranslator
 from datetime import datetime
 from datetime import timedelta
+from datetime import datetime, timezone, timedelta
 
 def to_bengali_number(text):
     en = "0123456789"
@@ -1219,6 +1220,54 @@ async def create_razorpay_order(
             status_code=500,
             detail="Unable to create payment order",
         )
+def find_existing_razorpay_refund(
+    payment_id: str,
+):
+    """
+    Check Razorpay for an existing refund
+    associated with this payment.
+
+    Returns the latest matching refund,
+    or None if no refund exists.
+    """
+
+    try:
+        response = (
+            razorpay_client
+            .payment
+            .fetch_multiple_refund(
+                payment_id
+            )
+        )
+
+        items = (
+            response.get("items", [])
+            if isinstance(response, dict)
+            else []
+        )
+
+        if not items:
+            return None
+
+        # Prefer the most recently created refund.
+
+        items.sort(
+            key=lambda item:
+                item.get("created_at", 0),
+            reverse=True,
+        )
+
+        return items[0]
+
+    except Exception as e:
+
+        print(
+            "RAZORPAY REFUND RECONCILIATION ERROR:",
+            payment_id,
+            str(e),
+        )
+
+        raise
 def refund_failed_instant_buy(
     payment_id: str,
     razorpay_order_id: str,
@@ -1227,95 +1276,581 @@ def refund_failed_instant_buy(
     reason: str,
 ):
     """
-    Refund a captured payment when the listing
-    cannot be fulfilled after successful payment.
+    Idempotently initiate a full refund for an
+    Instant Buy payment that cannot be fulfilled.
+
+    Firestore document:
+    commerce_refund_locks/{payment_id}
     """
 
+    # ==========================================
+    # 1. VALIDATE REQUIRED DATA
+    # ==========================================
+
+    if not payment_id:
+        raise Exception(
+            "Missing payment ID for refund"
+        )
+
+    if not razorpay_order_id:
+        raise Exception(
+            "Missing Razorpay order ID for refund"
+        )
+
+    if not listing_id:
+        raise Exception(
+            "Missing listing ID for refund"
+        )
+
+    if not buyer_id:
+        raise Exception(
+            "Missing buyer ID for refund"
+        )
+
     refund_lock_ref = (
-        db.collection("commerce_refund_locks")
-        .document(payment_id)
+        db.collection(
+            "commerce_refund_locks"
+        )
+        .document(
+            payment_id
+        )
     )
 
-    # Prevent duplicate refund requests
-    existing_lock = refund_lock_ref.get()
+    # ==========================================
+    # 2. FAST IDEMPOTENCY CHECK
+    # ==========================================
+
+    existing_lock = (
+        refund_lock_ref.get()
+    )
 
     if existing_lock.exists:
-        data = existing_lock.to_dict() or {}
+
+        data = (
+            existing_lock.to_dict()
+            or {}
+        )
+
+        status = data.get(
+            "status"
+        )
+
+        # Refund already submitted or completed.
+        if status in [
+            "requested",
+            "pending",
+            "processed",
+        ]:
+
+            return {
+                "success":
+                    True,
+
+                "alreadyRequested":
+                    True,
+
+                "refundId":
+                    data.get(
+                        "refundId"
+                    ),
+
+                "status":
+                    status,
+            }
+
+        # Another worker currently owns
+        # the refund request.
+    if status == "processing":
+
+        processing_started_at = (
+            data.get(
+                "processingStartedAt"
+            )
+        )
+
+    stale = False
+
+    if processing_started_at:
+
+        try:
+
+            now = datetime.now(
+                timezone.utc
+            )
+
+            stale = (
+                now
+                - processing_started_at
+                > timedelta(
+                    minutes=10
+                )
+            )
+
+        except Exception:
+            stale = False
+
+    # Another request probably still owns
+    # the refund operation.
+
+    if not stale:
 
         return {
-            "success": True,
-            "alreadyRequested": True,
-            "refundId": data.get("refundId"),
-            "status": data.get("status"),
+            "success":
+                True,
+
+            "alreadyRequested":
+                True,
+
+            "refundId":
+                data.get(
+                    "refundId"
+                ),
+
+            "status":
+                "processing",
         }
 
-    # Fetch payment directly from Razorpay
-    payment = razorpay_client.payment.fetch(
-        payment_id
+    # ======================================
+    # STALE REFUND LOCK
+    # ======================================
+    #
+    # Do NOT immediately request another
+    # refund.
+    #
+    # First check Razorpay to determine
+    # whether the previous request succeeded.
+    # ======================================
+
+    existing_refund = (
+        find_existing_razorpay_refund(
+            payment_id
+        )
     )
 
-    if payment.get("order_id") != razorpay_order_id:
-        raise Exception(
-            "Refund payment order mismatch"
+    if existing_refund:
+
+        existing_refund_id = (
+            existing_refund.get(
+                "id"
+            )
         )
 
-    payment_status = payment.get("status")
-
-    if payment_status != "captured":
-        raise Exception(
-            f"Payment cannot be refunded in status: "
-            f"{payment_status}"
+        existing_refund_status = (
+            existing_refund.get(
+                "status"
+            )
+            or "requested"
         )
 
-    # Request full refund
-    refund = razorpay_client.payment.refund(
-        payment_id,
-        {}
+        refund_lock_ref.set(
+            {
+                "refundId":
+                    existing_refund_id,
+
+                "status":
+                    existing_refund_status,
+
+                "razorpayRefundStatus":
+                    existing_refund_status,
+
+                "reconciled":
+                    True,
+
+                "reconciledAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        return {
+            "success":
+                True,
+
+            "alreadyRequested":
+                True,
+
+            "refundId":
+                existing_refund_id,
+
+            "status":
+                existing_refund_status,
+        }
+
+    # No existing refund was found.
+    #
+    # Mark the stale lock failed so the
+    # transaction below can reclaim it.
+
+    refund_lock_ref.set(
+        {
+            "status":
+                "failed",
+
+            "failureReason":
+                "Stale processing lock recovered",
+
+            "reconciled":
+                True,
+
+            "reconciledAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
     )
 
-    refund_id = refund.get("id")
+    # ==========================================
+    # 3. ATOMICALLY CLAIM REFUND
+    # ==========================================
 
-    refund_lock_ref.set({
-        "paymentId":
-            payment_id,
+    transaction = (
+        db.transaction()
+    )
 
-        "razorpayOrderId":
-            razorpay_order_id,
+    @firestore.transactional
+    def claim_refund(
+        transaction,
+    ):
 
-        "listingId":
-            listing_id,
+        lock_doc = (
+            refund_lock_ref.get(
+                transaction=transaction
+            )
+        )
 
-        "buyerId":
-            buyer_id,
+        if lock_doc.exists:
 
-        "refundId":
-            refund_id,
+            lock_data = (
+                lock_doc.to_dict()
+                or {}
+            )
 
-        "status":
-            refund.get(
-                "status",
+            # Verify that an existing lock
+            # belongs to the same payment context.
+
+            locked_order_id = (
+                lock_data.get(
+                    "razorpayOrderId"
+                )
+            )
+
+            locked_listing_id = (
+                lock_data.get(
+                    "listingId"
+                )
+            )
+
+            locked_buyer_id = (
+                lock_data.get(
+                    "buyerId"
+                )
+            )
+
+            if (
+                locked_order_id
+                and
+                locked_order_id
+                != razorpay_order_id
+            ):
+                raise Exception(
+                    "Refund lock order mismatch"
+                )
+
+            if (
+                locked_listing_id
+                and
+                locked_listing_id
+                != listing_id
+            ):
+                raise Exception(
+                    "Refund lock listing mismatch"
+                )
+
+            if (
+                locked_buyer_id
+                and
+                locked_buyer_id
+                != buyer_id
+            ):
+                raise Exception(
+                    "Refund lock buyer mismatch"
+                )
+
+            current_status = (
+                lock_data.get(
+                    "status"
+                )
+            )
+
+            if current_status in [
+                "processing",
                 "requested",
-            ),
+                "pending",
+                "processed",
+            ]:
 
-        "reason":
-            reason,
+                return {
+                    "claimed":
+                        False,
 
-        "createdAt":
-            firestore.SERVER_TIMESTAMP,
+                    "refundId":
+                        lock_data.get(
+                            "refundId"
+                        ),
 
-        "updatedAt":
-            firestore.SERVER_TIMESTAMP,
-    })
+                    "status":
+                        current_status,
+                }
 
-    return {
-        "success": True,
-        "alreadyRequested": False,
-        "refundId": refund_id,
-        "status": refund.get(
-            "status",
-            "requested",
-        ),
-    }
+        # This transaction gives this worker
+        # ownership of initiating the refund.
+
+        transaction.set(
+            refund_lock_ref,
+            {
+                "paymentId":
+                    payment_id,
+
+                "razorpayOrderId":
+                    razorpay_order_id,
+
+                "listingId":
+                    listing_id,
+
+                "buyerId":
+                    buyer_id,
+
+                "reason":
+                    reason,
+
+                "status":
+                    "processing",
+
+                "processingStartedAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "createdAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        return {
+            "claimed":
+                True,
+
+            "refundId":
+                None,
+
+            "status":
+                "processing",
+        }
+
+    claim_result = (
+        claim_refund(
+            transaction
+        )
+    )
+
+    # ==========================================
+    # 4. ANOTHER WORKER ALREADY CLAIMED IT
+    # ==========================================
+
+    if not claim_result.get(
+        "claimed",
+        False,
+    ):
+
+        return {
+            "success":
+                True,
+
+            "alreadyRequested":
+                True,
+
+            "refundId":
+                claim_result.get(
+                    "refundId"
+                ),
+
+            "status":
+                claim_result.get(
+                    "status"
+                ),
+        }
+
+    # ==========================================
+    # 5. VERIFY PAYMENT WITH RAZORPAY
+    # ==========================================
+
+    try:
+
+        payment = (
+            razorpay_client
+            .payment
+            .fetch(
+                payment_id
+            )
+        )
+
+        if (
+            payment.get(
+                "order_id"
+            )
+            != razorpay_order_id
+        ):
+            raise Exception(
+                "Refund payment order mismatch"
+            )
+
+        payment_status = (
+            payment.get(
+                "status"
+            )
+        )
+
+        # ======================================
+        # ALREADY REFUNDED
+        # ======================================
+
+        if payment_status == "refunded":
+
+            refund_lock_ref.set(
+                {
+                    "status":
+                        "processed",
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+
+            return {
+                "success":
+                    True,
+
+                "alreadyRequested":
+                    True,
+
+                "refundId":
+                    None,
+
+                "status":
+                    "processed",
+            }
+
+        # ======================================
+        # PAYMENT MUST BE CAPTURED
+        # ======================================
+
+        if payment_status != "captured":
+
+            raise Exception(
+                f"Payment cannot be refunded "
+                f"in status: {payment_status}"
+            )
+
+        # ==========================================
+        # 6. REQUEST FULL REFUND FROM RAZORPAY
+        # ==========================================
+
+        refund = (
+            razorpay_client
+            .payment
+            .refund(
+                payment_id,
+                {}
+            )
+        )
+
+        refund_id = (
+            refund.get(
+                "id"
+            )
+        )
+
+        refund_status = (
+            refund.get(
+                "status"
+            )
+            or "requested"
+        )
+
+        # ==========================================
+        # 7. SAVE RAZORPAY REFUND RESULT
+        # ==========================================
+
+        refund_lock_ref.set(
+            {
+                "refundId":
+                    refund_id,
+
+                "status":
+                    refund_status,
+
+                "razorpayRefundStatus":
+                    refund_status,
+
+                "refundRequestedAt":
+                    firestore.SERVER_TIMESTAMP,
+                "processingCompletedAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        return {
+            "success":
+                True,
+
+            "alreadyRequested":
+                False,
+
+            "refundId":
+                refund_id,
+
+            "status":
+                refund_status,
+        }
+
+    except Exception as refund_error:
+
+        # ==========================================
+        # 8. MARK CLAIM AS FAILED
+        # ==========================================
+
+        refund_lock_ref.set(
+            {
+                "status":
+                    "failed",
+
+                "error":
+                    str(
+                        refund_error
+                    )[:500],
+
+                "failedAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        raise
 
 def finalize_instant_buy(
     razorpay_order_id: str,
@@ -2376,6 +2911,271 @@ async def verify_razorpay_payment(
             status_code=500,
             detail="Unable to finalize payment",
         )
+def claim_razorpay_webhook_event(
+    event_id: str,
+    event_type: str,
+    payment_id: str | None,
+    razorpay_order_id: str | None,
+):
+    """
+    Atomically claim a Razorpay webhook event.
+
+    Returns:
+      claimed=True  -> process the event
+      claimed=False -> event already handled or being processed
+    """
+
+    event_ref = (
+        db.collection(
+            "commerce_webhook_events"
+        )
+        .document(
+            event_id
+        )
+    )
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def claim_transaction(
+        transaction,
+    ):
+        event_doc = event_ref.get(
+            transaction=transaction
+        )
+
+        # ======================================
+        # NEW EVENT
+        # ======================================
+
+        if not event_doc.exists:
+
+            transaction.set(
+                event_ref,
+                {
+                    "eventId":
+                        event_id,
+
+                    "eventType":
+                        event_type,
+
+                    "paymentId":
+                        payment_id,
+
+                    "razorpayOrderId":
+                        razorpay_order_id,
+
+                    "status":
+                        "processing",
+
+                    "attemptCount":
+                        1,
+
+                    "createdAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "processingStartedAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                },
+            )
+
+            return {
+                "claimed":
+                    True,
+
+                "status":
+                    "processing",
+
+                "attemptCount":
+                    1,
+            }
+
+        # ======================================
+        # EXISTING EVENT
+        # ======================================
+
+        data = (
+            event_doc.to_dict()
+            or {}
+        )
+
+        status = data.get(
+            "status"
+        )
+
+        attempt_count = int(
+            data.get(
+                "attemptCount",
+                0,
+            )
+            or 0
+        )
+
+        # ======================================
+        # ALREADY COMPLETELY HANDLED
+        # ======================================
+
+        if status in [
+            "processed",
+            "ignored",
+            "refund_initiated",
+        ]:
+
+            return {
+                "claimed":
+                    False,
+
+                "status":
+                    status,
+
+                "attemptCount":
+                    attempt_count,
+            }
+
+        # ======================================
+        # CURRENTLY BEING PROCESSED
+        # ======================================
+
+        if status == "processing":
+
+            processing_started_at = (
+                data.get(
+                    "processingStartedAt"
+                )
+            )
+
+            stale = False
+
+            if processing_started_at:
+
+                try:
+                    now = datetime.now(
+                        timezone.utc
+                    )
+
+                    stale = (
+                        now
+                        - processing_started_at
+                        > timedelta(
+                            minutes=10
+                        )
+                    )
+
+                except Exception:
+                    stale = False
+
+            # Another worker is probably
+            # still processing this event.
+
+            if not stale:
+
+                return {
+                    "claimed":
+                        False,
+
+                    "status":
+                        "processing",
+
+                    "attemptCount":
+                        attempt_count,
+                }
+
+            # Processing lock is stale.
+            # Allow this retry to reclaim it.
+
+            new_attempt_count = (
+                attempt_count + 1
+            )
+
+            transaction.update(
+                event_ref,
+                {
+                    "status":
+                        "processing",
+
+                    "attemptCount":
+                        new_attempt_count,
+
+                    "processingStartedAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "lastRetryAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "staleLockRecovered":
+                        True,
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                },
+            )
+
+            return {
+                "claimed":
+                    True,
+
+                "status":
+                    "processing",
+
+                "attemptCount":
+                    new_attempt_count,
+            }
+
+        # ======================================
+        # PREVIOUS ATTEMPT FAILED
+        # ======================================
+        #
+        # processing_failed / refund_failed
+        # can be claimed by a Razorpay retry.
+        # ======================================
+
+        new_attempt_count = (
+            attempt_count + 1
+        )
+
+        transaction.update(
+            event_ref,
+            {
+                "status":
+                    "processing",
+
+                "attemptCount":
+                    new_attempt_count,
+
+                "processingStartedAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "lastRetryAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        return {
+            "claimed":
+                True,
+
+            "status":
+                "processing",
+
+            "attemptCount":
+                new_attempt_count,
+        }
+
+    result = claim_transaction(
+        transaction
+    )
+
+    result["eventRef"] = (
+        event_ref
+    )
+
+    return result
     
 @app.post("/payments/razorpay/webhook")
 async def razorpay_webhook(
@@ -2457,32 +3257,96 @@ async def razorpay_webhook(
             detail="Missing Razorpay event ID",
         )
 
-    event_ref = (
-        db.collection(
-            "commerce_webhook_events"
-        )
-        .document(
-            x_razorpay_event_id
-        )
+        # ==========================================
+    # ATOMICALLY CLAIM WEBHOOK EVENT
+    # ==========================================
+
+    claim_result = await asyncio.to_thread(
+        claim_razorpay_webhook_event,
+        x_razorpay_event_id,
+        event_type,
+        payment_id,
+        razorpay_order_id,
     )
 
-    # --------------------------------
-    # 5. IDEMPOTENCY CHECK
-    # --------------------------------
+    event_ref = claim_result[
+        "eventRef"
+    ]
 
-    existing_event = event_ref.get()
+    if not claim_result.get(
+        "claimed",
+        False,
+    ):
 
-    if existing_event.exists:
+        existing_status = (
+            claim_result.get(
+                "status"
+            )
+        )
 
         print(
-            "RAZORPAY WEBHOOK DUPLICATE:",
+            "RAZORPAY WEBHOOK NOT CLAIMED:",
             x_razorpay_event_id,
+            "status=",
+            existing_status,
         )
 
         return {
-            "success": True,
-            "duplicate": True,
+            "success":
+                True,
+
+            "duplicate":
+                True,
+
+            "status":
+                existing_status,
         }
+
+    print(
+        "RAZORPAY WEBHOOK CLAIMED:",
+        x_razorpay_event_id,
+        "attempt=",
+        claim_result.get(
+            "attemptCount"
+        ),
+    )
+        # --------------------------------
+        # ALREADY FULLY HANDLED
+        # --------------------------------
+
+    if existing_status in [
+            "processed",
+            "ignored",
+            "refund_initiated",
+        ]:
+
+            print(
+                "RAZORPAY WEBHOOK DUPLICATE:",
+                x_razorpay_event_id,
+                "status=",
+                existing_status,
+            )
+
+            return {
+                "success": True,
+                "duplicate": True,
+                "status": existing_status,
+            }
+
+        # --------------------------------
+        # PREVIOUS PROCESSING FAILED
+        # --------------------------------
+        #
+        # Allow Razorpay retry to continue
+        # processing this event.
+        # --------------------------------
+
+    print(
+            "RAZORPAY WEBHOOK RETRY:",
+            x_razorpay_event_id,
+            "previous_status=",
+            existing_status,
+        )
 
     # --------------------------------
     # 6. EXTRACT PAYMENT
@@ -2506,28 +3370,21 @@ async def razorpay_webhook(
     )
 
     # --------------------------------
-    # 7. STORE EVENT FIRST
+    # INITIALIZE KISHANSEVA METADATA
+    # --------------------------------
+    #
+    # These values are populated later
+    # from the Razorpay order notes.
+    #
+    # They must be initialized here
+    # because the webhook exception
+    # handler also uses them.
     # --------------------------------
 
-    event_ref.set({
-        "eventId":
-            x_razorpay_event_id,
+    listing_id = None
+    buyer_id = None
 
-        "eventType":
-            event_type,
 
-        "paymentId":
-            payment_id,
-
-        "razorpayOrderId":
-            razorpay_order_id,
-
-        "status":
-            "received",
-
-        "createdAt":
-            firestore.SERVER_TIMESTAMP,
-    })
     try:
 
         # ==============================
@@ -2780,6 +3637,109 @@ async def razorpay_webhook(
                 "paymentFailed":
                     True,
             }
+                # ==============================
+        # REFUND PROCESSED
+        # ==============================
+
+        elif event_type == "refund.processed":
+
+            refund_entity = (
+                payload
+                .get("payload", {})
+                .get("refund", {})
+                .get("entity", {})
+            )
+
+            refund_id = refund_entity.get(
+                "id"
+            )
+
+            refund_payment_id = (
+                refund_entity.get(
+                    "payment_id"
+                )
+            )
+
+            if not refund_payment_id:
+
+                event_ref.update({
+                    "status":
+                        "ignored",
+
+                    "reason":
+                        "Missing refund payment ID",
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                return {
+                    "success": True,
+                    "ignored": True,
+                }
+
+            refund_lock_ref = (
+                db.collection(
+                    "commerce_refund_locks"
+                )
+                .document(
+                    refund_payment_id
+                )
+            )
+
+            refund_lock_ref.set(
+                {
+                    "refundId":
+                        refund_id,
+
+                    "paymentId":
+                        refund_payment_id,
+
+                    "status":
+                        "processed",
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+
+            event_ref.update({
+                "status":
+                    "processed",
+
+                "refundId":
+                    refund_id,
+
+                "paymentId":
+                    refund_payment_id,
+
+                "refundStatus":
+                    "processed",
+
+                "processedAt":
+                    firestore.SERVER_TIMESTAMP,
+            })
+
+            print(
+                "RAZORPAY REFUND PROCESSED:",
+                refund_id,
+                refund_payment_id,
+            )
+
+            return {
+                "success":
+                    True,
+
+                "refundProcessed":
+                    True,
+
+                "refundId":
+                    refund_id,
+            }
 
         # ==============================
         # OTHER EVENTS
@@ -2815,6 +3775,206 @@ async def razorpay_webhook(
             error_message,
         )
 
+        # ==========================================
+        # LISTING UNAVAILABLE AFTER PAYMENT
+        # ==========================================
+
+        if (
+            "already sold"
+            in error_message.lower()
+            or
+            "no longer active"
+            in error_message.lower()
+            or
+            "instant buy is no longer available"
+            in error_message.lower()
+        ):
+
+            try:
+                # ----------------------------------
+                # INITIATE IDEMPOTENT REFUND
+                # ----------------------------------
+
+                refund_result = await asyncio.to_thread(
+                    refund_failed_instant_buy,
+                    payment_id,
+                    razorpay_order_id,
+                    listing_id,
+                    buyer_id,
+                    "Listing became unavailable after payment",
+                )
+
+                # ----------------------------------
+                # MARK WEBHOOK EVENT
+                # ----------------------------------
+
+                event_ref.update({
+                    "status":
+                        "refund_initiated",
+
+                    "paymentId":
+                        payment_id,
+
+                    "razorpayOrderId":
+                        razorpay_order_id,
+
+                    "listingId":
+                        listing_id,
+
+                    "buyerId":
+                        buyer_id,
+
+                    "refundId":
+                        refund_result.get(
+                            "refundId"
+                        ),
+
+                    "refundStatus":
+                        refund_result.get(
+                            "status"
+                        ),
+
+                    "refundAlreadyRequested":
+                        refund_result.get(
+                            "alreadyRequested",
+                            False,
+                        ),
+
+                    "reason":
+                        "Listing unavailable after successful payment",
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                print(
+                    "RAZORPAY WEBHOOK REFUND INITIATED:",
+                    "payment=",
+                    payment_id,
+                    "refund=",
+                    refund_result.get(
+                        "refundId"
+                    ),
+                )
+
+                # IMPORTANT:
+                # Return HTTP 200.
+                #
+                # The payment has now been handled
+                # by initiating a refund.
+                #
+                # Returning 500 here would cause
+                # unnecessary webhook retries.
+
+                return {
+                    "success":
+                        True,
+
+                    "orderCreated":
+                        False,
+
+                    "refundInitiated":
+                        True,
+
+                    "refundId":
+                        refund_result.get(
+                            "refundId"
+                        ),
+
+                    "refundStatus":
+                        refund_result.get(
+                            "status"
+                        ),
+                }
+
+            except Exception as refund_error:
+
+                print(
+                    "CRITICAL WEBHOOK REFUND ERROR:",
+                    payment_id,
+                    str(refund_error),
+                )
+
+                # ==================================
+                # SAVE FOR MANUAL RECONCILIATION
+                # ==================================
+
+                if payment_id:
+
+                    db.collection(
+                        "commerce_payment_reconciliation"
+                    ).document(
+                        payment_id
+                    ).set(
+                        {
+                            "paymentId":
+                                payment_id,
+
+                            "razorpayOrderId":
+                                razorpay_order_id,
+
+                            "listingId":
+                                listing_id,
+
+                            "buyerId":
+                                buyer_id,
+
+                            "reason":
+                                (
+                                    "Webhook detected unavailable "
+                                    "listing after successful payment"
+                                ),
+
+                            "refundError":
+                                str(
+                                    refund_error
+                                )[:500],
+
+                            "status":
+                                "manual_review_required",
+
+                            "source":
+                                "razorpay_webhook",
+
+                            "webhookEventId":
+                                x_razorpay_event_id,
+
+                            "createdAt":
+                                firestore.SERVER_TIMESTAMP,
+
+                            "updatedAt":
+                                firestore.SERVER_TIMESTAMP,
+                        },
+                        merge=True,
+                    )
+
+                event_ref.update({
+                    "status":
+                        "refund_failed",
+
+                    "error":
+                        str(
+                            refund_error
+                        )[:500],
+
+                    "failedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                # Return 500 because automated
+                # handling has not succeeded.
+                # This allows webhook retry.
+
+                raise HTTPException(
+                    status_code=500,
+                    detail=
+                        "Webhook refund processing failed",
+                )
+
+        # ==========================================
+        # OTHER PROCESSING ERRORS
+        # ==========================================
+
         event_ref.update({
             "status":
                 "processing_failed",
@@ -2826,12 +3986,9 @@ async def razorpay_webhook(
                 firestore.SERVER_TIMESTAMP,
         })
 
-        # Return 500.
-        # Razorpay can retry the webhook.
         raise HTTPException(
             status_code=500,
-            detail=
-                "Webhook processing failed",
+            detail="Webhook processing failed",
         )
 # ================= NOTIFY ALL =================
 
