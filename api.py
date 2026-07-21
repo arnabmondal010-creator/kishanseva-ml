@@ -1335,7 +1335,10 @@ def refund_failed_instant_buy(
             "status"
         )
 
-        # Refund already submitted or completed.
+        # ======================================
+        # REFUND ALREADY SUBMITTED / COMPLETED
+        # ======================================
+
         if status in [
             "requested",
             "pending",
@@ -1358,152 +1361,148 @@ def refund_failed_instant_buy(
                     status,
             }
 
-        # Another worker currently owns
-        # the refund request.
-    if status == "processing":
+        # ======================================
+        # ANOTHER WORKER IS PROCESSING
+        # ======================================
 
-        processing_started_at = (
-            data.get(
-                "processingStartedAt"
-            )
-        )
+        if status == "processing":
 
-    stale = False
-
-    if processing_started_at:
-
-        try:
-
-            now = datetime.now(
-                timezone.utc
-            )
-
-            stale = (
-                now
-                - processing_started_at
-                > timedelta(
-                    minutes=10
+            processing_started_at = (
+                data.get(
+                    "processingStartedAt"
                 )
             )
 
-        except Exception:
             stale = False
 
-    # Another request probably still owns
-    # the refund operation.
+            if processing_started_at:
 
-    if not stale:
+                try:
 
-        return {
-            "success":
-                True,
+                    now = datetime.now(
+                        timezone.utc
+                    )
 
-            "alreadyRequested":
-                True,
+                    stale = (
+                        now
+                        - processing_started_at
+                        > timedelta(
+                            minutes=10
+                        )
+                    )
 
-            "refundId":
-                data.get(
-                    "refundId"
-                ),
+                except Exception:
+                    stale = False
 
-            "status":
-                "processing",
-        }
+            # Active processing lock.
+            # Do not request another refund.
 
-    # ======================================
-    # STALE REFUND LOCK
-    # ======================================
-    #
-    # Do NOT immediately request another
-    # refund.
-    #
-    # First check Razorpay to determine
-    # whether the previous request succeeded.
-    # ======================================
+            if not stale:
 
-    existing_refund = (
-        find_existing_razorpay_refund(
-            payment_id
-        )
-    )
+                return {
+                    "success":
+                        True,
 
-    if existing_refund:
+                    "alreadyRequested":
+                        True,
 
-        existing_refund_id = (
-            existing_refund.get(
-                "id"
+                    "refundId":
+                        data.get(
+                            "refundId"
+                        ),
+
+                    "status":
+                        "processing",
+                }
+
+            # ======================================
+            # STALE REFUND LOCK
+            # ======================================
+
+            existing_refund = (
+                find_existing_razorpay_refund(
+                    payment_id
+                )
             )
-        )
 
-        existing_refund_status = (
-            existing_refund.get(
-                "status"
+            # Previous refund actually reached
+            # Razorpay. Reconcile local state.
+
+            if existing_refund:
+
+                existing_refund_id = (
+                    existing_refund.get(
+                        "id"
+                    )
+                )
+
+                existing_refund_status = (
+                    existing_refund.get(
+                        "status"
+                    )
+                    or "requested"
+                )
+
+                refund_lock_ref.set(
+                    {
+                        "refundId":
+                            existing_refund_id,
+
+                        "status":
+                            existing_refund_status,
+
+                        "razorpayRefundStatus":
+                            existing_refund_status,
+
+                        "reconciled":
+                            True,
+
+                        "reconciledAt":
+                            firestore.SERVER_TIMESTAMP,
+
+                        "updatedAt":
+                            firestore.SERVER_TIMESTAMP,
+                    },
+                    merge=True,
+                )
+
+                return {
+                    "success":
+                        True,
+
+                    "alreadyRequested":
+                        True,
+
+                    "refundId":
+                        existing_refund_id,
+
+                    "status":
+                        existing_refund_status,
+                }
+
+            # No refund found at Razorpay.
+            # Recover stale lock and allow
+            # atomic claim below to retry.
+
+            refund_lock_ref.set(
+                {
+                    "status":
+                        "failed",
+
+                    "failureReason":
+                        "Stale processing lock recovered",
+
+                    "reconciled":
+                        True,
+
+                    "reconciledAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
             )
-            or "requested"
-        )
-
-        refund_lock_ref.set(
-            {
-                "refundId":
-                    existing_refund_id,
-
-                "status":
-                    existing_refund_status,
-
-                "razorpayRefundStatus":
-                    existing_refund_status,
-
-                "reconciled":
-                    True,
-
-                "reconciledAt":
-                    firestore.SERVER_TIMESTAMP,
-
-                "updatedAt":
-                    firestore.SERVER_TIMESTAMP,
-            },
-            merge=True,
-        )
-
-        return {
-            "success":
-                True,
-
-            "alreadyRequested":
-                True,
-
-            "refundId":
-                existing_refund_id,
-
-            "status":
-                existing_refund_status,
-        }
-
-    # No existing refund was found.
-    #
-    # Mark the stale lock failed so the
-    # transaction below can reclaim it.
-
-    refund_lock_ref.set(
-        {
-            "status":
-                "failed",
-
-            "failureReason":
-                "Stale processing lock recovered",
-
-            "reconciled":
-                True,
-
-            "reconciledAt":
-                firestore.SERVER_TIMESTAMP,
-
-            "updatedAt":
-                firestore.SERVER_TIMESTAMP,
-        },
-        merge=True,
-    )
-
     # ==========================================
     # 3. ATOMICALLY CLAIM REFUND
     # ==========================================
@@ -3256,6 +3255,35 @@ async def razorpay_webhook(
             status_code=400,
             detail="Missing Razorpay event ID",
         )
+    
+        # --------------------------------
+    # 5. INITIALIZE WEBHOOK VARIABLES
+    # --------------------------------
+
+    payment_id = None
+    razorpay_order_id = None
+    listing_id = None
+    buyer_id = None
+
+        # --------------------------------
+    # 6. EXTRACT PAYMENT ENTITY
+    # --------------------------------
+
+    payment_entity = (
+        payload
+        .get("payload", {})
+        .get("payment", {})
+        .get("entity", {})
+    )
+
+    if payment_entity:
+        payment_id = payment_entity.get(
+            "id"
+        )
+
+        razorpay_order_id = payment_entity.get(
+            "order_id"
+        )
 
         # ==========================================
     # ATOMICALLY CLAIM WEBHOOK EVENT
@@ -3310,79 +3338,9 @@ async def razorpay_webhook(
             "attemptCount"
         ),
     )
-        # --------------------------------
-        # ALREADY FULLY HANDLED
-        # --------------------------------
+        
 
-    if existing_status in [
-            "processed",
-            "ignored",
-            "refund_initiated",
-        ]:
 
-            print(
-                "RAZORPAY WEBHOOK DUPLICATE:",
-                x_razorpay_event_id,
-                "status=",
-                existing_status,
-            )
-
-            return {
-                "success": True,
-                "duplicate": True,
-                "status": existing_status,
-            }
-
-        # --------------------------------
-        # PREVIOUS PROCESSING FAILED
-        # --------------------------------
-        #
-        # Allow Razorpay retry to continue
-        # processing this event.
-        # --------------------------------
-
-    print(
-            "RAZORPAY WEBHOOK RETRY:",
-            x_razorpay_event_id,
-            "previous_status=",
-            existing_status,
-        )
-
-    # --------------------------------
-    # 6. EXTRACT PAYMENT
-    # --------------------------------
-
-    payment_entity = (
-        payload
-        .get("payload", {})
-        .get("payment", {})
-        .get("entity", {})
-    )
-
-    payment_id = payment_entity.get(
-        "id"
-    )
-
-    razorpay_order_id = (
-        payment_entity.get(
-            "order_id"
-        )
-    )
-
-    # --------------------------------
-    # INITIALIZE KISHANSEVA METADATA
-    # --------------------------------
-    #
-    # These values are populated later
-    # from the Razorpay order notes.
-    #
-    # They must be initialized here
-    # because the webhook exception
-    # handler also uses them.
-    # --------------------------------
-
-    listing_id = None
-    buyer_id = None
 
     try:
 
