@@ -3384,7 +3384,6 @@ async def razorpay_webhook(
     listing_id = None
     buyer_id = None
 
-
     try:
 
         # ==============================
