@@ -2574,6 +2574,36 @@ def finalize_instant_buy(
         "orderStatus":
             "confirmed",
     }
+def finalize_instant_buy_with_retry(
+    razorpay_order_id: str,
+    payment_id: str,
+    listing_id: str,
+    buyer_id: str,
+    max_attempts: int = 3,
+):
+    import time
+    from google.api_core.exceptions import Aborted
+
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+            return finalize_instant_buy(
+                razorpay_order_id,
+                payment_id,
+                listing_id,
+                buyer_id,
+            )
+
+        except Aborted:
+
+            if attempt >= max_attempts:
+                raise
+
+            # Small backoff before retrying.
+            time.sleep(
+                0.25 * attempt
+            )
+
 
 @app.post("/payments/razorpay/verify")
 async def verify_razorpay_payment(
@@ -3459,7 +3489,7 @@ async def razorpay_webhook(
             # ======================================
 
             result = await asyncio.to_thread(
-                finalize_instant_buy,
+                finalize_instant_buy_with_retry,
                 razorpay_order_id,
                 payment_id,
                 listing_id,
