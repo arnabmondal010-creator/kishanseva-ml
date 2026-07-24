@@ -2803,7 +2803,7 @@ def finalize_auction_payment(
     )
     @firestore.transactional
     def apply_payment(transaction):
-        fresh_order = transaction.get(order_ref)
+        fresh_order = transaction.get(transaction=transaction)
 
         if not fresh_order.exists:
             raise Exception("Order disappeared")
@@ -2813,7 +2813,7 @@ def finalize_auction_payment(
         if fresh_order_data.get("paymentStatus") == "paid":
             return True
 
-        seller_doc = transaction.get(seller_ref)
+        seller_doc = transaction.get(transaction=transaction)
 
         if not seller_doc.exists:
             raise Exception("Seller not found")
