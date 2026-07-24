@@ -2674,6 +2674,31 @@ def finalize_instant_buy_with_retry(
             time.sleep(
                 0.25 * attempt
             )
+def finalize_auction_payment_with_retry(
+    razorpay_order_id: str,
+    payment_id: str,
+    order_id: str,
+    buyer_id: str,
+    max_attempts: int = 3,
+):
+    import time
+    from google.api_core.exceptions import Aborted
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return finalize_auction_payment(
+                razorpay_order_id,
+                payment_id,
+                order_id,
+                buyer_id,
+            )
+
+        except Aborted:
+
+            if attempt >= max_attempts:
+                raise
+
+            time.sleep(0.25 * attempt)
 
 def finalize_auction_payment(
     razorpay_order_id: str,
@@ -2760,6 +2785,10 @@ def finalize_auction_payment(
 
     if abs(paid_amount - order_amount) > 0.01:
         raise Exception("Amount mismatch")
+    expected_amount = int(round(order_amount * 100))
+
+    if razorpay_order["amount"] != expected_amount:
+        raise Exception("Razorpay order amount mismatch")
 
     seller_id = order["sellerId"]
 
@@ -2805,6 +2834,8 @@ def finalize_auction_payment(
                 "paymentId": payment_id,
                 "razorpayOrderId": razorpay_order_id,
                 "paidAt": firestore.SERVER_TIMESTAMP,
+                "webhookConfirmed": True,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
             },
         )
 
@@ -2821,7 +2852,7 @@ def finalize_auction_payment(
                 "totalEarnings":
                     current_earnings + seller_payout,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
-                "webhookConfirmed": True
+                
             },
         )
         transaction.set(
@@ -2947,7 +2978,7 @@ async def verify_razorpay_payment(
         if request.orderId:
 
             result = await asyncio.to_thread(
-                finalize_auction_payment,
+                finalize_auction_payment_with_retry,
                 request.razorpay_order_id,
                 request.razorpay_payment_id,
                 request.orderId,
@@ -2957,7 +2988,7 @@ async def verify_razorpay_payment(
         else:
 
             result = await asyncio.to_thread(
-                finalize_instant_buy,
+                finalize_instant_buy_with_retry,
                 request.razorpay_order_id,
                 request.razorpay_payment_id,
                 request.listingId,
@@ -3766,7 +3797,7 @@ async def razorpay_webhook(
             if payment_type == "auction":
 
                 result = await asyncio.to_thread(
-                    finalize_auction_payment,
+                    finalize_auction_payment_with_retry,
                     razorpay_order_id,
                     payment_id,
                     order_id,
@@ -3806,11 +3837,6 @@ async def razorpay_webhook(
             )
 
             order_ref.update({
-                "paymentStatus":
-                    "paid",
-
-                "webhookConfirmed":
-                    True,
 
                 "webhookEventId":
                     x_razorpay_event_id,
