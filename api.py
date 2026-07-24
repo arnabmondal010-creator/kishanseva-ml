@@ -1074,13 +1074,18 @@ if not RAZORPAY_WEBHOOK_SECRET:
     )
 
 
+from typing import Optional
+
 class CreateRazorpayOrderRequest(BaseModel):
-    listingId: str
+    listingId: Optional[str] = None
+    orderId: Optional[str] = None
 class VerifyRazorpayPaymentRequest(BaseModel):
     razorpay_payment_id: str
     razorpay_order_id: str
     razorpay_signature: str
-    listingId: str
+
+    listingId: str | None = None
+    orderId: str | None = None
 
 
 def verify_firebase_token(
@@ -1121,11 +1126,76 @@ async def create_razorpay_order(
         # Firebase UID from verified token
         buyer_id = user["uid"]
 
-        # Fetch listing
-        listing_ref = (
-            db.collection("commerce_listings")
-            .document(request.listingId)
-        )
+# -----------------------------
+# AUCTION PAYMENT
+# -----------------------------
+        if request.orderId:
+
+            order_ref = db.collection(
+                "commerce_orders"
+            ).document(request.orderId)
+
+            order_doc = order_ref.get()
+
+            if not order_doc.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Order not found",
+                )
+
+            order = order_doc.to_dict()
+
+            if order["buyerId"] != buyer_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized",
+                )
+
+            if order.get("paymentStatus") == "paid":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Already paid",
+                )
+
+            price = float(order["orderAmount"])
+
+            amount_paise = int(price * 100)
+
+            razorpay_order = razorpay_client.order.create(
+                data={
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "receipt": f"auction_{request.orderId}",
+                    "notes": {
+                        "orderId": request.orderId,
+                        "buyerId": buyer_id,
+                        "type": "auction",
+                    },
+                }
+            )
+
+            return {
+                "success": True,
+                "keyId": RAZORPAY_KEY_ID,
+                "amount": amount_paise,
+                "currency": "INR",
+                "razorpayOrderId": razorpay_order["id"],
+                "orderId": request.orderId,
+            }
+
+# -----------------------------
+# INSTANT BUY
+# -----------------------------
+
+        if not request.listingId:
+            raise HTTPException(
+                status_code=400,
+                detail="listingId required",
+            )
+
+        listing_ref = db.collection(
+            "commerce_listings"
+        ).document(request.listingId)
 
         listing_doc = listing_ref.get()
 
@@ -2581,6 +2651,7 @@ def finalize_instant_buy_with_retry(
     buyer_id: str,
     max_attempts: int = 3,
 ):
+    
     import time
     from google.api_core.exceptions import Aborted
 
@@ -2603,6 +2674,169 @@ def finalize_instant_buy_with_retry(
             time.sleep(
                 0.25 * attempt
             )
+
+def finalize_auction_payment(
+    razorpay_order_id: str,
+    payment_id: str,
+    order_id: str,
+    buyer_id: str,
+):
+
+    # Step 3
+    if not razorpay_order_id:
+        raise Exception("Missing Razorpay order ID")
+
+    if not payment_id:
+        raise Exception("Missing payment ID")
+
+    if not order_id:
+        raise Exception("Missing order ID")
+
+    if not buyer_id:
+        raise Exception("Missing buyer ID")
+
+    # Step 4
+    order_ref = (
+        db.collection("commerce_orders")
+        .document(order_id)
+    )
+
+    # Step 5
+    order_doc = order_ref.get()
+
+    if not order_doc.exists:
+        raise Exception("Order not found")
+
+    order = order_doc.to_dict()
+
+    # Step 6
+    if order["buyerId"] != buyer_id:
+        raise Exception("Buyer mismatch")
+
+    # Step 7
+    if order.get("paymentStatus") == "paid":
+        return {
+            "alreadyProcessed": True,
+            "orderId": order_id,
+            "paymentStatus": "paid",
+            "orderStatus": order.get(
+                "orderStatus",
+                "confirmed",
+            ),
+        }
+
+    # Step 8
+    payment = razorpay_client.payment.fetch(
+        payment_id
+    )
+
+    # Step 9
+    if payment["order_id"] != razorpay_order_id:
+        raise Exception("Payment order mismatch")
+
+    # Step 10
+    if payment["status"] not in [
+        "authorized",
+        "captured",
+    ]:
+        raise Exception("Payment not successful")
+
+    # Step 11
+    order_amount = float(order["orderAmount"])
+
+    # Step 12
+    paid_amount = payment["amount"] / 100
+
+    if abs(paid_amount - order_amount) > 0.01:
+        raise Exception("Amount mismatch")
+
+    seller_id = order["sellerId"]
+
+    seller_ref = (
+        db.collection("commerce_users")
+        .document(seller_id)
+    )
+
+    wallet_tx_ref = (
+        db.collection("wallet_transactions")
+        .document()
+    )
+    @firestore.transactional
+    def apply_payment(transaction):
+        fresh_order = transaction.get(order_ref)
+
+        if not fresh_order.exists:
+            raise Exception("Order disappeared")
+
+        fresh_order_data = fresh_order.to_dict()
+
+        if fresh_order_data.get("paymentStatus") == "paid":
+            return True
+
+        seller_doc = transaction.get(seller_ref)
+
+        if not seller_doc.exists:
+            raise Exception("Seller not found")
+
+        seller = seller_doc.to_dict()
+        seller_payout = float(
+            fresh_order_data["sellerPayout"]
+        )
+
+        current_wallet = float(
+            seller.get("walletBalance", 0)
+        )
+        transaction.update(
+            order_ref,
+            {
+                "paymentStatus": "paid",
+                "orderStatus": "confirmed",
+                "paymentId": payment_id,
+                "razorpayOrderId": razorpay_order_id,
+                "paidAt": firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        current_earnings = float(
+    seller.get("totalEarnings", 0)
+    )
+
+        transaction.update(
+            seller_ref,
+            {
+                "walletBalance":
+                    current_wallet + seller_payout,
+
+                "totalEarnings":
+                    current_earnings + seller_payout,
+            },
+        )
+        transaction.set(
+            wallet_tx_ref,
+            {
+                "transactionId":
+                    wallet_tx_ref.id,
+                "userId": seller_id,
+                "orderId": order_id,
+                "buyerId": buyer_id,
+                "amount": seller_payout,
+                "type": "order_credit",
+                "status": "completed",
+                "createdAt":
+                    firestore.SERVER_TIMESTAMP,
+                "paymentId": payment_id,
+            },
+        )
+
+    transaction = db.transaction()
+
+    apply_payment(transaction)
+    return {
+        "alreadyProcessed": False,
+        "orderId": order_id,
+        "paymentStatus": "paid",
+        "orderStatus": "confirmed",
+    }
 
 
 @app.post("/payments/razorpay/verify")
@@ -2695,14 +2929,31 @@ async def verify_razorpay_payment(
         # Both Flutter /verify and Razorpay webhook
         # now use the same finalization function.
         # ==========================================
-
-        result = await asyncio.to_thread(
-            finalize_instant_buy,
-            request.razorpay_order_id,
-            request.razorpay_payment_id,
-            request.listingId,
-            buyer_id,
+        if not request.orderId and not request.listingId:
+            raise HTTPException(
+            status_code=400,
+            detail="listingId or orderId required",
         )
+
+        if request.orderId:
+
+            result = await asyncio.to_thread(
+                finalize_auction_payment,
+                request.razorpay_order_id,
+                request.razorpay_payment_id,
+                request.orderId,
+                buyer_id,
+            )
+
+        else:
+
+            result = await asyncio.to_thread(
+                finalize_instant_buy,
+                request.razorpay_order_id,
+                request.razorpay_payment_id,
+                request.listingId,
+                buyer_id,
+            )
 
         # ==========================================
         # 5. RETURN FINAL ORDER RESULT
@@ -3435,44 +3686,59 @@ async def razorpay_webhook(
                 )
             )
 
-            notes = (
-                razorpay_order.get(
-                    "notes"
-                ) or {}
-            )
+            notes = razorpay_order.get("notes") or {}
 
-            listing_id = notes.get(
-                "listingId"
-            )
-
-            buyer_id = notes.get(
-                "buyerId"
-            )
+            buyer_id = notes.get("buyerId")
+            listing_id = notes.get("listingId")
+            order_id = notes.get("orderId")
+            payment_type = notes.get("type", "instant_buy")
 
             # --------------------------
             # VALIDATE KISHANSEVA DATA
             # --------------------------
 
-            if (
-                not listing_id
-                or not buyer_id
-            ):
+            if not buyer_id:
 
                 event_ref.update({
-                    "status":
-                        "ignored",
-
-                    "reason":
-                        "Missing Kishanseva metadata",
-
-                    "processedAt":
-                        firestore.SERVER_TIMESTAMP,
+                    "status": "ignored",
+                    "reason": "Missing buyerId",
+                    "processedAt": firestore.SERVER_TIMESTAMP,
                 })
 
                 return {
                     "success": True,
                     "ignored": True,
                 }
+
+            if payment_type == "auction":
+
+                if not order_id:
+
+                    event_ref.update({
+                        "status": "ignored",
+                        "reason": "Missing orderId",
+                        "processedAt": firestore.SERVER_TIMESTAMP,
+                    })
+
+                    return {
+                        "success": True,
+                        "ignored": True,
+                    }
+
+            else:
+
+                if not listing_id:
+
+                    event_ref.update({
+                        "status": "ignored",
+                        "reason": "Missing listingId",
+                        "processedAt": firestore.SERVER_TIMESTAMP,
+                    })
+
+                    return {
+                        "success": True,
+                        "ignored": True,
+                    }
 
             # ======================================
             # SHARED INSTANT BUY FINALIZATION
