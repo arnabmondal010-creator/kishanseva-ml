@@ -1588,7 +1588,7 @@ def refund_failed_instant_buy(
 
         lock_doc = (
             refund_lock_ref.get(
-                transaction=transaction
+                refund_lock_ref
             )
         )
 
@@ -2191,13 +2191,13 @@ def finalize_instant_buy(
 
         current_lock_doc = (
             payment_lock_ref.get(
-                transaction=transaction
+                payment_lock_ref
             )
         )
 
         current_listing_doc = (
             listing_ref.get(
-                transaction=transaction
+                listing_ref
             )
         )
 
@@ -2803,7 +2803,7 @@ def finalize_auction_payment(
     )
     @firestore.transactional
     def apply_payment(transaction):
-        fresh_order = transaction.get(transaction=transaction)
+        fresh_order = next(transaction.get(order_ref))
 
         if not fresh_order.exists:
             raise Exception("Order disappeared")
@@ -2813,7 +2813,7 @@ def finalize_auction_payment(
         if fresh_order_data.get("paymentStatus") == "paid":
             return True
 
-        seller_doc = transaction.get(transaction=transaction)
+        seller_doc = (transaction.get(seller_ref))
 
         if not seller_doc.exists:
             raise Exception("Seller not found")
@@ -3261,7 +3261,7 @@ def claim_razorpay_webhook_event(
         transaction,
     ):
         event_doc = event_ref.get(
-            transaction=transaction
+            event_ref
         )
 
         # ======================================
