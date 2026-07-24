@@ -3260,8 +3260,8 @@ def claim_razorpay_webhook_event(
     def claim_transaction(
         transaction,
     ):
-        event_doc = transaction.get(
-            event_ref
+        event_doc = next(
+        transaction.get(event_ref)
         )
 
         # ======================================
