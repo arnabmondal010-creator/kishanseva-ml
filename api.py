@@ -1587,7 +1587,7 @@ def refund_failed_instant_buy(
     ):
 
         lock_doc = (
-            refund_lock_ref.get(
+            transaction.get(
                 refund_lock_ref
             )
         )
@@ -2190,13 +2190,13 @@ def finalize_instant_buy(
         # before transactional writes.
 
         current_lock_doc = (
-            payment_lock_ref.get(
+            transaction.get(
                 payment_lock_ref
             )
         )
 
         current_listing_doc = (
-            listing_ref.get(
+            transaction.get(
                 listing_ref
             )
         )
@@ -2813,7 +2813,7 @@ def finalize_auction_payment(
         if fresh_order_data.get("paymentStatus") == "paid":
             return True
 
-        seller_doc = (transaction.get(seller_ref))
+        seller_doc = next(transaction.get(seller_ref))
 
         if not seller_doc.exists:
             raise Exception("Seller not found")
@@ -3260,7 +3260,7 @@ def claim_razorpay_webhook_event(
     def claim_transaction(
         transaction,
     ):
-        event_doc = event_ref.get(
+        event_doc = transaction.get(
             event_ref
         )
 
