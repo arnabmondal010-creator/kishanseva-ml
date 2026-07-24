@@ -2803,7 +2803,7 @@ def finalize_auction_payment(
     )
     @firestore.transactional
     def apply_payment(transaction):
-        fresh_order = next(transaction.get(order_ref))
+        fresh_order = transaction.get(order_ref)
 
         if not fresh_order.exists:
             raise Exception("Order disappeared")
@@ -2813,14 +2813,17 @@ def finalize_auction_payment(
         if fresh_order_data.get("paymentStatus") == "paid":
             return True
 
-        seller_doc = next(transaction.get(seller_ref))
+        seller_doc = transaction.get(seller_ref)
 
         if not seller_doc.exists:
             raise Exception("Seller not found")
 
         seller = seller_doc.to_dict()
         seller_payout = float(
-            fresh_order_data["sellerPayout"]
+            fresh_order_data.get(
+                "sellerPayout",
+                fresh_order_data["orderAmount"],
+            )
         )
 
         current_wallet = float(
