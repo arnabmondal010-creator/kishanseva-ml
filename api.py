@@ -2729,6 +2729,17 @@ def finalize_auction_payment(
     payment = razorpay_client.payment.fetch(
         payment_id
     )
+    razorpay_order = razorpay_client.order.fetch(
+    razorpay_order_id
+    )
+
+    notes = razorpay_order.get("notes", {})
+
+    if notes.get("orderId") != order_id:
+        raise Exception("Order mismatch")
+
+    if notes.get("buyerId") != buyer_id:
+        raise Exception("Buyer mismatch")
 
     # Step 9
     if payment["order_id"] != razorpay_order_id:
@@ -2809,6 +2820,8 @@ def finalize_auction_payment(
 
                 "totalEarnings":
                     current_earnings + seller_payout,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+                "webhookConfirmed": True
             },
         )
         transaction.set(
@@ -2873,11 +2886,7 @@ async def verify_razorpay_payment(
                 detail="Missing Razorpay signature",
             )
 
-        if not request.listingId:
-            raise HTTPException(
-                status_code=400,
-                detail="Missing listing ID",
-            )
+        
 
         # ==========================================
         # 3. VERIFY RAZORPAY CHECKOUT SIGNATURE
@@ -3754,13 +3763,25 @@ async def razorpay_webhook(
             # it creates the order and locks listing.
             # ======================================
 
-            result = await asyncio.to_thread(
-                finalize_instant_buy_with_retry,
-                razorpay_order_id,
-                payment_id,
-                listing_id,
-                buyer_id,
-            )
+            if payment_type == "auction":
+
+                result = await asyncio.to_thread(
+                    finalize_auction_payment,
+                    razorpay_order_id,
+                    payment_id,
+                    order_id,
+                    buyer_id,
+                )
+
+            else:
+
+                result = await asyncio.to_thread(
+                    finalize_instant_buy_with_retry,
+                    razorpay_order_id,
+                    payment_id,
+                    listing_id,
+                    buyer_id,
+                )
 
             order_id = result.get(
                 "orderId"
