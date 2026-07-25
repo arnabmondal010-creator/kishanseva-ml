@@ -2699,6 +2699,8 @@ def finalize_auction_payment_with_retry(
 
             time.sleep(0.25 * attempt)
 
+import random
+
 def finalize_auction_payment(
     razorpay_order_id: str,
     payment_id: str,
@@ -2845,12 +2847,16 @@ def finalize_auction_payment(
             order_ref,
             {
                 "paymentStatus": "paid",
-                "orderStatus": "confirmed",
+                "orderStatus": "ready_for_pickup",
                 "paymentId": payment_id,
                 "razorpayOrderId": razorpay_order_id,
                 "paidAt": firestore.SERVER_TIMESTAMP,
                 "webhookConfirmed": True,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
+                "deliveryOtp": delivery_otp,
+                "deliveryOtpGeneratedAt": firestore.SERVER_TIMESTAMP,
+                "deliveryOtpVerified": False,
+                "deliveryOtpVerifiedAt": None,
             },
         )
 
@@ -2877,6 +2883,7 @@ def finalize_auction_payment(
                 "paymentId": payment_id,
             },
         )
+    delivery_otp = f"{random.randint(0, 999999):06d}"
 
     transaction = db.transaction()
 
