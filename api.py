@@ -3260,70 +3260,43 @@ def claim_razorpay_webhook_event(
     transaction = db.transaction()
 
     @firestore.transactional
-    def claim_transaction(
-        transaction,
-    ):
-        event_doc = next(
-        transaction.get(event_ref)
+    def claim_transaction(transaction):
+
+        docs = list(
+            transaction.get(
+                [event_ref]
+            )
         )
 
-        # ======================================
-        # NEW EVENT
-        # ======================================
+        if not docs:
+            raise Exception("Unable to read webhook event")
+
+        event_doc = docs[0]
 
         if not event_doc.exists:
 
             transaction.set(
                 event_ref,
                 {
-                    "eventId":
-                        event_id,
-
-                    "eventType":
-                        event_type,
-
-                    "paymentId":
-                        payment_id,
-
-                    "razorpayOrderId":
-                        razorpay_order_id,
-
-                    "status":
-                        "processing",
-
-                    "attemptCount":
-                        1,
-
-                    "createdAt":
-                        firestore.SERVER_TIMESTAMP,
-
-                    "processingStartedAt":
-                        firestore.SERVER_TIMESTAMP,
-
-                    "updatedAt":
-                        firestore.SERVER_TIMESTAMP,
+                    "eventId": event_id,
+                    "eventType": event_type,
+                    "paymentId": payment_id,
+                    "razorpayOrderId": razorpay_order_id,
+                    "status": "processing",
+                    "attemptCount": 1,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                    "processingStartedAt": firestore.SERVER_TIMESTAMP,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
                 },
             )
 
             return {
-                "claimed":
-                    True,
-
-                "status":
-                    "processing",
-
-                "attemptCount":
-                    1,
+                "claimed": True,
+                "status": "processing",
+                "attemptCount": 1,
             }
 
-        # ======================================
-        # EXISTING EVENT
-        # ======================================
-
-        data = (
-            event_doc.to_dict()
-            or {}
-        )
+        data = event_doc.to_dict() or {}
 
         status = data.get(
             "status"
