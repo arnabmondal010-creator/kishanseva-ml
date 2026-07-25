@@ -1586,11 +1586,10 @@ def refund_failed_instant_buy(
         transaction,
     ):
 
-        docs = list(
-                    transaction.get([refund_lock_ref])
-                )
+        lock_doc = transaction.get(refund_lock_ref)
 
-        lock_doc = docs[0]
+        if hasattr(lock_doc, "__next__"):
+            lock_doc = next(lock_doc)
 
         if lock_doc.exists:
 
@@ -2189,15 +2188,15 @@ def finalize_instant_buy(
         # All transactional reads happen
         # before transactional writes.
 
-        docs = list(
-                    transaction.get([
-                        payment_lock_ref,
-                        listing_ref,
-                    ])
-                )
+        current_lock_doc = transaction.get(payment_lock_ref)
 
-        current_lock_doc = docs[0]
-        current_listing_doc = docs[1]
+        if hasattr(current_lock_doc, "__next__"):
+            current_lock_doc = next(current_lock_doc)
+
+        current_listing_doc = transaction.get(listing_ref)
+
+        if hasattr(current_listing_doc, "__next__"):
+            current_listing_doc = next(current_listing_doc)
 
         
 
@@ -2804,18 +2803,15 @@ def finalize_auction_payment(
     @firestore.transactional
     def apply_payment(transaction):
 
-        docs = list(
-            transaction.get([
-                order_ref,
-                seller_ref,
-            ])
-        )
+        fresh_order = transaction.get(order_ref)
 
-        if len(docs) != 2:
-            raise Exception("Unable to read Firestore documents")
+        if hasattr(fresh_order, "__next__"):
+            fresh_order = next(fresh_order)
 
-        fresh_order = docs[0]
-        seller_doc = docs[1]
+        seller_doc = transaction.get(seller_ref)
+
+        if hasattr(seller_doc, "__next__"):
+            seller_doc = next(seller_doc)
 
         if not fresh_order.exists:
             raise Exception("Order disappeared")
@@ -3270,14 +3266,10 @@ def claim_razorpay_webhook_event(
     @firestore.transactional
     def claim_transaction(transaction):
 
-        docs = list(
-            transaction.get([event_ref])
-        )
+        event_doc = transaction.get(event_ref)
 
-        if len(docs) != 1:
-            raise Exception("Unable to read webhook event")
-
-        event_doc = docs[0]
+        if hasattr(event_doc, "__next__"):
+            event_doc = next(event_doc)
 
         if not event_doc.exists:
 
