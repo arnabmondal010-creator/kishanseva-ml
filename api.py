@@ -3270,9 +3270,14 @@ def claim_razorpay_webhook_event(
     @firestore.transactional
     def claim_transaction(transaction):
 
-        event_doc = next(
-            transaction.get(event_ref)
+        docs = list(
+            transaction.get([event_ref])
         )
+
+        if len(docs) != 1:
+            raise Exception("Unable to read webhook event")
+
+        event_doc = docs[0]
 
         if not event_doc.exists:
 
