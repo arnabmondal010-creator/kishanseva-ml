@@ -2808,14 +2808,59 @@ def finalize_auction_payment(
     )
     
     pickup_otp = f"{random.randint(0, 999999):06d}"
-
     transaction = db.transaction()
-    return {
-        "alreadyProcessed": False,
-        "orderId": order_id,
-        "paymentStatus": "paid",
-        "orderStatus": "confirmed",
-    }
+
+    @firestore.transactional
+    def update_paid_order(transaction):
+
+        fresh_order = transaction.get(order_ref)
+
+        if hasattr(fresh_order, "__next__"):
+            fresh_order = next(fresh_order)
+
+        if not fresh_order.exists:
+            raise Exception("Order disappeared")
+
+        fresh = fresh_order.to_dict()
+
+        if fresh.get("paymentStatus") == "paid":
+            return
+
+        transaction.update(
+            order_ref,
+            {
+                "paymentStatus": "paid",
+                "orderStatus": "confirmed",
+
+                "paymentId": payment_id,
+                "razorpayOrderId": razorpay_order_id,
+
+                "pickupOtp": pickup_otp,
+
+                "paidAt": firestore.SERVER_TIMESTAMP,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+
+                "webhookConfirmed": True,
+            },
+        )
+        update_paid_order(transaction)
+        updated_order = order_ref.get()
+
+        print("========== PAYMENT UPDATED ==========")
+
+        if updated_order.exists:
+            print(updated_order.to_dict())
+        else:
+            print("ORDER NOT FOUND")
+
+        return {
+            "alreadyProcessed": False,
+            "orderId": order_id,
+            "paymentStatus": "paid",
+            "orderStatus": "confirmed",
+        }
+
+
 
 @app.post("/payments/razorpay/verify")
 async def verify_razorpay_payment(
