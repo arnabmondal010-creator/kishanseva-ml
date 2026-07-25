@@ -2806,12 +2806,23 @@ def finalize_auction_payment(
         db.collection("wallet_transactions")
         .document()
     )
-    
+
+    payment_lock_ref = (
+        db.collection("commerce_payment_locks")
+        .document(razorpay_order_id)
+    )
+
     pickup_otp = f"{random.randint(0, 999999):06d}"
+
     transaction = db.transaction()
 
     @firestore.transactional
     def update_paid_order(transaction):
+
+        lock_doc = transaction.get(payment_lock_ref)
+
+        if hasattr(lock_doc, "__next__"):
+            lock_doc = next(lock_doc)
 
         fresh_order = transaction.get(order_ref)
 
@@ -2822,36 +2833,84 @@ def finalize_auction_payment(
             raise Exception("Order disappeared")
 
         fresh = fresh_order.to_dict()
+        existing_payment_id = fresh.get("paymentId")
 
+        if (
+            existing_payment_id
+            and existing_payment_id != payment_id
+        ):
+            raise Exception(
+                "Payment ID mismatch"
+            )
+
+        existing_razorpay_order = fresh.get(
+            "razorpayOrderId"
+        )
+
+        if (
+            existing_razorpay_order
+            and existing_razorpay_order != razorpay_order_id
+        ):
+            raise Exception(
+                "Razorpay Order ID mismatch"
+            )
+
+# Check payment lock first
+        if lock_doc.exists:
+
+            lock = lock_doc.to_dict() or {}
+
+            if lock.get("status") == "finalized":
+
+                return {
+                    "alreadyProcessed": True,
+                    "orderId": order_id,
+                    "paymentStatus": "paid",
+                    "orderStatus": fresh.get(
+                    "orderStatus",
+                    "confirmed",
+                    ),
+                }
+
+# Fallback check
         if fresh.get("paymentStatus") == "paid":
-            return
+
+            return {
+                "alreadyProcessed": True,
+                "orderId": order_id,
+                "paymentStatus": "paid",
+                "orderStatus": fresh.get(
+                    "orderStatus",
+                    "confirmed",
+                ),
+            }
 
         transaction.update(
             order_ref,
             {
                 "paymentStatus": "paid",
                 "orderStatus": "confirmed",
-
                 "paymentId": payment_id,
                 "razorpayOrderId": razorpay_order_id,
-
                 "pickupOtp": pickup_otp,
-
                 "paidAt": firestore.SERVER_TIMESTAMP,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
-
                 "webhookConfirmed": True,
             },
         )
-        update_paid_order(transaction)
-        updated_order = order_ref.get()
-
-        print("========== PAYMENT UPDATED ==========")
-
-        if updated_order.exists:
-            print(updated_order.to_dict())
-        else:
-            print("ORDER NOT FOUND")
+        transaction.set(
+            payment_lock_ref,
+            {
+                "paymentId": payment_id,
+                "buyerId": buyer_id,
+                "orderId": order_id,
+                "razorpayOrderId": razorpay_order_id,
+                "status": "finalized",
+                "createdAt": firestore.SERVER_TIMESTAMP,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
 
         return {
             "alreadyProcessed": False,
@@ -2859,8 +2918,14 @@ def finalize_auction_payment(
             "paymentStatus": "paid",
             "orderStatus": "confirmed",
         }
+    result = update_paid_order(transaction)
 
+    print(result)
 
+    updated_order = order_ref.get()
+
+    print(updated_order.to_dict())
+    return result
 
 @app.post("/payments/razorpay/verify")
 async def verify_razorpay_payment(
@@ -4311,147 +4376,6 @@ async def verify_pickup_otp(
     transaction = db.transaction()
     @firestore.transactional
     def complete_order(transaction):
-
-        fresh_order = transaction.get(order_ref)
-
-        if hasattr(fresh_order, "__next__"):
-            fresh_order = next(fresh_order)
-
-        if not fresh_order.exists:
-            raise Exception("Order not found")
-
-        fresh = fresh_order.to_dict()
-        seller_doc = transaction.get(seller_ref)
-
-        if hasattr(seller_doc, "__next__"):
-            seller_doc = next(seller_doc)
-
-        if not seller_doc.exists:
-            raise Exception("Seller not found")
-
-        seller = seller_doc.to_dict()
-        listing_doc = transaction.get(listing_ref)
-
-        if hasattr(listing_doc, "__next__"):
-            listing_doc = next(listing_doc)
-
-        if not listing_doc.exists:
-            raise Exception("Listing not found")
-        if fresh.get("otpVerified"):
-            return
-        
-        seller_payout = float(
-            fresh.get(
-                "sellerPayout",
-                fresh["orderAmount"],
-            )
-        )
-
-        current_wallet = float(
-            seller.get("walletBalance", 0)
-        )
-
-        current_earnings = float(
-            seller.get("totalEarnings", 0)
-        )
-        transaction.update(
-            order_ref,
-            {
-                "otpVerified": True,
-                "pickupOtpVerified": True,
-                "pickupOtpVerifiedAt":
-                    firestore.SERVER_TIMESTAMP,
-                "orderStatus": "completed",
-                "completedAt":
-                    firestore.SERVER_TIMESTAMP,
-                "updatedAt":
-                    firestore.SERVER_TIMESTAMP,
-            },
-        )
-        transaction.update(
-            listing_ref,
-            {
-                "status": "completed",
-                "updatedAt":
-                    firestore.SERVER_TIMESTAMP,
-            },
-        )
-        transaction.update(
-            seller_ref,
-            {
-                "walletBalance":
-                    current_wallet + seller_payout,
-
-                "totalEarnings":
-                    current_earnings + seller_payout,
-
-                "updatedAt":
-                    firestore.SERVER_TIMESTAMP,
-            },
-        )
-        transaction.set(
-            wallet_tx_ref,
-            {
-                "transactionId":
-                    wallet_tx_ref.id,
-
-                "userId":
-                    order["sellerId"],
-
-                "orderId":
-                    request.orderId,
-
-                "buyerId":
-                    order["buyerId"],
-
-                "amount":
-                    seller_payout,
-
-                "type":
-                    "order_credit",
-
-                "status":
-                    "completed",
-
-                "paymentId":
-                    order.get("paymentId"),
-
-                "createdAt":
-                    firestore.SERVER_TIMESTAMP,
-            },
-        )
-        complete_order(transaction)
-        return {
-            "success": True,
-            "orderStatus": "completed",
-        }
-
-    seller_id = order["sellerId"]
-
-    seller_ref = (
-        db.collection("commerce_users")
-        .document(seller_id)
-    )
-
-    listing_ref = (
-        db.collection("commerce_listings")
-        .document(order["listingId"])
-    )
-
-    wallet_tx_ref = (
-        db.collection("wallet_transactions")
-        .document()
-    )
-
-    seller_payout = float(
-        order.get(
-            "sellerPayout",
-            order["orderAmount"],
-        )
-    )
-    transaction = db.transaction()
-    @firestore.transactional
-    def complete_order(transaction):
         fresh_order = transaction.get(order_ref)
 
         if hasattr(fresh_order, "__next__"):
@@ -4536,12 +4460,15 @@ async def verify_pickup_otp(
                 "paymentId": order["paymentId"],
             },
         )
-        complete_order(transaction)
+       
         return {
             "success": True,
             "orderId": request.orderId,
             "orderStatus": "completed",
         }
+    result = complete_order(transaction)
+
+    return result
 # ================= NOTIFY ALL =================
 
 @app.post("/notify-all")
