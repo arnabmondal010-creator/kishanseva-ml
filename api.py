@@ -1586,11 +1586,11 @@ def refund_failed_instant_buy(
         transaction,
     ):
 
-        lock_doc = (
-            transaction.get(
-                refund_lock_ref
-            )
-        )
+        docs = list(
+                    transaction.get([refund_lock_ref])
+                )
+
+        lock_doc = docs[0]
 
         if lock_doc.exists:
 
@@ -2189,17 +2189,17 @@ def finalize_instant_buy(
         # All transactional reads happen
         # before transactional writes.
 
-        current_lock_doc = (
-            transaction.get(
-                payment_lock_ref
-            )
-        )
+        docs = list(
+                    transaction.get([
+                        payment_lock_ref,
+                        listing_ref,
+                    ])
+                )
 
-        current_listing_doc = (
-            transaction.get(
-                listing_ref
-            )
-        )
+        current_lock_doc = docs[0]
+        current_listing_doc = docs[1]
+
+        
 
         # ======================================
         # PAYMENT LOCK ALREADY EXISTS
@@ -2803,22 +2803,33 @@ def finalize_auction_payment(
     )
     @firestore.transactional
     def apply_payment(transaction):
-        fresh_order = transaction.get(order_ref)
+
+        docs = list(
+            transaction.get([
+                order_ref,
+                seller_ref,
+            ])
+        )
+
+        if len(docs) != 2:
+            raise Exception("Unable to read Firestore documents")
+
+        fresh_order = docs[0]
+        seller_doc = docs[1]
 
         if not fresh_order.exists:
             raise Exception("Order disappeared")
+
+        if not seller_doc.exists:
+            raise Exception("Seller not found")
 
         fresh_order_data = fresh_order.to_dict()
 
         if fresh_order_data.get("paymentStatus") == "paid":
             return True
 
-        seller_doc = transaction.get(seller_ref)
-
-        if not seller_doc.exists:
-            raise Exception("Seller not found")
-
         seller = seller_doc.to_dict()
+
         seller_payout = float(
             fresh_order_data.get(
                 "sellerPayout",
@@ -2829,6 +2840,11 @@ def finalize_auction_payment(
         current_wallet = float(
             seller.get("walletBalance", 0)
         )
+
+        current_earnings = float(
+            seller.get("totalEarnings", 0)
+        )
+
         transaction.update(
             order_ref,
             {
@@ -2842,35 +2858,26 @@ def finalize_auction_payment(
             },
         )
 
-        current_earnings = float(
-    seller.get("totalEarnings", 0)
-    )
-
         transaction.update(
             seller_ref,
             {
-                "walletBalance":
-                    current_wallet + seller_payout,
-
-                "totalEarnings":
-                    current_earnings + seller_payout,
+                "walletBalance": current_wallet + seller_payout,
+                "totalEarnings": current_earnings + seller_payout,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
-                
             },
         )
+
         transaction.set(
             wallet_tx_ref,
             {
-                "transactionId":
-                    wallet_tx_ref.id,
+                "transactionId": wallet_tx_ref.id,
                 "userId": seller_id,
                 "orderId": order_id,
                 "buyerId": buyer_id,
                 "amount": seller_payout,
                 "type": "order_credit",
                 "status": "completed",
-                "createdAt":
-                    firestore.SERVER_TIMESTAMP,
+                "createdAt": firestore.SERVER_TIMESTAMP,
                 "paymentId": payment_id,
             },
         )
@@ -2878,6 +2885,7 @@ def finalize_auction_payment(
     transaction = db.transaction()
 
     apply_payment(transaction)
+
     return {
         "alreadyProcessed": False,
         "orderId": order_id,

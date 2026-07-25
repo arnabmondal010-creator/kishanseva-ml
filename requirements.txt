@@ -13,6 +13,8 @@ earthengine-api
 sqlalchemy
 psycopg2-binary
 firebase-admin==6.5.0
+google-cloud-firestore==2.25.0
+google-api-core==2.25.1
 scikit-learn==1.7.2
 deep-translator
 feedparser
