@@ -4406,6 +4406,17 @@ async def verify_pickup_otp(
             return
         
         seller = seller_doc.to_dict()
+        seller_id = fresh["sellerId"]
+
+        seller_payout = float(
+            fresh.get(
+                "sellerPayout",
+                fresh.get(
+                    "acceptedAmount",
+                    fresh["orderAmount"],
+                ),
+            )
+        )
 
         wallet_balance = float(
             seller.get("walletBalance", 0)
@@ -4452,12 +4463,12 @@ async def verify_pickup_otp(
                 "transactionId": wallet_tx_ref.id,
                 "userId": seller_id,
                 "orderId": request.orderId,
-                "buyerId": order["buyerId"],
+                "buyerId": fresh["buyerId"],
                 "amount": seller_payout,
                 "type": "order_credit",
                 "status": "completed",
                 "createdAt": firestore.SERVER_TIMESTAMP,
-                "paymentId": order["paymentId"],
+                "paymentId": fresh["paymentId"],
             },
         )
        
