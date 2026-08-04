@@ -1079,12 +1079,14 @@ from typing import Optional
 class CreateRazorpayOrderRequest(BaseModel):
     listingId: Optional[str] = None
     orderId: Optional[str] = None
+    checkoutId: Optional[str] = None     # Cart Checkout
 class VerifyRazorpayPaymentRequest(BaseModel):
     razorpay_payment_id: str
     razorpay_order_id: str
     razorpay_signature: str
 
     listingId: str | None = None
+    checkoutId: Optional[str] = None
     orderId: str | None = None
 
 class VerifyPickupOtpRequest(BaseModel):
@@ -1129,6 +1131,63 @@ async def create_razorpay_order(
     try:
         # Firebase UID from verified token
         buyer_id = user["uid"]
+
+# -----------------------------
+# CART CHECKOUT
+# -----------------------------
+        if request.checkoutId:
+
+            checkout_ref = (
+                db.collection("commerce_checkouts")
+                .document(request.checkoutId)
+            )
+
+            checkout_doc = checkout_ref.get()
+
+            if not checkout_doc.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Checkout not found",
+                )
+
+            checkout = checkout_doc.to_dict()
+
+            if checkout["buyerId"] != buyer_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized",
+                )
+
+            if checkout.get("paymentStatus") == "paid":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Checkout already paid",
+                )
+
+            amount = float(checkout["grandTotal"])
+            amount_paise = int(round(amount * 100))
+
+            razorpay_order = razorpay_client.order.create(
+                data={
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "receipt": f"cart_{request.checkoutId}",
+                    "notes": {
+                        "checkoutId": request.checkoutId,
+                        "buyerId": buyer_id,
+                        "type": "cart",
+                    },
+                }
+            )
+
+            return {
+                "success": True,
+                "keyId": RAZORPAY_KEY_ID,
+                "amount": amount_paise,
+                "currency": "INR",
+                "razorpayOrderId": razorpay_order["id"],
+                "checkoutId": request.checkoutId,
+            }
 
 # -----------------------------
 # AUCTION PAYMENT
@@ -2703,6 +2762,277 @@ def finalize_auction_payment_with_retry(
 
             time.sleep(0.25 * attempt)
 
+def finalize_cart(
+    razorpay_order_id: str,
+    payment_id: str,
+    checkout_id: str,
+    buyer_id: str,
+):
+
+    db = firestore.client()
+
+    checkout_ref = (
+        db.collection("commerce_checkouts")
+        .document(checkout_id)
+    )
+
+    checkout_doc = checkout_ref.get()
+
+    if not checkout_doc.exists:
+        raise Exception("Checkout not found")
+
+    checkout = checkout_doc.to_dict()
+
+    if checkout["buyerId"] != buyer_id:
+        raise Exception("Unauthorized checkout")
+
+    if checkout.get("paymentStatus") == "paid":
+        return {
+            "alreadyProcessed": True,
+            "orderId": checkout.get("orderId"),
+            "orderStatus": "confirmed",
+        }
+
+    cart_docs = list(
+        db.collection("commerce_cart")
+        .where("userId", "==", buyer_id)
+        .stream()
+    )
+
+    if not cart_docs:
+        raise Exception("Cart is empty")
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def complete_checkout(transaction):
+        subtotal = 0.0
+
+        seller_totals = {}
+
+        order_items = []
+        order_ref = (
+            db.collection("commerce_orders")
+            .document()
+        )
+
+        order_id = order_ref.id
+
+        for cart_doc in cart_docs:
+
+            item = cart_doc.to_dict()
+
+            listing_ref = (
+                db.collection("commerce_listings")
+                .document(item["listingId"])
+            )
+
+            listing_doc = transaction.get(listing_ref)
+
+            if not listing_doc.exists:
+                raise Exception("Listing not found")
+
+            listing = listing_doc.to_dict()
+            stock = float(
+                listing.get("stock", 0)
+            )
+
+            quantity = float(
+                item["quantity"]
+            )
+
+            if quantity > stock:
+
+                raise Exception(
+                    f"{listing['cropName']} is out of stock"
+                )
+            transaction.update(
+
+                listing_ref,
+
+                {
+
+                    "stock": firestore.Increment(
+                        -quantity,
+                    ),
+
+                },
+
+            )
+        
+            line_total = quantity * float(
+                listing["pricePerUnit"]
+            )
+
+            subtotal += line_total
+
+            seller_id = listing["sellerId"]
+
+            seller_totals[seller_id] = (
+
+                seller_totals.get(
+                    seller_id,
+                    0,
+                )
+
+                + line_total
+
+            )
+            order_item_ref = (
+                db.collection("commerce_order_items")
+                .document()
+            )
+
+            transaction.set(
+
+                order_item_ref,
+
+                {
+
+                    "orderItemId": order_item_ref.id,
+
+                    "orderId": order_id,
+
+                    "checkoutId": checkout_id,
+
+                    "buyerId": buyer_id,
+
+                    "sellerId": seller_id,
+
+                    "listingId": item["listingId"],
+
+                    "productName": listing["cropName"],
+
+                    "productImage": listing.get("cropImage"),
+
+                    "quantity": quantity,
+
+                    "unit": listing["unit"],
+
+                    "pricePerUnit": listing["pricePerUnit"],
+
+                    "subtotal": line_total,
+
+                    "paymentStatus": "paid",
+
+                    "orderStatus": "confirmed",
+
+                    "paymentId": payment_id,
+
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+
+                },
+
+            )
+        transaction.set(
+
+            order_ref,
+
+            {
+
+                "orderId": order_id,
+
+                "checkoutId": checkout_id,
+
+                "buyerId": buyer_id,
+
+                "paymentStatus": "paid",
+
+                "orderStatus": "confirmed",
+
+                "subtotal": subtotal,
+
+                "deliveryCharge": checkout["deliveryCharge"],
+
+                "grandTotal": checkout["grandTotal"],
+
+                "paymentId": payment_id,
+
+                "razorpayOrderId": razorpay_order_id,
+
+                "createdAt": firestore.SERVER_TIMESTAMP,
+
+                "settlementStatus": "pending_delivery",
+
+                "settlementReleased": False,
+
+            },
+
+        )
+        transaction.update(
+
+            checkout_ref,
+
+            {
+
+                "paymentStatus": "paid",
+
+                "orderStatus": "confirmed",
+
+                "paymentId": payment_id,
+
+                "razorpayOrderId": razorpay_order_id,
+
+                "orderId": order_id,
+
+                "paidAt": firestore.SERVER_TIMESTAMP,
+
+            },
+
+        )
+        transaction.update(
+
+            checkout_ref,
+
+            {
+
+                "settlementStatus": "pending_delivery",
+
+                "settlementReleased": False,
+
+            },
+
+        )
+        for cart_doc in cart_docs:
+
+            transaction.delete(
+                cart_doc.reference,
+            )
+
+        
+        result = complete_checkout(transaction)
+
+        return result
+
+def finalize_cart_with_retry(
+    razorpay_order_id: str,
+    payment_id: str,
+    checkout_id: str,
+    buyer_id: str,
+    max_attempts: int = 3,
+):
+
+    import time
+    from google.api_core.exceptions import Aborted
+
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+
+            return finalize_cart(
+                razorpay_order_id=razorpay_order_id,
+                payment_id=payment_id,
+                checkout_id=checkout_id,
+                buyer_id=buyer_id,
+            )
+
+        except Aborted:
+
+            if attempt >= max_attempts:
+                raise
+
+            time.sleep(0.25 * attempt)
+
 import random
 
 def finalize_auction_payment(
@@ -3013,13 +3343,27 @@ async def verify_razorpay_payment(
         # Both Flutter /verify and Razorpay webhook
         # now use the same finalization function.
         # ==========================================
-        if not request.orderId and not request.listingId:
+        if (
+            request.checkoutId is None
+            and request.orderId is None
+            and request.listingId is None
+        ):
             raise HTTPException(
-            status_code=400,
-            detail="listingId or orderId required",
-        )
+                status_code=400,
+                detail="checkoutId, orderId or listingId required",
+            )
 
-        if request.orderId:
+        if request.checkoutId:
+
+            result = await asyncio.to_thread(
+                finalize_cart_with_retry,
+                request.razorpay_order_id,
+                request.razorpay_payment_id,
+                request.checkoutId,
+                buyer_id,
+            )
+
+        elif request.orderId:
 
             result = await asyncio.to_thread(
                 finalize_auction_payment_with_retry,
@@ -4358,20 +4702,7 @@ async def verify_pickup_otp(
             status_code=400,
             detail="Invalid Pickup OTP",
         )
-    seller_ref = (
-        db.collection("commerce_users")
-        .document(order["sellerId"])
-    )
-
-    listing_ref = (
-        db.collection("commerce_listings")
-        .document(order["listingId"])
-    )
-
-    wallet_tx_ref = (
-        db.collection("wallet_transactions")
-        .document()
-    )
+    
 
     transaction = db.transaction()
     @firestore.transactional
@@ -4381,50 +4712,46 @@ async def verify_pickup_otp(
         if hasattr(fresh_order, "__next__"):
             fresh_order = next(fresh_order)
 
-        seller_doc = transaction.get(seller_ref)
+        
 
-        if hasattr(seller_doc, "__next__"):
-            seller_doc = next(seller_doc)
-
-        listing_doc = transaction.get(listing_ref)
-
-        if hasattr(listing_doc, "__next__"):
-            listing_doc = next(listing_doc)
+       
 
         if not fresh_order.exists:
             raise Exception("Order not found")
 
-        if not seller_doc.exists:
-            raise Exception("Seller not found")
-
-        if not listing_doc.exists:
-            raise Exception("Listing not found")
+       
         
         fresh = fresh_order.to_dict()
+        order_items = list(
 
-        if fresh.get("otpVerified"):
-            return
+            db.collection("commerce_order_items")
+
+            .where("orderId", "==", request.orderId)
+
+            .stream()
+
+        )
+
+        if fresh.get("settlementReleased"):
+
+            return {
+
+                "success": True,
+
+                "alreadyProcessed": True,
+
+                "orderId": request.orderId,
+
+                "orderStatus": "completed",
+
+            }
         
-        seller = seller_doc.to_dict()
-        seller_id = fresh["sellerId"]
+        
+       
 
-        seller_payout = float(
-            fresh.get(
-                "sellerPayout",
-                fresh.get(
-                    "acceptedAmount",
-                    fresh["orderAmount"],
-                ),
-            )
-        )
+        
 
-        wallet_balance = float(
-            seller.get("walletBalance", 0)
-        )
-
-        total_earnings = float(
-            seller.get("totalEarnings", 0)
-        )
+       
 
         transaction.update(
             order_ref,
@@ -4435,42 +4762,123 @@ async def verify_pickup_otp(
                 "orderStatus": "completed",
                 "completedAt": firestore.SERVER_TIMESTAMP,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
+                "settlementReleased": True,
+                "settlementStatus": "released",
+                "settlementReleasedAt": firestore.SERVER_TIMESTAMP,
             },
         )
-        transaction.update(
-            listing_ref,
-            {
-                "status": "completed",
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-            },
-        )
-        transaction.update(
-            seller_ref,
-            {
-                "walletBalance":
-                    wallet_balance + seller_payout,
+        for item_doc in order_items:
 
-                "totalEarnings":
-                    total_earnings + seller_payout,
+            item = item_doc.to_dict()
 
-                "updatedAt":
-                    firestore.SERVER_TIMESTAMP,
-            },
-        )
-        transaction.set(
-            wallet_tx_ref,
-            {
-                "transactionId": wallet_tx_ref.id,
-                "userId": seller_id,
-                "orderId": request.orderId,
-                "buyerId": fresh["buyerId"],
-                "amount": seller_payout,
-                "type": "order_credit",
-                "status": "completed",
-                "createdAt": firestore.SERVER_TIMESTAMP,
-                "paymentId": fresh["paymentId"],
-            },
-        )
+            seller_ref = (
+                db.collection("commerce_users")
+                .document(item["sellerId"])
+            )
+
+            seller_doc = transaction.get(seller_ref)
+
+            if hasattr(seller_doc, "__next__"):
+                seller_doc = next(seller_doc)
+
+            if not seller_doc.exists:
+                raise Exception("Seller not found")
+            seller = seller_doc.to_dict()
+
+            seller_amount = float(
+                item["subtotal"]
+            )
+
+            transaction.update(
+
+                seller_ref,
+
+                {
+
+                    "walletBalance": firestore.Increment(
+                        seller_amount,
+                    ),
+
+                    "totalRevenue": firestore.Increment(
+                        seller_amount,
+                    ),
+
+                    "totalSales": firestore.Increment(
+                        1,
+                    ),
+
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+
+                },
+
+            )
+            wallet_tx_ref = (
+                db.collection("wallet_transactions")
+                .document()
+            )
+
+            transaction.set(
+
+                wallet_tx_ref,
+
+                {
+
+                    "transactionId": wallet_tx_ref.id,
+
+                    "userId": item["sellerId"],
+
+                    "orderId": request.orderId,
+
+                    "buyerId": fresh["buyerId"],
+
+                    "cropName": item["productName"],
+
+                    "amount": seller_amount,
+
+                    "commission": float(
+                        item.get("platformCommission", 0),
+                    ),
+
+                    "type": "order_credit",
+
+                    "status": "completed",
+
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+
+                    "paymentId": fresh["paymentId"],
+
+                },
+
+            )
+            transaction.update(
+
+                item_doc.reference,
+
+                {
+
+                    "orderStatus": "completed",
+
+                    "paymentStatus": "paid",
+
+                    "settlementStatus": "released",
+
+                    "settlementReleased": True,
+
+                    "completedAt": firestore.SERVER_TIMESTAMP,
+
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+
+                },
+
+            )
+
+    
+        
+
+        
+
+        
+        
        
         return {
             "success": True,
