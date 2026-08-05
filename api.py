@@ -1193,9 +1193,17 @@ async def create_checkout(
 
         listing = listing_doc.to_dict()
 
-        available_qty = float(
-            listing.get("quantity", 0)
-        )
+        if product_type == "farm":
+
+            available_qty = float(
+                listing.get("quantity", 0)
+            )
+
+        else:
+
+            available_qty = float(
+                listing.get("stock", 0)
+            )
 
         if item.quantity <= 0:
 
