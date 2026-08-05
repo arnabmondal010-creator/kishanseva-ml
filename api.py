@@ -3565,6 +3565,11 @@ async def verify_razorpay_payment(
                 status_code=400,
                 detail="checkoutId, orderId or listingId required",
             )
+        print("========== VERIFY REQUEST ==========")
+        print("checkoutId:", request.checkoutId)
+        print("paymentId:", request.razorpay_payment_id)
+        print("orderId:", request.razorpay_order_id)
+        print("====================================")
 
         if request.checkoutId:
 
@@ -3574,6 +3579,7 @@ async def verify_razorpay_payment(
                 request.razorpay_payment_id,
                 request.checkoutId,
                 buyer_id,
+                print("ENTERED CART CHECKOUT FLOW")
             )
 
         elif request.orderId:
