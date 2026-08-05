@@ -2983,7 +2983,6 @@ def finalize_cart(
     buyer_id: str,
 ):
 
-    db = firestore.client()
 
     checkout_ref = (
         db.collection("commerce_checkouts")
