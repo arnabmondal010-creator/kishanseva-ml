@@ -2995,6 +2995,11 @@ def finalize_cart(
         raise Exception("Checkout not found")
 
     checkout = checkout_doc.to_dict()
+    import json
+
+    print("========== CHECKOUT ITEMS ==========")
+    print(json.dumps(checkout["items"], indent=2, default=str))
+    print("====================================")
 
     if checkout["buyerId"] != buyer_id:
         raise Exception("Unauthorized checkout")
