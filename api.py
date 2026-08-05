@@ -1204,11 +1204,17 @@ async def create_checkout(
                 detail="Invalid quantity",
             )
 
+        product_name = (
+            listing.get("cropName")
+            or listing.get("productName")
+            or "Product"
+        )
+
         if item.quantity > available_qty:
 
             raise HTTPException(
                 status_code=400,
-                detail=f"{listing['cropName']} is out of stock",
+                detail=f"{product_name} is out of stock",
             )
 
         price = float(
@@ -1241,7 +1247,7 @@ async def create_checkout(
             "sellerId": seller_id,
             "productType": product_type,
 
-            "cropName": listing["cropName"],
+            "productName": product_name,
 
             "quantity": item.quantity,
 
