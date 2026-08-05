@@ -3212,6 +3212,11 @@ def finalize_cart(
             transaction.delete(
                 cart_doc.reference,
             )
+        return {
+            "alreadyProcessed": False,
+            "orderId": order_id,
+            "orderStatus": "confirmed",
+        }
     result = complete_checkout(transaction)
 
     return result
@@ -3574,6 +3579,7 @@ async def verify_razorpay_payment(
         print("====================================")
 
         if request.checkoutId:
+            print("ENTERED CART CHECKOUT FLOW")
 
             result = await asyncio.to_thread(
                 finalize_cart_with_retry,
@@ -3581,7 +3587,7 @@ async def verify_razorpay_payment(
                 request.razorpay_payment_id,
                 request.checkoutId,
                 buyer_id,
-                print("ENTERED CART CHECKOUT FLOW")
+                
             )
 
         elif request.orderId:
