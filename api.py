@@ -3039,13 +3039,12 @@ def finalize_cart(
                     db.collection("commerce_shop_products")
                     .document(item["listingId"])
                 )
-            print(type(listing_ref))
-            print(listing_ref)
+       
 
-            listing_doc = transaction.get(listing_ref)
+            listing_doc = listing_ref.get(
+                transaction=transaction,
+            )
 
-            print(type(listing_doc))
-            print(listing_doc)
 
             if not listing_doc.exists:
 
