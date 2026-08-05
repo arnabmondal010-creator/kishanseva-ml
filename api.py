@@ -1254,17 +1254,27 @@ async def create_checkout(
             "listingId": item.listingId,
 
             "sellerId": seller_id,
+
             "productType": product_type,
 
             "productName": product_name,
+
+            "productImage": (
+                listing.get("cropImage")
+                or listing.get("image")
+            ),
 
             "quantity": item.quantity,
 
             "pricePerUnit": price,
 
-            "totalPrice": item_total,
+            "unit": listing.get("unit"),
 
             "weightPerUnit": weight_per_unit,
+
+            "weightUnit": listing.get("weightUnit"),
+
+            "totalPrice": item_total,
 
         })
         address_ref = (
