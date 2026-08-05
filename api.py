@@ -23,6 +23,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import razorpay
+import traceback
 
 from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
@@ -3211,12 +3212,13 @@ def finalize_cart(
             transaction.delete(
                 cart_doc.reference,
             )
+    result = complete_checkout(transaction)
+
+    return result
+
 
         
-        result = complete_checkout(transaction)
-
-        return result
-
+        
 def finalize_cart_with_retry(
     razorpay_order_id: str,
     payment_id: str,
@@ -3631,9 +3633,17 @@ async def verify_razorpay_payment(
     except HTTPException:
         raise
 
+    
+
     except Exception as e:
 
         error_message = str(e)
+
+        print("========== VERIFY ERROR ==========")
+
+        traceback.print_exc()
+
+        print("==================================")
 
         print(
             "RAZORPAY VERIFY ERROR:",
