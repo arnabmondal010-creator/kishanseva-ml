@@ -1,6 +1,7 @@
 # api.py
 # -*- coding: utf-8 -*-
 
+from builtins import round
 import os
 import json
 import ee
@@ -1092,6 +1093,20 @@ class VerifyRazorpayPaymentRequest(BaseModel):
 class VerifyPickupOtpRequest(BaseModel):
     orderId: str
     otp: str
+from typing import List
+
+class CheckoutItem(BaseModel):
+    listingId: str
+    quantity: float
+
+
+class CreateCheckoutRequest(BaseModel):
+    addressId: str
+    deliveryMethod: str
+    subtotal: float
+    deliveryCharge: float
+    grandTotal: float
+    items: List[CheckoutItem]
 
 
 def verify_firebase_token(
@@ -1121,6 +1136,176 @@ def verify_firebase_token(
             status_code=401,
             detail="Invalid or expired authentication token",
         )
+@app.post("/checkout/create")
+async def create_checkout(
+    request: CreateCheckoutRequest,
+    user=Depends(verify_firebase_token),
+):
+
+    buyer_id = user["uid"]
+
+    if not request.items:
+        raise HTTPException(
+            status_code=400,
+            detail="Cart is empty",
+        )
+
+    checkout_ref = (
+        db.collection("commerce_checkouts")
+        .document()
+    )
+
+    checkout_id = checkout_ref.id
+
+    subtotal = 0.0
+    total_weight = 0.0
+    seller_totals = {}
+    checkout_items = []
+
+    for item in request.items:
+
+        listing_ref = (
+            db.collection("commerce_listings")
+            .document(item.listingId)
+        )
+
+        listing_doc = listing_ref.get()
+
+        if not listing_doc.exists:
+
+            raise HTTPException(
+                status_code=404,
+                detail=f"Listing {item.listingId} not found",
+            )
+
+        listing = listing_doc.to_dict()
+
+        available_qty = float(
+            listing.get("quantity", 0)
+        )
+
+        if item.quantity <= 0:
+
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid quantity",
+            )
+
+        if item.quantity > available_qty:
+
+            raise HTTPException(
+                status_code=400,
+                detail=f"{listing['cropName']} is out of stock",
+            )
+
+        price = float(
+            listing.get("pricePerUnit", 0)
+        )
+
+        item_total = price * item.quantity
+
+        subtotal += item_total
+
+        weight_per_unit = float(
+            listing.get("weightPerUnit", 1)
+        )
+
+        total_weight += (
+            weight_per_unit * item.quantity
+        )
+
+        seller_id = listing["sellerId"]
+
+        seller_totals[seller_id] = (
+            seller_totals.get(seller_id, 0)
+            + item_total
+        )
+
+        checkout_items.append({
+
+            "listingId": item.listingId,
+
+            "sellerId": seller_id,
+
+            "cropName": listing["cropName"],
+
+            "quantity": item.quantity,
+
+            "pricePerUnit": price,
+
+            "totalPrice": item_total,
+
+            "weightPerUnit": weight_per_unit,
+
+        })
+        address_ref = (
+        db.collection("commerce_addresses")
+        .document(request.addressId)
+    )
+
+    address_doc = address_ref.get()
+
+    if not address_doc.exists:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery address not found",
+        )
+
+    address = address_doc.to_dict()
+
+    if address["buyerId"] != buyer_id:
+
+        raise HTTPException(
+            status_code=403,
+            detail="Address does not belong to this buyer",
+        )
+    checkout_data = {
+
+        "checkoutId": checkout_id,
+
+        "buyerId": buyer_id,
+
+        "status": "pending_payment",
+
+        "addressId": request.addressId,
+
+        "deliveryMethod": request.deliveryMethod,
+
+        "address": address,
+
+        "subtotal": subtotal,
+
+        "deliveryCharge": request.deliveryCharge,
+
+        "grandTotal": request.grandTotal,
+
+        "totalWeight": total_weight,
+
+        "sellerTotals": seller_totals,
+
+        "items": checkout_items,
+
+        "createdAt": firestore.SERVER_TIMESTAMP,
+
+        "updatedAt": firestore.SERVER_TIMESTAMP,
+
+    }
+
+    checkout_ref.set(checkout_data)
+    return {
+
+        "success": True,
+
+        "checkoutId": checkout_id,
+
+        "subtotal": subtotal,
+
+        "deliveryCharge": request.deliveryCharge,
+
+        "grandTotal": request.grandTotal,
+
+    }
 
 
 @app.post("/payments/razorpay/create-order")
