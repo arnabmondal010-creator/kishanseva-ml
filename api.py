@@ -1164,18 +1164,31 @@ async def create_checkout(
 
     for item in request.items:
 
-        listing_ref = (
+        # First try farm listings
+        listing_doc = (
             db.collection("commerce_listings")
             .document(item.listingId)
+            .get()
         )
 
-        listing_doc = listing_ref.get()
+        product_type = "farm"
+
+# If not found, try retail products
+        if not listing_doc.exists:
+
+            listing_doc = (
+                db.collection("commerce_shop_products")
+                .document(item.listingId)
+                .get()
+            )
+
+            product_type = "retail"
 
         if not listing_doc.exists:
 
             raise HTTPException(
                 status_code=404,
-                detail=f"Listing {item.listingId} not found",
+                detail=f"Product {item.listingId} not found",
             )
 
         listing = listing_doc.to_dict()
@@ -1226,6 +1239,7 @@ async def create_checkout(
             "listingId": item.listingId,
 
             "sellerId": seller_id,
+            "productType": product_type,
 
             "cropName": listing["cropName"],
 
