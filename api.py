@@ -1395,10 +1395,10 @@ async def create_razorpay_order(
 
             return {
                 "success": True,
-                "keyId": RAZORPAY_KEY_ID,
+                "key": RAZORPAY_KEY_ID,
                 "amount": amount_paise,
                 "currency": "INR",
-                "razorpayOrderId": razorpay_order["id"],
+                "orderId": razorpay_order["id"],
                 "checkoutId": request.checkoutId,
             }
 
