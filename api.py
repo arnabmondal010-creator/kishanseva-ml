@@ -3006,14 +3006,7 @@ def finalize_cart(
             "orderStatus": "confirmed",
         }
 
-    cart_docs = list(
-        db.collection("commerce_cart")
-        .where("userId", "==", buyer_id)
-        .stream()
-    )
-
-    if not cart_docs:
-        raise Exception("Cart is empty")
+    
 
     transaction = db.transaction()
 
@@ -3031,47 +3024,70 @@ def finalize_cart(
 
         order_id = order_ref.id
 
-        for cart_doc in cart_docs:
+        for item in checkout["items"]:
 
-            item = cart_doc.to_dict()
+            if item["productType"] == "farm":
 
-            listing_ref = (
-                db.collection("commerce_listings")
-                .document(item["listingId"])
-            )
+                listing_ref = (
+                    db.collection("commerce_listings")
+                    .document(item["listingId"])
+                )
+
+            else:
+
+                listing_ref = (
+                    db.collection("commerce_shop_products")
+                    .document(item["listingId"])
+                )
 
             listing_doc = transaction.get(listing_ref)
 
             if not listing_doc.exists:
-                raise Exception("Listing not found")
+
+                raise Exception(
+                    f"Product not found: {item['listingId']}"
+                )
 
             listing = listing_doc.to_dict()
-            stock = float(
-                listing.get("stock", 0)
-            )
 
             quantity = float(
                 item["quantity"]
             )
 
-            if quantity > stock:
+            if item["productType"] == "farm":
+
+                available = float(
+                    listing.get("quantity", 0)
+                )
+
+            else:
+
+                available = float(
+                    listing.get("stock", 0)
+                )
+
+            if quantity > available:
 
                 raise Exception(
                     f"{listing['cropName']} is out of stock"
                 )
-            transaction.update(
+            if item["productType"] == "farm":
 
-                listing_ref,
+                transaction.update(
+                    listing_ref,
+                    {
+                        "quantity": available - quantity,
+                    },
+                )
 
-                {
+            else:
 
-                    "stock": firestore.Increment(
-                        -quantity,
-                    ),
-
-                },
-
-            )
+                transaction.update(
+                    listing_ref,
+                    {
+                        "stock": available - quantity,
+                    },
+                )
         
             line_total = quantity * float(
                 listing["pricePerUnit"]
@@ -3114,15 +3130,19 @@ def finalize_cart(
 
                     "listingId": item["listingId"],
 
-                    "productName": listing["cropName"],
+                    "productName": item["productName"],
 
-                    "productImage": listing.get("cropImage"),
+                    "productImage": (
+                        item.get("image")
+                        or listing.get("cropImage")
+                        or listing.get("image")
+                    ),
 
                     "quantity": quantity,
 
-                    "unit": listing["unit"],
+                    "unit": item["unit"],
 
-                    "pricePerUnit": listing["pricePerUnit"],
+                    "pricePerUnit": item["pricePerUnit"],
 
                     "subtotal": line_total,
 
@@ -3206,7 +3226,13 @@ def finalize_cart(
             },
 
         )
-        for cart_doc in cart_docs:
+        cart_query = (
+            db.collection("commerce_cart")
+            .where("buyerId", "==", buyer_id)
+            .stream()
+        )
+
+        for cart_doc in cart_query:
 
             transaction.delete(
                 cart_doc.reference,
