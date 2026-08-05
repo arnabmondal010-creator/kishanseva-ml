@@ -1102,7 +1102,7 @@ class CheckoutItem(BaseModel):
 
 
 class CreateCheckoutRequest(BaseModel):
-    addressId: str
+    addressId: Optional[str] = None
     deliveryMethod: str
     subtotal: float
     deliveryCharge: float
@@ -1277,28 +1277,36 @@ async def create_checkout(
             "totalPrice": item_total,
 
         })
-        address_ref = (
-        db.collection("commerce_addresses")
-        .document(request.addressId)
-    )
+        address = None
 
-    address_doc = address_ref.get()
+        if request.deliveryMethod == "home":
 
-    if not address_doc.exists:
+            if not request.addressId:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Address is required for home delivery",
+                )
 
-        raise HTTPException(
-            status_code=404,
-            detail="Delivery address not found",
-        )
+            address_ref = (
+                db.collection("commerce_addresses")
+                .document(request.addressId)
+            )
 
-    address = address_doc.to_dict()
+            address_doc = address_ref.get()
 
-    if address["buyerId"] != buyer_id:
+            if not address_doc.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Delivery address not found",
+                )
 
-        raise HTTPException(
-            status_code=403,
-            detail="Address does not belong to this buyer",
-        )
+            address = address_doc.to_dict()
+
+            if address["buyerId"] != buyer_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Address does not belong to this buyer",
+                )
     checkout_data = {
 
         "checkoutId": checkout_id,
