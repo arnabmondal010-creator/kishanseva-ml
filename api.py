@@ -5032,10 +5032,13 @@ async def verify_pickup_otp(
             detail="Payment not completed",
         )
 
-    if order.get("orderStatus") != "pickup_scheduled":
+    if order.get("orderStatus") not in [
+        "ready",
+        "out_for_delivery",
+    ]:
         raise HTTPException(
             status_code=400,
-            detail="Pickup not scheduled",
+            detail="Order is not ready for OTP verification",
         )
 
     if order.get("otpVerified"):
@@ -5044,7 +5047,7 @@ async def verify_pickup_otp(
             detail="Pickup already verified",
         )
     stored_otp = str(
-        order.get("pickupOtp", "")
+        order.get("verificationOtp", "")
     ).strip()
 
     entered_otp = request.otp.strip()
