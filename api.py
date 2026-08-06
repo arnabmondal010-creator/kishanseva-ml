@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import razorpay
 import traceback
+import random
 
 from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
@@ -1161,6 +1162,7 @@ async def create_checkout(
     subtotal = 0.0
     total_weight = 0.0
     seller_totals = {}
+    cart_seller_id = None
     checkout_items = []
 
     for item in request.items:
@@ -1243,6 +1245,13 @@ async def create_checkout(
         )
 
         seller_id = listing["sellerId"]
+        if cart_seller_id is None:
+            cart_seller_id = seller_id
+        elif cart_seller_id != seller_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Cart can contain products from only one seller."
+            )
 
         seller_totals[seller_id] = (
             seller_totals.get(seller_id, 0)
@@ -1312,6 +1321,8 @@ async def create_checkout(
         "checkoutId": checkout_id,
 
         "buyerId": buyer_id,
+
+        "sellerId": cart_seller_id,
 
         "status": "pending_payment",
 
@@ -3140,57 +3151,49 @@ def finalize_cart(
             )
 
             transaction.set(
-
                 order_item_ref,
-
                 {
-
                     "orderItemId": order_item_ref.id,
-
                     "orderId": order_id,
-
                     "checkoutId": checkout_id,
 
-                    "buyerId": buyer_id,
+                    "type": "cart",
 
+                    "buyerId": buyer_id,
                     "sellerId": seller_id,
 
                     "listingId": item["listingId"],
 
                     "productName": item["productName"],
-
                     "productImage": (
-                        item.get("image")
+                        item.get("productImage")
                         or listing.get("cropImage")
                         or listing.get("image")
                     ),
 
                     "quantity": quantity,
-
                     "unit": item["unit"],
-
                     "pricePerUnit": item["pricePerUnit"],
-
                     "subtotal": line_total,
 
+                    "paymentId": payment_id,
                     "paymentStatus": "paid",
 
                     "orderStatus": "confirmed",
 
-                    "paymentId": payment_id,
+                    "otpVerified": False,
+
+                    "settlementReleased": False,
+                    "settlementStatus": "pending_delivery",
 
                     "createdAt": firestore.SERVER_TIMESTAMP,
-
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
                 },
-
             )
         # Build summary information
         first_item = checkout["items"][0]
 
-        seller_ids = list({
-            item["sellerId"]
-            for item in checkout["items"]
-        })
+        seller_id = checkout["sellerId"]
 
         display_title = first_item["productName"]
 
@@ -3198,6 +3201,9 @@ def finalize_cart(
             display_title = (
                 f'{first_item["productName"]} +{len(checkout["items"]) - 1} more'
             )
+        
+
+        pickup_otp = f"{random.randint(100000,999999)}"
 
         transaction.set(
             order_ref,
@@ -3214,7 +3220,7 @@ def finalize_cart(
                 "buyerId": buyer_id,
 
         # Sellers
-                "sellerIds": seller_ids,
+                "sellerId": seller_id,
 
         # Summary Product
                 "cropName": display_title,
@@ -3245,7 +3251,7 @@ def finalize_cart(
                 "orderStatus": "confirmed",
 
         # Pickup
-                "pickupOtp": None,
+                "pickupOtp": pickup_otp,
                 "pickupScheduled": False,
                 "pickupDate": None,
                 "pickupTime": "",
