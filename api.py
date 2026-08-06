@@ -3184,40 +3184,88 @@ def finalize_cart(
                 },
 
             )
+        # Build summary information
+        first_item = checkout["items"][0]
+
+        seller_ids = list({
+            item["sellerId"]
+            for item in checkout["items"]
+        })
+
+        display_title = first_item["productName"]
+
+        if len(checkout["items"]) > 1:
+            display_title = (
+                f'{first_item["productName"]} +{len(checkout["items"]) - 1} more'
+            )
+
         transaction.set(
-
             order_ref,
-
             {
 
+        # IDs
                 "orderId": order_id,
-
                 "checkoutId": checkout_id,
 
+        # Order Type
+                "type": "cart",
+
+        # Buyer
                 "buyerId": buyer_id,
 
-                "paymentStatus": "paid",
+        # Sellers
+                "sellerIds": seller_ids,
 
-                "orderStatus": "confirmed",
+        # Summary Product
+                "cropName": display_title,
+                "image": first_item["productImage"],
+                "itemCount": len(checkout["items"]),
 
+        # Summary Quantity
+                "quantity": first_item["quantity"],
+                "unit": first_item["unit"],
+
+        # Delivery
+                "deliveryMethod": checkout["deliveryMethod"],
+                "addressId": checkout.get("addressId"),
+                "address": checkout.get("address"),
+
+        # Money
                 "subtotal": subtotal,
-
                 "deliveryCharge": checkout["deliveryCharge"],
-
                 "grandTotal": checkout["grandTotal"],
+                "orderAmount": checkout["grandTotal"],
 
+        # Payment
                 "paymentId": payment_id,
-
+                "paymentStatus": "paid",
                 "razorpayOrderId": razorpay_order_id,
 
-                "createdAt": firestore.SERVER_TIMESTAMP,
+        # Status
+                "orderStatus": "confirmed",
 
+        # Pickup
+                "pickupOtp": None,
+                "pickupScheduled": False,
+                "pickupDate": None,
+                "pickupTime": "",
+                "pickupLocation": "",
+                "otpVerified": False,
+
+        # Settlement
                 "settlementStatus": "pending_delivery",
-
                 "settlementReleased": False,
 
-            },
+        # Misc
+                "buyerNote": "",
+                "buyerNoteStatus": "none",
+                "pickupRequested": False,
+                "pickupRequestStatus": "none",
 
+        # Timestamps
+                "createdAt": firestore.SERVER_TIMESTAMP,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
         )
         transaction.update(
 
