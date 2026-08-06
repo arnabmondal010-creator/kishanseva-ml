@@ -4499,6 +4499,16 @@ async def razorpay_webhook(
                     order_id,
                     buyer_id,
                 )
+            elif payment_type == "cart":
+                checkout_id = notes.get("checkoutId")
+
+                result = await asyncio.to_thread(
+                    finalize_cart_with_retry,
+                    razorpay_order_id,
+                    payment_id,
+                    checkout_id,
+                    buyer_id,
+                )
 
             else:
 
@@ -4509,6 +4519,7 @@ async def razorpay_webhook(
                     listing_id,
                     buyer_id,
                 )
+                
 
             order_id = result.get(
                 "orderId"
