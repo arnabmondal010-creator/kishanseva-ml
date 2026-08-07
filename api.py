@@ -3085,10 +3085,10 @@ def finalize_cart(
                 )
        
 
-        listing_doc = transaction.get(listing_ref)
+            listing_doc = transaction.get(listing_ref)
 
-        if hasattr(listing_doc, "__next__"):
-            listing_doc = next(listing_doc)
+            if hasattr(listing_doc, "__next__"):
+                listing_doc = next(listing_doc)
 
 
             if not listing_doc.exists:
@@ -3134,13 +3134,13 @@ def finalize_cart(
                 transaction.update(
                     listing_ref,
                     {
-                        "stock": available - quantity,
+                    "stock": available - quantity,
                     },
                 )
         
             line_total = quantity * float(
                 listing["pricePerUnit"]
-            )
+            )   
 
             subtotal += line_total
 
