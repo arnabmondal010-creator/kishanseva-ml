@@ -3052,116 +3052,102 @@ def finalize_cart(
 
     @firestore.transactional
     def complete_checkout(transaction):
-        subtotal = 0.0
 
+        subtotal = 0.0
         seller_totals = {}
 
-        order_items = []
-        order_ref = (
-            db.collection("commerce_orders")
-            .document()
-        )
-
+        order_ref = db.collection("commerce_orders").document()
         order_id = order_ref.id
-        print(f"Checkout items: {len(checkout['items'])}")
+
+        # ------------------------------------
+        # PASS 1 : READ EVERYTHING
+        # ------------------------------------
+
+        products = []
 
         for item in checkout["items"]:
-            print(
-                f"Creating order item: {item['productName']} | {item['listingId']}"
-            )
 
             if item["productType"] == "farm":
-
                 listing_ref = (
                     db.collection("commerce_listings")
                     .document(item["listingId"])
                 )
-
             else:
-
                 listing_ref = (
                     db.collection("commerce_shop_products")
                     .document(item["listingId"])
                 )
-       
 
             listing_doc = transaction.get(listing_ref)
 
             if hasattr(listing_doc, "__next__"):
                 listing_doc = next(listing_doc)
 
-
             if not listing_doc.exists:
-
-                raise Exception(
-                    f"Product not found: {item['listingId']}"
-                )
+                raise Exception("Product not found")
 
             listing = listing_doc.to_dict()
 
-            quantity = float(
-                item["quantity"]
+            qty = float(item["quantity"])
+
+            available = (
+                float(listing["quantity"])
+                if item["productType"] == "farm"
+                else float(listing["stock"])
             )
 
-            if item["productType"] == "farm":
-
-                available = float(
-                    listing.get("quantity", 0)
-                )
-
-            else:
-
-                available = float(
-                    listing.get("stock", 0)
-                )
-
-            if quantity > available:
-
+            if qty > available:
                 raise Exception(
                     f"{listing['cropName']} is out of stock"
                 )
-            if item["productType"] == "farm":
 
-                transaction.update(
-                    listing_ref,
-                    {
-                        "quantity": available - quantity,
-                    },
-                )
-
-            else:
-
-                transaction.update(
-                    listing_ref,
-                    {
-                    "stock": available - quantity,
-                    },
-                )
-        
-            line_total = quantity * float(
-                listing["pricePerUnit"]
-            )   
+            line_total = qty * float(listing["pricePerUnit"])
 
             subtotal += line_total
 
-            seller_id = listing["sellerId"]
+            seller_totals[listing["sellerId"]] = (
+                seller_totals.get(listing["sellerId"], 0)
+                + line_total
+            )
 
-            seller_totals[seller_id] = (
+            products.append({
+                "item": item,
+                "listing": listing,
+                "listing_ref": listing_ref,
+                "available": available,
+                "quantity": qty,
+                "line_total": line_total,
+            })
 
-                seller_totals.get(
-                    seller_id,
-                    0,
+    # ------------------------------------
+    # PASS 2 : WRITE EVERYTHING
+    # ------------------------------------
+
+        for p in products:
+
+            item = p["item"]
+            listing = p["listing"]
+
+            if item["productType"] == "farm":
+                transaction.update(
+                    p["listing_ref"],
+                    {
+                        "quantity":
+                            p["available"] - p["quantity"]
+                    },
+                )
+            else:
+                transaction.update(
+                    p["listing_ref"],
+                    {
+                        "stock":
+                            p["available"] - p["quantity"]
+                    },
                 )
 
-                + line_total
-
-            )
             order_item_ref = (
                 db.collection("commerce_order_items")
                 .document()
-            )
-            print(
-                f"Saving order item: {order_item_ref.id} | {item['productName']}"
             )
 
             transaction.set(
@@ -3174,21 +3160,20 @@ def finalize_cart(
                     "type": "cart",
 
                     "buyerId": buyer_id,
-                    "sellerId": seller_id,
+                    "sellerId": listing["sellerId"],
 
                     "listingId": item["listingId"],
 
                     "productName": item["productName"],
-                    "productImage": (
+                    "productImage":
                         item.get("productImage")
                         or listing.get("cropImage")
-                        or listing.get("image")
-                    ),
+                        or listing.get("image"),
 
-                    "quantity": quantity,
+                    "quantity": p["quantity"],
                     "unit": item["unit"],
                     "pricePerUnit": item["pricePerUnit"],
-                    "subtotal": line_total,
+                    "subtotal": p["line_total"],
 
                     "paymentId": payment_id,
                     "paymentStatus": "paid",
@@ -3204,131 +3189,78 @@ def finalize_cart(
                     "updatedAt": firestore.SERVER_TIMESTAMP,
                 },
             )
-        # Build summary information
-        first_item = checkout["items"][0]
 
-        seller_id = checkout["sellerId"]
+        first_item = checkout["items"][0]
 
         display_title = first_item["productName"]
 
         if len(checkout["items"]) > 1:
             display_title = (
-                f'{first_item["productName"]} +{len(checkout["items"]) - 1} more'
+                f"{first_item['productName']} +{len(checkout['items'])-1} more"
             )
-        
 
         pickup_otp = f"{random.randint(100000,999999)}"
 
         transaction.set(
             order_ref,
             {
-
-        # IDs
                 "orderId": order_id,
                 "checkoutId": checkout_id,
-
-        # Order Type
                 "type": "cart",
 
-        # Buyer
                 "buyerId": buyer_id,
+                "sellerId": checkout["sellerId"],
 
-        # Sellers
-                "sellerId": seller_id,
-
-        # Summary Product
                 "cropName": display_title,
                 "image": first_item["productImage"],
                 "itemCount": len(checkout["items"]),
 
-        # Summary Quantity
                 "quantity": first_item["quantity"],
                 "unit": first_item["unit"],
 
-        # Delivery
                 "deliveryMethod": checkout["deliveryMethod"],
                 "addressId": checkout.get("addressId"),
                 "address": checkout.get("address"),
 
-        # Money
                 "subtotal": subtotal,
                 "deliveryCharge": checkout["deliveryCharge"],
                 "grandTotal": checkout["grandTotal"],
                 "orderAmount": checkout["grandTotal"],
 
-        # Payment
                 "paymentId": payment_id,
                 "paymentStatus": "paid",
                 "razorpayOrderId": razorpay_order_id,
 
-        # Status
                 "orderStatus": "confirmed",
 
-        # Pickup
                 "pickupOtp": pickup_otp,
                 "pickupScheduled": False,
-                "pickupDate": None,
-                "pickupTime": "",
-                "pickupLocation": "",
-                "otpVerified": False,
 
-        # Settlement
                 "settlementStatus": "pending_delivery",
                 "settlementReleased": False,
 
-        # Misc
-                "buyerNote": "",
-                "buyerNoteStatus": "none",
-                "pickupRequested": False,
-                "pickupRequestStatus": "none",
-
-        # Timestamps
                 "createdAt": firestore.SERVER_TIMESTAMP,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
             },
         )
+
         transaction.update(
-
             checkout_ref,
-
             {
-
                 "paymentStatus": "paid",
-
-                "orderStatus": "confirmed",
-
                 "paymentId": payment_id,
-
                 "razorpayOrderId": razorpay_order_id,
-
                 "orderId": order_id,
-
-                "paidAt": firestore.SERVER_TIMESTAMP,
-
-            },
-
-        )
-        transaction.update(
-
-            checkout_ref,
-
-            {
-
+                "orderStatus": "confirmed",
                 "settlementStatus": "pending_delivery",
-
                 "settlementReleased": False,
-
+                "paidAt": firestore.SERVER_TIMESTAMP,
             },
-
         )
-        print("Finished creating order items")
-        
 
         for cart_doc in cart_docs:
+            transaction.delete(cart_doc.reference)
 
-            transaction.delete(
-                cart_doc.reference,
-            )
         return {
             "alreadyProcessed": False,
             "orderId": order_id,
