@@ -3081,9 +3081,10 @@ def finalize_cart(
                 )
        
 
-            listing_doc = listing_ref.get(
-                transaction=transaction,
-            )
+        listing_doc = transaction.get(listing_ref)
+
+        if hasattr(listing_doc, "__next__"):
+            listing_doc = next(listing_doc)
 
 
             if not listing_doc.exists:
