@@ -3304,6 +3304,12 @@ def finalize_cart(
                 db.collection("commerce_order_items")
                 .document()
             )
+            item_count = len(checkout["items"])
+
+            item_delivery = round(
+                delivery_charge / item_count,
+                2,
+            )
 
             transaction.set(
                 order_item_ref,
@@ -3329,7 +3335,7 @@ def finalize_cart(
                     "unit": item["unit"],
                     "pricePerUnit": item["pricePerUnit"],
                     "subtotal": p["line_total"],
-                    "deliveryCharge": 0.0,
+                    "deliveryCharge": item_delivery,
 
                     "platformCommissionRate": 7,
 
