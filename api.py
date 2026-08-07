@@ -5350,7 +5350,6 @@ async def verify_pickup_otp(
                     "sellerPaidAt": firestore.SERVER_TIMESTAMP,
 
                 },
-
             )
 
     
