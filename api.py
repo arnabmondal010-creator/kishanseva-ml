@@ -5191,6 +5191,26 @@ async def verify_pickup_otp(
             .stream()
 
         )
+        seller_docs = {}
+
+        for item_doc in order_items:
+
+            item = item_doc.to_dict()
+
+            seller_ref = (
+                db.collection("commerce_users")
+                .document(item["sellerId"])
+            )
+
+            seller_doc = transaction.get(seller_ref)
+
+            if hasattr(seller_doc, "__next__"):
+                seller_doc = next(seller_doc)
+
+            if not seller_doc.exists:
+                raise Exception("Seller not found")
+
+            seller_docs[item["sellerId"]] = seller_ref
 
         if fresh.get("settlementReleased"):
 
@@ -5231,19 +5251,7 @@ async def verify_pickup_otp(
 
             item = item_doc.to_dict()
 
-            seller_ref = (
-                db.collection("commerce_users")
-                .document(item["sellerId"])
-            )
-
-            seller_doc = transaction.get(seller_ref)
-
-            if hasattr(seller_doc, "__next__"):
-                seller_doc = next(seller_doc)
-
-            if not seller_doc.exists:
-                raise Exception("Seller not found")
-            seller = seller_doc.to_dict()
+            seller_ref = seller_docs[item["sellerId"]]
 
             seller_amount = float(
                 item.get(
@@ -5351,15 +5359,6 @@ async def verify_pickup_otp(
 
                 },
             )
-
-    
-        
-
-        
-
-        
-        
-       
         return {
             "success": True,
             "orderId": request.orderId,
