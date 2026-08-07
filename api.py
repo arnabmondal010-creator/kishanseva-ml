@@ -1245,6 +1245,7 @@ async def create_checkout(
         )
 
         seller_id = listing["sellerId"]
+        
         if cart_seller_id is None:
             cart_seller_id = seller_id
         elif cart_seller_id != seller_id:
@@ -1364,6 +1365,62 @@ async def create_checkout(
         "grandTotal": request.grandTotal,
 
     }
+def calculate_delivery_amount(checkout):
+
+    settings_doc = (
+        db.collection("delivery_settings")
+        .document("config")
+        .get()
+    )
+
+    if not settings_doc.exists:
+        raise Exception("Delivery settings not found")
+
+    config = settings_doc.to_dict()
+
+    base_fee = float(config.get("baseFee", 0))
+    minimum_fee = float(config.get("minimumDeliveryFee", 0))
+    free_delivery_above = float(config.get("freeDeliveryAbove", 0))
+    included_weight = float(config.get("includedWeight", 0))
+    weight_charge_per_kg = float(config.get("weightChargePerKg", 0))
+    per_km_charge = float(config.get("perKmCharge", 0))
+
+    subtotal = float(checkout.get("subtotal", 0))
+    total_weight = float(checkout.get("totalWeight", 0))
+    distance = float(checkout.get("distanceKm", 0))
+
+    delivery_charge = 0.0
+
+    if checkout.get("deliveryMethod") == "home":
+
+        if subtotal >= free_delivery_above:
+
+            delivery_charge = 0
+
+        else:
+
+            delivery_charge = base_fee
+
+            if total_weight > included_weight:
+                delivery_charge += (
+                    total_weight - included_weight
+                ) * weight_charge_per_kg
+
+            delivery_charge += (
+                distance * per_km_charge
+            )
+
+            delivery_charge = max(
+                minimum_fee,
+                round(delivery_charge, 2),
+            )
+
+    grand_total = round(
+        subtotal + delivery_charge,
+        2,
+    )
+
+    return delivery_charge, grand_total
 
 
 @app.post("/payments/razorpay/create-order")
@@ -1407,7 +1464,11 @@ async def create_razorpay_order(
                     detail="Checkout already paid",
                 )
 
-            amount = float(checkout["grandTotal"])
+            delivery_charge, grand_total = (
+                calculate_delivery_amount(checkout)
+            )
+
+            amount = grand_total
             amount_paise = int(round(amount * 100))
 
             razorpay_order = razorpay_client.order.create(
@@ -3024,6 +3085,44 @@ def finalize_cart(
         raise Exception("Checkout not found")
 
     checkout = checkout_doc.to_dict()
+    delivery_charge, grand_total = (
+        calculate_delivery_amount(checkout)
+    )
+    delivery_settings = (
+        db.collection("delivery_settings")
+        .document("config")
+        .get()
+    )
+
+    if not delivery_settings.exists:
+        raise Exception("Delivery settings not found")
+
+    delivery_config = delivery_settings.to_dict()
+
+    base_fee = float(
+        delivery_config.get("baseFee", 0)
+    )
+
+    minimum_fee = float(
+        delivery_config.get("minimumDeliveryFee", 0)
+    )
+
+    free_delivery_above = float(
+        delivery_config.get("freeDeliveryAbove", 0)
+    )
+
+    included_weight = float(
+        delivery_config.get("includedWeight", 0)
+    )
+
+    weight_charge_per_kg = float(
+        delivery_config.get("weightChargePerKg", 0)
+    )
+
+    per_km_charge = float(
+        delivery_config.get("perKmCharge", 0)
+    )
+
     import json
 
     print("========== CHECKOUT ITEMS ==========")
@@ -3044,6 +3143,51 @@ def finalize_cart(
         db.collection("commerce_cart")
         .where("buyerId", "==", buyer_id)
         .stream()
+    )
+    # -----------------------------------------
+# Delivery charge calculation
+# -----------------------------------------
+
+    delivery_charge = 0.0
+
+    if checkout.get("deliveryMethod") == "home":
+
+        subtotal = float(checkout.get("subtotal", 0))
+
+        total_weight = float(
+            checkout.get("totalWeight", 0)
+        )
+
+        distance = float(
+            checkout.get("distanceKm", 0)
+        )
+
+        if subtotal >= free_delivery_above:
+
+            delivery_charge = 0
+
+        else:
+
+            delivery_charge = base_fee
+
+            if total_weight > included_weight:
+
+                delivery_charge += (
+                    total_weight - included_weight
+                ) * weight_charge_per_kg
+
+            delivery_charge += (
+                distance * per_km_charge
+            )
+
+            delivery_charge = max(
+                minimum_fee,
+                round(delivery_charge, 2),
+            )
+
+    grand_total = round(
+    subtotal + delivery_charge,
+    2,
     )
 
     
@@ -3104,6 +3248,17 @@ def finalize_cart(
             line_total = qty * float(listing["pricePerUnit"])
 
             subtotal += line_total
+            commission_rate = 0.07
+
+            platform_commission = round(
+                line_total * commission_rate,
+                2,
+            )
+
+            seller_payout = round(
+                line_total - platform_commission,
+                2,
+            )
 
             seller_totals[listing["sellerId"]] = (
                 seller_totals.get(listing["sellerId"], 0)
@@ -3174,6 +3329,13 @@ def finalize_cart(
                     "unit": item["unit"],
                     "pricePerUnit": item["pricePerUnit"],
                     "subtotal": p["line_total"],
+                    "deliveryCharge": 0.0,
+
+                    "platformCommissionRate": 7,
+
+                    "platformCommission": platform_commission,
+
+                    "sellerPayout": seller_payout,
 
                     "paymentId": payment_id,
                     "paymentStatus": "paid",
@@ -3223,9 +3385,9 @@ def finalize_cart(
                 "address": checkout.get("address"),
 
                 "subtotal": subtotal,
-                "deliveryCharge": checkout["deliveryCharge"],
-                "grandTotal": checkout["grandTotal"],
-                "orderAmount": checkout["grandTotal"],
+                "deliveryCharge": delivery_charge,
+                "grandTotal": grand_total,
+                "orderAmount": grand_total,
 
                 "paymentId": payment_id,
                 "paymentStatus": "paid",
@@ -5084,7 +5246,10 @@ async def verify_pickup_otp(
             seller = seller_doc.to_dict()
 
             seller_amount = float(
-                item["subtotal"]
+                item.get(
+                    "sellerPayout",
+                    item["subtotal"],
+                )
             )
 
             transaction.update(
@@ -5131,11 +5296,23 @@ async def verify_pickup_otp(
 
                     "cropName": item["productName"],
 
-                    "amount": seller_amount,
+                    "subtotal": float(item["subtotal"]),
 
-                    "commission": float(
+                    "deliveryCharge": float(
+                        item.get("deliveryCharge", 0),
+                    ),
+
+                    "platformCommissionRate": float(
+                        item.get("platformCommissionRate", 7),
+                    ),
+
+                    "platformCommission": float(
                         item.get("platformCommission", 0),
                     ),
+
+                    "sellerPayout": seller_amount,
+
+                    "amount": seller_amount,
 
                     "type": "order_credit",
 
@@ -5165,6 +5342,12 @@ async def verify_pickup_otp(
                     "completedAt": firestore.SERVER_TIMESTAMP,
 
                     "updatedAt": firestore.SERVER_TIMESTAMP,
+
+                    "sellerPaid": True,
+
+                    "sellerPaidAmount": seller_amount,
+
+                    "sellerPaidAt": firestore.SERVER_TIMESTAMP,
 
                 },
 
