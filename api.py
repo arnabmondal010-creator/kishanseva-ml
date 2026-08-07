@@ -3040,6 +3040,12 @@ def finalize_cart(
             "orderStatus": "confirmed",
         }
 
+    cart_docs = list(
+        db.collection("commerce_cart")
+        .where("buyerId", "==", buyer_id)
+        .stream()
+    )
+
     
 
     transaction = db.transaction()
@@ -3075,9 +3081,10 @@ def finalize_cart(
                 )
        
 
-            listing_doc = listing_ref.get(
-                transaction=transaction,
-            )
+            listing_doc = transaction.get(listing_ref)
+
+            if hasattr(listing_doc, "__next__"):
+                listing_doc = next(listing_doc)
 
 
             if not listing_doc.exists:
@@ -3307,13 +3314,9 @@ def finalize_cart(
             },
 
         )
-        cart_query = (
-            db.collection("commerce_cart")
-            .where("buyerId", "==", buyer_id)
-            .stream()
-        )
+        
 
-        for cart_doc in cart_query:
+        for cart_doc in cart_docs:
 
             transaction.delete(
                 cart_doc.reference,
