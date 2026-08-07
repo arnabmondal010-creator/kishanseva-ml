@@ -3063,8 +3063,12 @@ def finalize_cart(
         )
 
         order_id = order_ref.id
+        print(f"Checkout items: {len(checkout['items'])}")
 
         for item in checkout["items"]:
+            print(
+                f"Creating order item: {item['productName']} | {item['listingId']}"
+            )
 
             if item["productType"] == "farm":
 
@@ -3155,6 +3159,9 @@ def finalize_cart(
             order_item_ref = (
                 db.collection("commerce_order_items")
                 .document()
+            )
+            print(
+                f"Saving order item: {order_item_ref.id} | {item['productName']}"
             )
 
             transaction.set(
@@ -3314,6 +3321,7 @@ def finalize_cart(
             },
 
         )
+        print("Finished creating order items")
         
 
         for cart_doc in cart_docs:
