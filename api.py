@@ -3085,43 +3085,10 @@ def finalize_cart(
         raise Exception("Checkout not found")
 
     checkout = checkout_doc.to_dict()
-    delivery_charge, grand_total = (
-        calculate_delivery_amount(checkout)
-    )
-    delivery_settings = (
-        db.collection("delivery_settings")
-        .document("config")
-        .get()
-    )
-
-    if not delivery_settings.exists:
-        raise Exception("Delivery settings not found")
-
-    delivery_config = delivery_settings.to_dict()
-
-    base_fee = float(
-        delivery_config.get("baseFee", 0)
-    )
-
-    minimum_fee = float(
-        delivery_config.get("minimumDeliveryFee", 0)
-    )
-
-    free_delivery_above = float(
-        delivery_config.get("freeDeliveryAbove", 0)
-    )
-
-    included_weight = float(
-        delivery_config.get("includedWeight", 0)
-    )
-
-    weight_charge_per_kg = float(
-        delivery_config.get("weightChargePerKg", 0)
-    )
-
-    per_km_charge = float(
-        delivery_config.get("perKmCharge", 0)
-    )
+    # Use the values already stored in commerce_checkouts
+    subtotal = float(checkout["subtotal"])
+    delivery_charge = float(checkout.get("deliveryCharge", 0))
+    grand_total = float(checkout["grandTotal"])
 
     import json
 
@@ -3144,54 +3111,7 @@ def finalize_cart(
         .where("buyerId", "==", buyer_id)
         .stream()
     )
-    # -----------------------------------------
-# Delivery charge calculation
-# -----------------------------------------
-
-    delivery_charge = 0.0
-
-    if checkout.get("deliveryMethod") == "home":
-
-        subtotal = float(checkout.get("subtotal", 0))
-
-        total_weight = float(
-            checkout.get("totalWeight", 0)
-        )
-
-        distance = float(
-            checkout.get("distanceKm", 0)
-        )
-
-        if subtotal >= free_delivery_above:
-
-            delivery_charge = 0
-
-        else:
-
-            delivery_charge = base_fee
-
-            if total_weight > included_weight:
-
-                delivery_charge += (
-                    total_weight - included_weight
-                ) * weight_charge_per_kg
-
-            delivery_charge += (
-                distance * per_km_charge
-            )
-
-            delivery_charge = max(
-                minimum_fee,
-                round(delivery_charge, 2),
-            )
-
-    grand_total = round(
-    subtotal + delivery_charge,
-    2,
-    )
-
-    
-
+ 
     transaction = db.transaction()
 
     @firestore.transactional
@@ -3306,10 +3226,18 @@ def finalize_cart(
             )
             item_count = len(checkout["items"])
 
-            item_delivery = round(
-                delivery_charge / item_count,
-                2,
-            )
+            if item_count == 1:
+                item_delivery = delivery_charge
+            else:
+                per_item = round(delivery_charge / item_count, 2)
+
+                if p == products[-1]:
+                    item_delivery = round(
+                        delivery_charge - per_item * (item_count - 1),
+                        2,
+                    )
+                else:
+                    item_delivery = per_item
 
             transaction.set(
                 order_item_ref,
