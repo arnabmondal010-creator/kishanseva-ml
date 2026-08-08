@@ -2826,6 +2826,7 @@ def finalize_instant_buy(
 
                 "buyerNoteStatus":
                     "none",
+                "buyerNoteResponse": "",
 
                 "pickupRequested":
                     False,
@@ -3250,6 +3251,9 @@ def finalize_cart(
 
                     "buyerId": buyer_id,
                     "sellerId": listing["sellerId"],
+                    "buyerNote": "",
+                    "buyerNoteStatus": "none",
+                    "buyerNoteResponse": "",
 
                     "listingId": item["listingId"],
 
@@ -5176,6 +5180,9 @@ async def verify_pickup_otp(
                 "orderStatus": "completed",
                 "completedAt": firestore.SERVER_TIMESTAMP,
                 "updatedAt": firestore.SERVER_TIMESTAMP,
+                "buyerNote": "",
+                "buyerNoteStatus": "none",
+                "buyerNoteResponse": "",
                 "settlementReleased": True,
                 "settlementStatus": "released",
                 "settlementReleasedAt": firestore.SERVER_TIMESTAMP,
