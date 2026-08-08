@@ -1245,7 +1245,34 @@ async def create_checkout(
         )
 
         seller_id = listing["sellerId"]
-        
+
+        seller_ref = (
+            db.collection("commerce_users")
+            .document(seller_id)
+        )
+
+        seller_doc = seller_ref.get()
+
+        if not seller_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Seller account not found",
+            )
+
+        seller = seller_doc.to_dict()
+
+        if not seller.get("isActive", False):
+            raise HTTPException(
+                status_code=400,
+                detail="This seller is currently unavailable.",
+            )
+
+        if not seller.get("isShopOpen", False):
+            raise HTTPException(
+                status_code=400,
+                detail="This seller's shop is currently closed.",
+            )
+
         if cart_seller_id is None:
             cart_seller_id = seller_id
         elif cart_seller_id != seller_id:
@@ -2662,6 +2689,42 @@ def finalize_instant_buy(
             current_listing_doc.to_dict()
             or {}
         )
+        seller_id = current_listing.get("sellerId")
+
+        if not seller_id:
+            raise Exception(
+                "Seller ID missing"
+            )
+
+        seller_ref = (
+            db.collection("commerce_users")
+            .document(seller_id)
+        )
+
+        seller_doc = transaction.get(seller_ref)
+
+        if hasattr(seller_doc, "__next__"):
+            seller_doc = next(seller_doc)
+
+        if not seller_doc.exists:
+            raise Exception(
+                "Seller account not found"
+            )
+
+        seller = (
+            seller_doc.to_dict()
+            or {}
+        )
+
+        if not seller.get("isActive", False):
+            raise Exception(
+                "Seller account is inactive"
+            )
+
+        if not seller.get("isShopOpen", False):
+            raise Exception(
+                "Seller shop is currently closed"
+            )
 
         if current_listing.get(
             "sold",
@@ -3152,6 +3215,31 @@ def finalize_cart(
                 raise Exception("Product not found")
 
             listing = listing_doc.to_dict()
+            seller_id = listing.get("sellerId")
+
+            if not seller_id:
+                raise Exception("Seller ID missing")
+
+            seller_ref = (
+                db.collection("commerce_users")
+                .document(seller_id)
+            )
+
+            seller_doc = transaction.get(seller_ref)
+
+            if hasattr(seller_doc, "__next__"):
+                seller_doc = next(seller_doc)
+
+            if not seller_doc.exists:
+                raise Exception("Seller account not found")
+
+            seller = seller_doc.to_dict() or {}
+
+            if not seller.get("isActive", False):
+                raise Exception("Seller account is inactive")
+
+            if not seller.get("isShopOpen", False):
+                raise Exception("Seller shop is currently closed")
 
             qty = float(item["quantity"])
 
@@ -5164,13 +5252,6 @@ async def verify_pickup_otp(
 
             }
         
-        
-       
-
-        
-
-       
-
         transaction.update(
             order_ref,
             {
