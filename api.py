@@ -1149,6 +1149,7 @@ def send_otp(data: SendOTPRequest):
     payload = {
         "module": "TRANS_SMS",
         "apikey": TWOFACTOR_API_KEY,
+        "templatename": "Kishanseva OTP",
         "to": phone,
         "from": "KSHSVA",
         "msg": message,
