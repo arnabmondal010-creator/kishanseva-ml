@@ -1244,7 +1244,16 @@ def send_otp(data: SendOTPRequest):
             timeout=10,
         )
 
-        result = response.json()
+        print("2FACTOR STATUS:", response.status_code)
+        print("2FACTOR CONTENT-TYPE:", response.headers.get("content-type"))
+        print("2FACTOR RAW RESPONSE:", response.text)
+
+        try:
+            result = response.json()
+        except ValueError:
+            raise Exception(
+                f"2Factor returned non-JSON response: {response.text}"
+            )
 
         print("2FACTOR RESPONSE:", result)
 
