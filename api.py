@@ -1557,6 +1557,29 @@ def verify_firebase_token(
             status_code=401,
             detail="Invalid or expired authentication token",
         )
+class NotificationSettingsRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/auth/notification-settings")
+def update_notification_settings(
+    data: NotificationSettingsRequest,
+    user=Depends(verify_firebase_token),
+):
+    user_id = user["uid"]
+
+    db.collection("farmers").document(user_id).set(
+        {
+            "notifications_enabled": data.enabled,
+            "notifications_updated_at": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+    return {
+        "success": True,
+        "notifications_enabled": data.enabled,
+    }
 @app.post("/checkout/create")
 async def create_checkout(
     request: CreateCheckoutRequest,
