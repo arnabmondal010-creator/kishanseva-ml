@@ -1130,10 +1130,10 @@ def send_otp(data: SendOTPRequest):
         .document(phone) \
         .set({
             "phone": phone,
-            "otpHash": otp_hash,
+            
             "purpose": data.purpose,
             "attempts": 0,
-            "expiresAt": expires_at,
+            
             "verified": False,
             "createdAt": firestore.SERVER_TIMESTAMP,
         })
@@ -1142,7 +1142,7 @@ def send_otp(data: SendOTPRequest):
     url = (
         f"https://2factor.in/API/V1/"
         f"{TWOFACTOR_API_KEY}/SMS/"
-        f"{phone}/Kishanseva%20OTP"
+        f"{phone}/AUTOGEN/Kishanseva%20OTP"
     )
 
     try:
@@ -1171,10 +1171,8 @@ def send_otp(data: SendOTPRequest):
                 or "2Factor request failed"
             )
 
-        # 2Factor returns the session ID in Details
         session_id = result.get("Details")
 
-        # Save session ID for OTP verification
         db.collection("otp_verifications") \
             .document(phone) \
             .update({
