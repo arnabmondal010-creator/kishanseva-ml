@@ -1139,25 +1139,16 @@ def send_otp(data: SendOTPRequest):
         })
 
     # Send through 2Factor
-    url = "https://2factor.in/API/V1/OTP/SEND"
-
-    payload = {
-        "to": phone,
-        "template_name": "Kishanseva OTP",
-        "var1": otp,
-    }
-
-    headers = {
-        "X-API-Key": TWOFACTOR_API_KEY,
-        "Content-Type": "application/json",
-    }
+    url = (
+        f"https://2factor.in/API/V1/"
+        f"{TWOFACTOR_API_KEY}/SMS/"
+        f"{phone}/Kishanseva%20OTP"
+    )
 
     try:
 
-        response = requests.post(
+        response = requests.get(
             url,
-            json=payload,
-            headers=headers,
             timeout=10,
         )
 
@@ -1174,12 +1165,21 @@ def send_otp(data: SendOTPRequest):
 
         print("2FACTOR RESPONSE:", result)
 
-        if response.status_code >= 400:
+        if result.get("Status") != "Success":
             raise Exception(
-                result.get("message")
-                or result.get("error")
+                result.get("Details")
                 or "2Factor request failed"
             )
+
+        # 2Factor returns the session ID in Details
+        session_id = result.get("Details")
+
+        # Save session ID for OTP verification
+        db.collection("otp_verifications") \
+            .document(phone) \
+            .update({
+                "sessionId": session_id,
+            })
 
         return {
             "success": True,
