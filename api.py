@@ -1412,6 +1412,30 @@ def reset_password(data: ResetPasswordRequest):
         "success": True,
         "message": "Password reset successfully",
     }
+
+
+@app.get("/auth/check-account")
+def check_account(phone: str):
+
+    phone = normalize_phone(phone)
+    clean_phone = phone.replace("+91", "")
+
+    farmer_query = (
+        db.collection("farmers")
+        .where(
+            "personal.phone",
+            "==",
+            clean_phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    farmer_doc = next(farmer_query, None)
+
+    return {
+        "exists": farmer_doc is not None,
+    }
     
 # ================= RAZORPAY =================
 
