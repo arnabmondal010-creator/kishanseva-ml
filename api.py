@@ -1081,90 +1081,6 @@ def normalize_phone(phone: str) -> str:
     return f"+91{phone}"
 
 
-@app.post("/auth/send-otp")
-def send_otp(data: SendOTPRequest):
-
-    phone = normalize_phone(data.phone)
-
-    # Generate secure 6-digit OTP
-    otp = f"{secrets.randbelow(1_000_000):06d}"
-
-    # Hash OTP before storing it
-    otp_hash = hashlib.sha256(
-        otp.encode("utf-8")
-    ).hexdigest()
-
-    expires_at = (
-        datetime.now(timezone.utc)
-        + timedelta(minutes=5)
-    )
-
-    # Store OTP
-    db.collection("otp_verifications") \
-        .document(phone) \
-        .set({
-            "phone": phone,
-            "otpHash": otp_hash,
-            "purpose": data.purpose,
-            "attempts": 0,
-            "expiresAt": expires_at,
-            "verified": False,
-            "createdAt": firestore.SERVER_TIMESTAMP,
-        })
-
-    # Send through 2Factor
-    url = "https://2factor.in/API/V1/OTP/SEND"
-
-    payload = {
-        "to": phone,
-        "template_name": "Kishanseva OTP",
-        "var1": otp,
-    }
-
-    headers = {
-        "X-API-Key": TWOFACTOR_API_KEY,
-        "Content-Type": "application/json",
-    }
-
-    try:
-
-        response = requests.post(
-            url,
-            json=payload,
-            headers=headers,
-            timeout=10,
-        )
-
-        result = response.json()
-
-        print("2FACTOR RESPONSE:", result)
-
-        if response.status_code >= 400:
-            raise Exception(
-                result.get("message")
-                or result.get("error")
-                or "2Factor request failed"
-            )
-
-        return {
-            "success": True,
-            "message": "OTP sent successfully",
-        }
-
-    except Exception as e:
-
-        print("2FACTOR OTP ERROR:", str(e))
-
-        # Do not leave an OTP active if SMS failed
-        db.collection("otp_verifications") \
-            .document(phone) \
-            .delete()
-
-        raise HTTPException(
-            status_code=502,
-            detail="Unable to send OTP",
-        )
-
 # ==============================
 # KISHANSEVA OTP AUTHENTICATION
 # ==============================
@@ -1190,6 +1106,7 @@ def normalize_phone(phone: str) -> str:
         return f"+{phone}"
 
     return f"+91{phone}"
+
 @app.post("/auth/send-otp")
 def send_otp(data: SendOTPRequest):
 
