@@ -39,6 +39,7 @@ from datetime import timedelta
 from datetime import datetime, timezone, timedelta
 import secrets
 
+
 # ==============================
 # KISHANSEVA OTP AUTHENTICATION
 # ==============================
@@ -1180,6 +1181,237 @@ def send_otp(data: SendOTPRequest):
             detail="Unable to send OTP",
         )
 
+class VerifyOTPRequest(BaseModel):
+    phone: str
+    otp: str
+    purpose: str = "signup"
+
+
+@app.post("/auth/verify-otp")
+def verify_otp(data: VerifyOTPRequest):
+
+    phone = normalize_phone(data.phone)
+
+    doc_ref = db.collection("otp_verifications").document(phone)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not found or expired",
+        )
+
+    otp_data = doc.to_dict()
+
+    if otp_data.get("purpose") != data.purpose:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP purpose",
+        )
+
+    if otp_data.get("verified") is True:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP already used",
+        )
+
+    expires_at = otp_data.get("expiresAt")
+
+    if expires_at and datetime.now(timezone.utc) > expires_at:
+        doc_ref.delete()
+
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expired",
+        )
+
+    attempts = int(otp_data.get("attempts", 0))
+
+    if attempts >= 5:
+        doc_ref.delete()
+
+        raise HTTPException(
+            status_code=429,
+            detail="Too many OTP attempts",
+        )
+
+    # Increment attempts
+    doc_ref.update({
+        "attempts": attempts + 1
+    })
+
+    submitted_hash = hashlib.sha256(
+        data.otp.strip().encode("utf-8")
+    ).hexdigest()
+
+    stored_hash = otp_data.get("otpHash")
+
+    if not hmac.compare_digest(
+        submitted_hash,
+        stored_hash or ""
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP",
+        )
+
+    # Mark verified
+    doc_ref.update({
+        "verified": True,
+        "verifiedAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    # -----------------------------------------
+# LOGIN: CREATE FIREBASE CUSTOM TOKEN
+# -----------------------------------------
+
+    if data.purpose == "login":
+
+        phone_without_country_code = phone
+
+        if phone_without_country_code.startswith("+91"):
+            phone_without_country_code = (
+                phone_without_country_code[3:]
+            )
+
+        farmer_query = (
+            db.collection("farmers")
+            .where(
+                "personal.phone",
+                "==",
+                phone_without_country_code
+            )
+            .limit(1)
+            .stream()
+        )
+
+        farmer_doc = next(farmer_query, None)
+
+        if farmer_doc is None:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found. Please sign up first.",
+            )
+
+        firebase_uid = farmer_doc.id
+
+        custom_token = auth.create_custom_token(
+            firebase_uid
+        )
+
+        return {
+            "success": True,
+            "message": "OTP verified successfully",
+            "phone": phone,
+            "customToken": custom_token.decode("utf-8"),
+        }
+
+
+# -----------------------------------------
+# SIGNUP
+# -----------------------------------------
+
+    return {
+        "success": True,
+        "message": "OTP verified successfully",
+        "phone": phone,
+    }
+
+class ResetPasswordRequest(BaseModel):
+    phone: str
+    otp: str
+    new_password: str
+
+
+@app.post("/auth/reset-password")
+def reset_password(data: ResetPasswordRequest):
+
+    phone = normalize_phone(data.phone)
+
+    if len(data.new_password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters",
+        )
+
+    # Get OTP record
+    doc_ref = db.collection(
+        "otp_verifications"
+    ).document(phone)
+
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not found or expired",
+        )
+
+    otp_data = doc.to_dict()
+
+    if otp_data.get("purpose") != "reset_password":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP purpose",
+        )
+
+    if otp_data.get("verified") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not verified",
+        )
+
+    # Find farmer
+    clean_phone = phone.replace("+91", "")
+
+    farmer_query = (
+        db.collection("farmers")
+        .where(
+            "personal.phone",
+            "==",
+            clean_phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    farmer_doc = next(
+        farmer_query,
+        None,
+    )
+
+    if farmer_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    firebase_uid = farmer_doc.id
+
+    try:
+        auth.update_user(
+            firebase_uid,
+            password=data.new_password,
+        )
+
+    except Exception as e:
+        print(
+            "PASSWORD RESET ERROR:",
+            e,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to reset password",
+        )
+
+    # Delete used OTP
+    doc_ref.delete()
+
+    return {
+        "success": True,
+        "message": "Password reset successfully",
+    }
     
 # ================= RAZORPAY =================
 
