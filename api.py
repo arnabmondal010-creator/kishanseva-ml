@@ -1112,6 +1112,14 @@ def send_otp(data: SendOTPRequest):
 
     phone = normalize_phone(data.phone)
 
+    # Generate secure 6-digit OTP
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+
+    # Hash OTP before storing it
+    otp_hash = hashlib.sha256(
+        otp.encode("utf-8")
+    ).hexdigest()
+
     expires_at = (
         datetime.now(timezone.utc)
         + timedelta(minutes=5)
@@ -1122,7 +1130,7 @@ def send_otp(data: SendOTPRequest):
         .document(phone) \
         .set({
             "phone": phone,
-            
+            "otpHash": otp_hash,
             "purpose": data.purpose,
             "attempts": 0,
             "expiresAt": expires_at,
@@ -1131,42 +1139,56 @@ def send_otp(data: SendOTPRequest):
         })
 
     # Send through 2Factor
-    url = (
-        f"https://2factor.in/API/V1/"
-        f"{TWOFACTOR_API_KEY}/SMS/"
-        f"{phone}/AUTOGEN/Kishanseva%20OTP"
+    url = "https://2factor.in/API/R1/"
+
+    message = (
+        f"{otp} is your OTP for Kishanseva. "
+        f"It is valid for 5 minutes. Do not share this OTP with anyone."
     )
 
-    response = requests.get(
-        url,
-        timeout=10,
-    )
+    payload = {
+        "module": "TRANS_SMS",
+        "apikey": TWOFACTOR_API_KEY,
+        "to": phone,
+        "from": "KSHSVA",
+        "msg": message,
+    }
 
-    result = response.json()
-
-    print("2FACTOR RESPONSE:", result)
-
-    if result.get("Status") != "Success":
-        raise Exception(
-            result.get("Details") or "2Factor request failed"
+    try:
+        response = requests.post(
+            url,
+            data=payload,
+            timeout=15,
         )
 
-    session_id = result.get("Details")
+        print("2FACTOR SMS STATUS:", response.status_code)
+        print("2FACTOR SMS RESPONSE:", response.text)
 
-    db.collection("otp_verifications").document(phone).set({
-        "phone": phone,
-        "purpose": data.purpose,
-        "sessionId": session_id,
-        "verified": False,
-        "createdAt": firestore.SERVER_TIMESTAMP,
-    })
+        result = response.json()
 
-    return {
-        "success": True,
-        "message": "OTP sent successfully",
-        "twofactor_status": result.get("Status"),
-        "twofactor_details": result.get("Details"),
-    }
+        if result.get("Status") != "Success":
+            raise Exception(
+                result.get("Details")
+                or "2Factor SMS failed"
+            )
+
+        return {
+            "success": True,
+            "message": "OTP sent successfully",
+        }
+
+    except Exception as e:
+
+        print("2FACTOR SMS ERROR:", str(e))
+
+        db.collection("otp_verifications") \
+            .document(phone) \
+            .delete()
+
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to send OTP",
+        )
 
     
 # ================= RAZORPAY =================
