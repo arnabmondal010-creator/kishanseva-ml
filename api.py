@@ -1138,27 +1138,15 @@ def send_otp(data: SendOTPRequest):
             "createdAt": firestore.SERVER_TIMESTAMP,
         })
 
-    # Send through 2Factor
-    url = "https://2factor.in/API/R1/"
-
-    message = (
-        f"{otp} is your OTP for Kishanseva. "
-        f"It is valid for 5 minutes. Do not share this OTP with anyone."
+    # Send OTP through 2Factor SMS OTP API
+    url = (
+        f"https://2factor.in/API/V1/"
+        f"{TWOFACTOR_API_KEY}/SMS/{phone}/{otp}"
     )
-
-    payload = {
-        "module": "TRANS_SMS",
-        "apikey": TWOFACTOR_API_KEY,
-        "templatename": "Kishanseva OTP",
-        "to": phone,
-        "from": "KSHSVA",
-        "msg": message,
-    }
 
     try:
         response = requests.post(
             url,
-            data=payload,
             timeout=15,
         )
 
@@ -1170,16 +1158,17 @@ def send_otp(data: SendOTPRequest):
         if result.get("Status") != "Success":
             raise Exception(
                 result.get("Details")
-                or "2Factor SMS failed"
+                or "2Factor SMS OTP failed"
             )
 
         return {
             "success": True,
             "message": "OTP sent successfully",
+            "twofactor_status": result.get("Status"),
+            "twofactor_details": result.get("Details"),
         }
 
     except Exception as e:
-
         print("2FACTOR SMS ERROR:", str(e))
 
         db.collection("otp_verifications") \
