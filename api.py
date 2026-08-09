@@ -1386,12 +1386,45 @@ def reset_password(data: ResetPasswordRequest):
             detail="User not found",
         )
 
-    firebase_uid = farmer_doc.id
+    farmer_data = farmer_doc.to_dict()
+
+    personal = farmer_data.get("personal", {})
+    real_email = personal.get("email")
+
+    if not real_email:
+        raise HTTPException(
+            status_code=400,
+            detail="No email associated with this account",
+        )
 
     try:
+    # First try the real email stored in Firestore
+        try:
+            firebase_user = auth.get_user_by_email(real_email)
+
+        except auth.UserNotFoundError:
+        # Fallback for older accounts
+            legacy_email = f"{phone}@kishanseva.com"
+
+            firebase_user = auth.get_user_by_email(
+                legacy_email
+            )
+
         auth.update_user(
-            firebase_uid,
+            firebase_user.uid,
             password=data.new_password,
+        )
+
+    except auth.UserNotFoundError:
+        print(
+            "FIREBASE AUTH USER NOT FOUND:",
+            real_email,
+            f"{phone}@kishanseva.com",
+        )
+
+        raise HTTPException(
+            status_code=404,
+            detail="Firebase Authentication account not found",
         )
 
     except Exception as e:
