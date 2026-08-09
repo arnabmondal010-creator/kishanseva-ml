@@ -1164,6 +1164,8 @@ def send_otp(data: SendOTPRequest):
     return {
         "success": True,
         "message": "OTP sent successfully",
+        "twofactor_status": result.get("Status"),
+        "twofactor_details": result.get("Details"),
     }
 
     
