@@ -1580,6 +1580,35 @@ def update_notification_settings(
         "success": True,
         "notifications_enabled": data.enabled,
     }
+@app.get("/auth/notification-settings")
+def get_notification_settings(
+    user=Depends(verify_firebase_token),
+):
+    user_id = user["uid"]
+
+    doc = (
+        db.collection("farmers")
+        .document(user_id)
+        .get()
+    )
+
+    if not doc.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Farmer not found",
+        )
+
+    data = doc.to_dict()
+
+    enabled = data.get(
+        "notifications_enabled",
+        True,
+    )
+
+    return {
+        "success": True,
+        "notifications_enabled": enabled,
+    }
 @app.post("/checkout/create")
 async def create_checkout(
     request: CreateCheckoutRequest,
@@ -5887,21 +5916,50 @@ def notify_topic(
     body: str,
     lang: str = "en",
 ):
-
-    message = messaging.Message(
-        notification=messaging.Notification(
-            title=title,
-            body=body,
-        ),
-
-        topic=f"alerts_{lang}",
+    users = (
+        db.collection("farmers")
+        .where("lang", "==", lang)
+        .stream()
     )
 
-    messaging.send(message)
+    sent = 0
+
+    for user in users:
+        data = user.to_dict()
+
+        # Respect notification switch
+        if data.get("notifications_enabled", True) is not True:
+            continue
+
+        token = data.get("fcm_token")
+
+        if not token:
+            continue
+
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                token=token,
+            )
+
+            messaging.send(message)
+            sent += 1
+
+        except Exception as e:
+            if "Requested entity was not found" in str(e):
+                db.collection("farmers").document(user.id).update({
+                    "fcm_token": None
+                })
+            else:
+                print("Notification error:", e)
 
     return {
         "success": True,
-        "topic": f"alerts_{lang}",
+        "sent": sent,
+        "lang": lang,
     }
 
 
@@ -5910,39 +5968,68 @@ def notify_topic(
 @app.get("/daily-reminder")
 def daily_reminder():
 
-    langs = ["en", "bn", "hi"]
+    users = db.collection("farmers").stream()
 
-    for lang in langs:
+    sent = 0
+
+    for user in users:
+        data = user.to_dict()
+
+        # Respect notification setting
+        if data.get("notifications_enabled", True) is not True:
+            continue
+
+        token = data.get("fcm_token")
+
+        if not token:
+            continue
+
+        lang = data.get("lang", "en")
 
         if lang == "bn":
-
             title = "দৈনিক অনুস্মারক 🌱"
             body = "আজ আপনার ফসলের অবস্থা দেখুন"
 
         elif lang == "hi":
-
             title = "दैनिक अनुस्मारक 🌱"
             body = "आज अपनी फसल की स्थिति देखें"
 
         else:
-
             title = "Daily Reminder 🌱"
             body = "Check your crop health today"
 
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                token=token,
+            )
 
-            topic=f"alerts_{lang}",
-        )
+            messaging.send(message)
 
-        messaging.send(message)
+            sent += 1
 
-    return {"sent": True}
+        except Exception as e:
 
+            if "Requested entity was not found" in str(e):
 
+                db.collection("farmers") \
+                    .document(user.id) \
+                    .update({
+                        "fcm_token": None
+                    })
+
+                print("🧹 Removed invalid token")
+
+            else:
+                print("❌ Daily notification error:", e)
+
+    return {
+        "success": True,
+        "sent": sent,
+    }
 # ================= HELPERS =================
 
 import requests
