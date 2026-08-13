@@ -5614,6 +5614,7 @@ async def verify_pickup_otp(
             status_code=400,
             detail="OTP required",
         )
+
     order_ref = (
         db.collection("commerce_orders")
         .document(request.orderId)
@@ -5627,7 +5628,8 @@ async def verify_pickup_otp(
             detail="Order not found",
         )
 
-    order = order_doc.to_dict()
+    order = order_doc.to_dict() or {}
+
     if order.get("paymentStatus") != "paid":
         raise HTTPException(
             status_code=400,
@@ -5648,6 +5650,7 @@ async def verify_pickup_otp(
             status_code=400,
             detail="Pickup already verified",
         )
+
     stored_otp = str(
         order.get("verificationOtp", "")
     ).strip()
@@ -5659,9 +5662,9 @@ async def verify_pickup_otp(
             status_code=400,
             detail="Invalid Pickup OTP",
         )
-    
 
     transaction = db.transaction()
+
     @firestore.transactional
     def complete_order(transaction):
         fresh_order = transaction.get(order_ref)
@@ -5669,34 +5672,136 @@ async def verify_pickup_otp(
         if hasattr(fresh_order, "__next__"):
             fresh_order = next(fresh_order)
 
-        
-
-       
-
         if not fresh_order.exists:
             raise Exception("Order not found")
 
-       
-        
-        fresh = fresh_order.to_dict()
+        fresh = fresh_order.to_dict() or {}
+
+        # Idempotency: never release the same settlement twice.
+        if fresh.get("settlementReleased") is True:
+            return {
+                "success": True,
+                "alreadyProcessed": True,
+                "orderId": request.orderId,
+                "orderStatus": "completed",
+            }
+
+        order_type = str(
+            fresh.get("type", "")
+        ).strip().lower()
+
+        # Cart orders have one commerce_order_items document
+        # per seller/product. Auction and Instant Buy orders
+        # are stored directly in commerce_orders.
         order_items = list(
-
             db.collection("commerce_order_items")
-
             .where("orderId", "==", request.orderId)
-
             .stream()
-
         )
-        seller_docs = {}
 
-        for item_doc in order_items:
+        settlement_rows = []
 
-            item = item_doc.to_dict()
+        if order_items:
+            # -------------------------------
+            # CART SETTLEMENT
+            # -------------------------------
+            seller_refs = {}
+
+            for item_doc in order_items:
+                item = item_doc.to_dict() or {}
+
+                seller_id = str(
+                    item.get("sellerId", "")
+                ).strip()
+
+                if not seller_id:
+                    raise Exception(
+                        "Seller ID missing from order item"
+                    )
+
+                seller_ref = (
+                    db.collection("commerce_users")
+                    .document(seller_id)
+                )
+
+                seller_doc = transaction.get(seller_ref)
+
+                if hasattr(seller_doc, "__next__"):
+                    seller_doc = next(seller_doc)
+
+                if not seller_doc.exists:
+                    raise Exception(
+                        f"Seller account not found: {seller_id}"
+                    )
+
+                seller_refs[seller_id] = seller_ref
+
+                gross_amount = float(
+                    item.get("subtotal", 0) or 0
+                )
+
+                commission = float(
+                    item.get("platformCommission", 0) or 0
+                )
+
+                if commission < 0:
+                    raise Exception(
+                        "Invalid platform commission"
+                    )
+
+                seller_payout_value = item.get(
+                    "sellerPayout"
+                )
+
+                if seller_payout_value is None:
+                    seller_payout = round(
+                        gross_amount - commission,
+                        2,
+                    )
+                else:
+                    seller_payout = float(
+                        seller_payout_value
+                    )
+
+                if seller_payout < 0:
+                    raise Exception(
+                        "Invalid seller payout"
+                    )
+
+                settlement_rows.append({
+                    "item_doc": item_doc,
+                    "item": item,
+                    "seller_ref": seller_refs[seller_id],
+                    "seller_id": seller_id,
+                    "gross_amount": gross_amount,
+                    "commission": commission,
+                    "seller_payout": seller_payout,
+                })
+
+        else:
+            # -------------------------------
+            # AUCTION / INSTANT BUY SETTLEMENT
+            # -------------------------------
+            seller_id = str(
+                fresh.get("sellerId", "")
+            ).strip()
+
+            if not seller_id:
+                raise Exception(
+                    "Seller ID missing from order"
+                )
+
+            if order_type not in [
+                "auction",
+                "instant_buy",
+            ]:
+                raise Exception(
+                    "No settlement items found for order"
+                )
 
             seller_ref = (
                 db.collection("commerce_users")
-                .document(item["sellerId"])
+                .document(seller_id)
             )
 
             seller_doc = transaction.get(seller_ref)
@@ -5705,220 +5810,267 @@ async def verify_pickup_otp(
                 seller_doc = next(seller_doc)
 
             if not seller_doc.exists:
-                raise Exception("Seller not found")
-
-            seller_docs[item["sellerId"]] = seller_ref
-
-        if fresh.get("settlementReleased"):
-
-            return {
-
-                "success": True,
-
-                "alreadyProcessed": True,
-
-                "orderId": request.orderId,
-
-                "orderStatus": "completed",
-
-            }
-        
-        transaction.update(
-            order_ref,
-            {
-                "otpVerified": True,
-                "pickupOtpVerified": True,
-                "pickupOtpVerifiedAt": firestore.SERVER_TIMESTAMP,
-                "orderStatus": "completed",
-                "completedAt": firestore.SERVER_TIMESTAMP,
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-                "buyerNote": "",
-                "buyerNoteStatus": "none",
-                "buyerNoteResponse": "",
-                "settlementReleased": True,
-                "settlementStatus": "released",
-                "settlementReleasedAt": firestore.SERVER_TIMESTAMP,
-            },
-        )
-        for item_doc in order_items:
-
-            item = item_doc.to_dict()
-
-            seller_ref = seller_docs[item["sellerId"]]
-
-            order_type = str(
-                item.get("type", "cart")
-            ).lower()
-
-            if order_type == "cart":
-                gross_amount = float(
-                    item.get("subtotal", 0)
+                raise Exception(
+                    "Seller account not found"
                 )
 
-            elif order_type in (
-                "auction",
-                "instant_buy",
-            ):
-                gross_amount = float(
-                    item.get(
-                        "orderAmount",
-                        item.get(
-                            "acceptedAmount",
-                            item.get("amount", 0)
-                        )
-                    )
-                )
-
-            else:
-                gross_amount = float(
-                    item.get(
-                        "orderAmount",
-                        item.get(
-                            "subtotal",
-                            item.get("amount", 0)
-                        )
-                    )
-                )
-
-            existing_payout = item.get(
-                "sellerPayout"
+            # These order types store their sale amount
+            # directly on commerce_orders.
+            gross_amount = float(
+                fresh.get(
+                    "orderAmount",
+                    fresh.get(
+                        "acceptedAmount",
+                        fresh.get("amount", 0),
+                    ),
+                ) or 0
             )
 
-            existing_commission = item.get(
+            if gross_amount <= 0:
+                raise Exception(
+                    "Invalid order amount"
+                )
+
+            existing_commission = fresh.get(
                 "platformCommission"
             )
 
-            if existing_payout is not None:
-                seller_amount = float(
-                    existing_payout
-                    )
-
-            elif existing_commission is not None:
-                seller_amount = round(
-                    gross_amount -
-                    float(existing_commission),
-                    2,
-                )
-
-            else:
-                platform_commission = round(
+            if existing_commission is None:
+                commission = round(
                     gross_amount * 0.07,
                     2,
                 )
-
-                seller_amount = round(
-                    gross_amount -
-                    platform_commission,
-                    2,
+            else:
+                commission = float(
+                    existing_commission
                 )
 
-            transaction.update(
-
-                seller_ref,
-
-                {
-
-                    "walletBalance": firestore.Increment(
-                        seller_amount,
-                    ),
-
-                    "totalRevenue": firestore.Increment(
-                        seller_amount,
-                    ),
-
-                    "totalSales": firestore.Increment(
-                        1,
-                    ),
-
-                    "updatedAt": firestore.SERVER_TIMESTAMP,
-
-                },
-
+            existing_payout = fresh.get(
+                "sellerPayout"
             )
+
+            if existing_payout is None:
+                seller_payout = round(
+                    gross_amount - commission,
+                    2,
+                )
+            else:
+                seller_payout = float(
+                    existing_payout
+                )
+
+            if seller_payout < 0:
+                raise Exception(
+                    "Invalid seller payout"
+                )
+
+            settlement_rows.append({
+                "item_doc": None,
+                "item": fresh,
+                "seller_ref": seller_ref,
+                "seller_id": seller_id,
+                "gross_amount": gross_amount,
+                "commission": commission,
+                "seller_payout": seller_payout,
+            })
+
+        if not settlement_rows:
+            raise Exception(
+                "Nothing available to settle"
+            )
+
+        # -------------------------------
+        # RELEASE ORDER
+        # -------------------------------
+        order_update = {
+            "otpVerified": True,
+            "pickupOtpVerified": True,
+            "pickupOtpVerifiedAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "verificationOtp": None,
+
+            "orderStatus": "completed",
+            "completedAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "buyerNote": "",
+            "buyerNoteStatus": "none",
+            "buyerNoteResponse": "",
+
+            "settlementReleased": True,
+            "settlementStatus": "released",
+            "settlementReleasedAt":
+                firestore.SERVER_TIMESTAMP,
+        }
+
+        # Store the calculated settlement on single-item
+        # order types. Cart orders keep settlement per item.
+        if not order_items:
+            order_update.update({
+                "platformCommission":
+                    settlement_rows[0]["commission"],
+                "sellerPayout":
+                    settlement_rows[0]["seller_payout"],
+            })
+
+        transaction.update(
+            order_ref,
+            order_update,
+        )
+
+        # -------------------------------
+        # RELEASE SELLER MONEY
+        # -------------------------------
+        for row in settlement_rows:
+            item = row["item"]
+            seller_ref = row["seller_ref"]
+            seller_amount = row["seller_payout"]
+
+            # Seller revenue is represented by walletBalance.
+            # Do not derive it from totalEarnings/totalRevenue.
+            transaction.update(
+                seller_ref,
+                {
+                    "walletBalance":
+                        firestore.Increment(
+                            seller_amount
+                        ),
+
+                    "totalSales":
+                        firestore.Increment(1),
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                },
+            )
+
             wallet_tx_ref = (
                 db.collection("wallet_transactions")
                 .document()
             )
 
             transaction.set(
-
                 wallet_tx_ref,
-
                 {
+                    "transactionId":
+                        wallet_tx_ref.id,
 
-                    "transactionId": wallet_tx_ref.id,
+                    "userId":
+                        row["seller_id"],
 
-                    "userId": item["sellerId"],
+                    "orderId":
+                        request.orderId,
 
-                    "orderId": request.orderId,
+                    "buyerId":
+                        fresh.get("buyerId"),
 
-                    "buyerId": fresh["buyerId"],
+                    "cropName":
+                        item.get(
+                            "productName",
+                            fresh.get(
+                                "cropName",
+                                "",
+                            ),
+                        ),
 
-                    "cropName": item["productName"],
+                    "subtotal":
+                        row["gross_amount"],
 
-                     "subtotal": gross_amount,
+                    "deliveryCharge":
+                        float(
+                            item.get(
+                                "deliveryCharge",
+                                0,
+                            ) or 0
+                        ),
 
-                    "deliveryCharge": float(
-                        item.get("deliveryCharge", 0),
-                    ),
+                    "platformCommissionRate":
+                        float(
+                            item.get(
+                                "platformCommissionRate",
+                                7,
+                            ) or 7
+                        ),
 
-                    "platformCommissionRate": float(
-                        item.get("platformCommissionRate", 7),
-                    ),
+                    "platformCommission":
+                        row["commission"],
 
-                    "platformCommission": float(
-                        item.get("platformCommission", 0),
-                    ),
+                    "sellerPayout":
+                        seller_amount,
 
-                    "sellerPayout": seller_amount,
+                    "amount":
+                        seller_amount,
 
-                    "amount": seller_amount,
+                    "type":
+                        "order_credit",
 
-                    "type": "order_credit",
+                    "status":
+                        "completed",
 
-                    "status": "completed",
+                    "createdAt":
+                        firestore.SERVER_TIMESTAMP,
 
-                    "createdAt": firestore.SERVER_TIMESTAMP,
-
-                    "paymentId": fresh["paymentId"],
-
-                },
-
-            )
-            transaction.update(
-
-                item_doc.reference,
-
-                {
-
-                    "orderStatus": "completed",
-
-                    "paymentStatus": "paid",
-
-                    "settlementStatus": "released",
-
-                    "settlementReleased": True,
-
-                    "completedAt": firestore.SERVER_TIMESTAMP,
-
-                    "updatedAt": firestore.SERVER_TIMESTAMP,
-
-                    "sellerPaid": True,
-
-                    "sellerPaidAmount": seller_amount,
-
-                    "sellerPaidAt": firestore.SERVER_TIMESTAMP,
-
+                    "paymentId":
+                        fresh.get("paymentId"),
                 },
             )
+
+            # Cart item status is updated individually.
+            if row["item_doc"] is not None:
+                transaction.update(
+                    row["item_doc"].reference,
+                    {
+                        "orderStatus":
+                            "completed",
+
+                        "paymentStatus":
+                            "paid",
+
+                        "settlementStatus":
+                            "released",
+
+                        "settlementReleased":
+                            True,
+
+                        "completedAt":
+                            firestore.SERVER_TIMESTAMP,
+
+                        "updatedAt":
+                            firestore.SERVER_TIMESTAMP,
+
+                        "sellerPaid":
+                            True,
+
+                        "sellerPaidAmount":
+                            seller_amount,
+
+                        "sellerPaidAt":
+                            firestore.SERVER_TIMESTAMP,
+                    },
+                )
+
         return {
             "success": True,
             "orderId": request.orderId,
             "orderStatus": "completed",
         }
-    result = complete_order(transaction)
 
-    return result
+    try:
+        return complete_order(transaction)
+    except Exception as e:
+        print(
+            "VERIFY PICKUP OTP / SETTLEMENT ERROR:",
+            request.orderId,
+            str(e),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Order completion failed",
+        )
 # ================= NOTIFY ALL =================
 
 @app.post("/notify-all")
