@@ -5746,12 +5746,71 @@ async def verify_pickup_otp(
 
             seller_ref = seller_docs[item["sellerId"]]
 
-            seller_amount = float(
-                item.get(
-                    "sellerPayout",
-                    item["subtotal"],
+            order_type = str(
+                item.get("type", "cart")
+            ).lower()
+
+            if order_type == "cart":
+                gross_amount = float(
+                    item.get("subtotal", 0)
                 )
+
+            elif order_type in (
+                "auction",
+                "instant_buy",
+            ):
+                gross_amount = float(
+                    item.get(
+                        "orderAmount",
+                        item.get(
+                            "acceptedAmount",
+                            item.get("amount", 0)
+                        )
+                    )
+                )
+
+            else:
+                gross_amount = float(
+                    item.get(
+                        "orderAmount",
+                        item.get(
+                            "subtotal",
+                            item.get("amount", 0)
+                        )
+                    )
+                )
+
+            existing_payout = item.get(
+                "sellerPayout"
             )
+
+            existing_commission = item.get(
+                "platformCommission"
+            )
+
+            if existing_payout is not None:
+                seller_amount = float(
+                    existing_payout
+                    )
+
+            elif existing_commission is not None:
+                seller_amount = round(
+                    gross_amount -
+                    float(existing_commission),
+                    2,
+                )
+
+            else:
+                platform_commission = round(
+                    gross_amount * 0.07,
+                    2,
+                )
+
+                seller_amount = round(
+                    gross_amount -
+                    platform_commission,
+                    2,
+                )
 
             transaction.update(
 
@@ -5797,7 +5856,7 @@ async def verify_pickup_otp(
 
                     "cropName": item["productName"],
 
-                    "subtotal": float(item["subtotal"]),
+                     "subtotal": gross_amount,
 
                     "deliveryCharge": float(
                         item.get("deliveryCharge", 0),
