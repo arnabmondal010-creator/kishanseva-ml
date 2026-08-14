@@ -1059,6 +1059,93 @@ db = firestore.Client(
     credentials=credentials_fs,
     project=firebase_key["project_id"],
 )
+def send_new_order_notification(
+    seller_id: str,
+    order_id: str,
+    order_type: str = "order",
+    product_name: str = "New order",
+):
+    """
+    Sends a new-order FCM notification to the seller.
+
+    Notification failure must never fail the actual order.
+    """
+
+    try:
+        seller_ref = (
+            db.collection("commerce_users")
+            .document(seller_id)
+        )
+
+        seller_doc = seller_ref.get()
+
+        if not seller_doc.exists:
+            print(
+                f"FCM: seller not found: {seller_id}"
+            )
+            return False
+
+        seller_data = seller_doc.to_dict() or {}
+
+        fcm_token = str(
+            seller_data.get("fcmToken", "")
+        ).strip()
+
+        if not fcm_token:
+            print(
+                f"FCM: no FCM token for seller: {seller_id}"
+            )
+            return False
+
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title="New Order",
+                body=(
+                    f"New order received for "
+                    f"{product_name}."
+                ),
+            ),
+
+            data={
+                "type": "new_order",
+                "orderId": str(order_id),
+                "orderType": str(order_type),
+                "title": "New Order",
+                "body": (
+                    f"New order received for "
+                    f"{product_name}."
+                ),
+            },
+
+            token=fcm_token,
+
+            android=messaging.AndroidConfig(
+                priority="high",
+            ),
+        )
+
+        response = messaging.send(message)
+
+        print(
+            f"FCM NEW ORDER SENT | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"type={order_type} | "
+            f"message={response}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            f"FCM NEW ORDER ERROR | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"error={e}"
+        )
+
+        return False
+    
 TWOFACTOR_API_KEY = os.getenv("TWOFACTOR_API_KEY")
 
 if not TWOFACTOR_API_KEY:
@@ -1082,31 +1169,8 @@ def normalize_phone(phone: str) -> str:
     return f"+91{phone}"
 
 
-# ==============================
-# KISHANSEVA OTP AUTHENTICATION
-# ==============================
-
-TWOFACTOR_API_KEY = os.getenv("TWOFACTOR_API_KEY")
-
-if not TWOFACTOR_API_KEY:
-    raise Exception("TWOFACTOR_API_KEY not configured")
 
 
-class SendOTPRequest(BaseModel):
-    phone: str
-    purpose: str = "signup"
-
-
-def normalize_phone(phone: str) -> str:
-    phone = phone.strip().replace(" ", "").replace("-", "")
-
-    if phone.startswith("+91"):
-        return phone
-
-    if phone.startswith("91") and len(phone) == 12:
-        return f"+{phone}"
-
-    return f"+91{phone}"
 
 @app.post("/auth/send-otp")
 def send_otp(data: SendOTPRequest):
@@ -3463,6 +3527,18 @@ def finalize_instant_buy(
 
             "orderId":
                 order_ref.id,
+
+            "sellerId":
+                current_listing.get(
+                    "sellerId",
+                    "",
+                ),
+
+            "cropName":
+                current_listing.get(
+                    "cropName",
+                    "your product",
+                ),
         }
 
     # ==========================================
@@ -3474,7 +3550,56 @@ def finalize_instant_buy(
             transaction
         )
     )
+   # ============================================================
+# NEW ORDER FCM NOTIFICATION - INSTANT BUY
+# ============================================================
 
+    if not result["alreadyProcessed"]:
+
+        try:
+
+            instant_buy_order_id = result.get(
+                "orderId"
+            )
+
+            instant_buy_seller_id = str(
+                result.get(
+                    "sellerId",
+                    "",
+                )
+            ).strip()
+
+            instant_buy_crop_name = str(
+                result.get(
+                    "cropName",
+                    "your product",
+                )
+            ).strip() or "your product"
+
+            if (
+                instant_buy_order_id
+                and instant_buy_seller_id
+            ):
+
+                send_new_order_notification(
+                    seller_id=
+                        instant_buy_seller_id,
+
+                    order_id=
+                        instant_buy_order_id,
+
+                    order_type=
+                        "instant_buy",
+
+                    product_name=
+                        instant_buy_crop_name,
+                )
+
+        except Exception as e:
+
+            print(
+                f"INSTANT BUY NEW ORDER FCM ERROR: {e}"
+            )
     # ==========================================
     # 10. UPDATE ACTIVE BIDS AFTER TRANSACTION
     # ==========================================
@@ -3482,6 +3607,7 @@ def finalize_instant_buy(
     if not result[
         "alreadyProcessed"
     ]:
+        
 
         active_bids = (
             db.collection(
@@ -3926,6 +4052,65 @@ def finalize_cart(
             "orderStatus": "confirmed",
         }
     result = complete_checkout(transaction)
+    # ============================================================
+# NEW ORDER FCM NOTIFICATIONS
+# ============================================================
+
+    try:
+        checkout_order_id = result.get("orderId")
+
+        if checkout_order_id:
+            order_items = list(
+                db.collection("commerce_order_items")
+                .where(
+                    "orderId",
+                    "==",
+                    checkout_order_id,
+                )
+                .stream()
+            )
+
+            notified_sellers = set()
+
+            for item_doc in order_items:
+                item_data = item_doc.to_dict() or {}
+
+                seller_id = str(
+                    item_data.get("sellerId", "")
+                ).strip()
+
+                if not seller_id:
+                    continue
+
+            # One notification per seller,
+            # even if the cart contains multiple
+            # products from the same seller.
+                if seller_id in notified_sellers:
+                    continue
+
+                notified_sellers.add(seller_id)
+
+                product_name = str(
+                    item_data.get(
+                        "productName",
+                        "your product",
+                    )
+                ).strip()
+
+                send_new_order_notification(
+                    seller_id=seller_id,
+                    order_id=checkout_order_id,
+                    order_type="cart",
+                    product_name=product_name or "your product",
+                )
+
+    except Exception as e:
+        # Notification failure must NEVER
+        # make a successful order fail.
+        print(
+            f"CART NEW ORDER FCM ERROR: {e}"
+        )
+
 
     return result
 
