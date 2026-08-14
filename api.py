@@ -1437,6 +1437,24 @@ def verify_otp(data: VerifyOTPRequest):
                 "utf-8"
             ),
         }
+        # -----------------------------------------
+    # MERCHANT PASSWORD RESET
+    # -----------------------------------------
+
+    if data.purpose == "merchant_reset_password":
+
+        doc_ref.update({
+            "verified": True,
+            "verifiedAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+        return {
+            "success": True,
+            "message":
+                "Merchant reset OTP verified successfully",
+            "phone": phone,
+        }
 
 
 # -----------------------------------------
@@ -1450,6 +1468,11 @@ def verify_otp(data: VerifyOTPRequest):
     }
 
 class ResetPasswordRequest(BaseModel):
+    phone: str
+    otp: str
+    new_password: str
+
+class MerchantResetPasswordRequest(BaseModel):
     phone: str
     otp: str
     new_password: str
@@ -1643,6 +1666,164 @@ def reset_password(data: ResetPasswordRequest):
     return {
         "success": True,
         "message": "Password reset successfully",
+    }
+
+@app.post("/auth/merchant-reset-password")
+def merchant_reset_password(
+    data: MerchantResetPasswordRequest,
+):
+
+    phone = normalize_phone(
+        data.phone
+    )
+
+    if len(data.new_password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters",
+        )
+
+    # -----------------------------------------
+    # GET OTP RECORD
+    # -----------------------------------------
+
+    doc_ref = (
+        db.collection(
+            "otp_verifications"
+        )
+        .document(phone)
+    )
+
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not found or expired",
+        )
+
+    otp_data = doc.to_dict()
+
+    # -----------------------------------------
+    # VERIFY PURPOSE
+    # -----------------------------------------
+
+    if otp_data.get(
+        "purpose"
+    ) != "merchant_reset_password":
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP purpose",
+        )
+
+    # -----------------------------------------
+    # VERIFY OTP
+    # -----------------------------------------
+
+    if otp_data.get(
+        "verified"
+    ) is not True:
+
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not verified",
+        )
+
+    # -----------------------------------------
+    # FIND MERCHANT
+    # -----------------------------------------
+
+    clean_phone = phone.replace(
+        "+91",
+        "",
+    )
+
+    merchant_query = (
+        db.collection(
+            "commerce_users"
+        )
+        .where(
+            "phone",
+            "==",
+            clean_phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    merchant_doc = next(
+        merchant_query,
+        None,
+    )
+
+    if merchant_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Merchant account not found",
+        )
+
+    merchant_data = (
+        merchant_doc.to_dict()
+        or {}
+    )
+
+    # -----------------------------------------
+    # GET FIREBASE UID
+    # -----------------------------------------
+
+    firebase_uid = str(
+        merchant_data.get(
+            "uid",
+            merchant_doc.id,
+        )
+    ).strip()
+
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=400,
+            detail="Merchant Firebase UID not found",
+        )
+
+    # -----------------------------------------
+    # UPDATE FIREBASE PASSWORD
+    # -----------------------------------------
+
+    try:
+
+        auth.update_user(
+            firebase_uid,
+            password=data.new_password,
+        )
+
+    except auth.UserNotFoundError:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Firebase Authentication account not found",
+        )
+
+    except Exception as e:
+
+        print(
+            "MERCHANT PASSWORD RESET ERROR:",
+            e,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to reset merchant password",
+        )
+
+    # -----------------------------------------
+    # DELETE USED OTP
+    # -----------------------------------------
+
+    doc_ref.delete()
+
+    return {
+        "success": True,
+        "message": "Merchant password reset successfully",
     }
 
 
