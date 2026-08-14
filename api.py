@@ -1370,6 +1370,74 @@ def verify_otp(data: VerifyOTPRequest):
             "customToken": custom_token.decode("utf-8"),
         }
 
+     # -----------------------------------------
+    # MERCHANT LOGIN: CREATE FIREBASE CUSTOM TOKEN
+    # -----------------------------------------
+
+    if data.purpose == "merchant_login":
+
+        phone_without_country_code = phone
+
+        if phone_without_country_code.startswith("+91"):
+            phone_without_country_code = (
+                phone_without_country_code[3:]
+            )
+
+        merchant_query = (
+            db.collection("commerce_users")
+            .where(
+                "phone",
+                "==",
+                phone_without_country_code,
+            )
+            .limit(1)
+            .stream()
+        )
+
+        merchant_doc = next(
+            merchant_query,
+            None,
+        )
+
+        if merchant_doc is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Merchant account not found. Please sign up first.",
+            )
+
+        merchant_data = (
+            merchant_doc.to_dict()
+            or {}
+        )
+
+        firebase_uid = str(
+            merchant_data.get(
+                "uid",
+                merchant_doc.id,
+            )
+        ).strip()
+
+        if not firebase_uid:
+            raise HTTPException(
+                status_code=400,
+                detail="Merchant Firebase UID not found.",
+            )
+
+        custom_token = auth.create_custom_token(
+            firebase_uid
+        )
+
+        return {
+            "success": True,
+            "message": "Merchant OTP verified successfully",
+            "phone": phone,
+            "userType": "merchant",
+            "uid": firebase_uid,
+            "customToken": custom_token.decode(
+                "utf-8"
+            ),
+        }
+
 
 # -----------------------------------------
 # SIGNUP
@@ -1385,6 +1453,73 @@ class ResetPasswordRequest(BaseModel):
     phone: str
     otp: str
     new_password: str
+
+# -----------------------------------------
+# MERCHANT LOGIN - GET EMAIL BY PHONE
+# -----------------------------------------
+
+class MerchantLoginRequest(BaseModel):
+    phone: str
+
+
+@app.post("/auth/merchant-login-email")
+def merchant_login_email(
+    data: MerchantLoginRequest,
+):
+
+    phone = normalize_phone(
+        data.phone
+    )
+
+    clean_phone = phone.replace(
+        "+91",
+        "",
+    )
+
+    merchant_query = (
+        db.collection("commerce_users")
+        .where(
+            "phone",
+            "==",
+            clean_phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    merchant_doc = next(
+        merchant_query,
+        None,
+    )
+
+    if merchant_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Merchant account not found",
+        )
+
+    merchant_data = (
+        merchant_doc.to_dict()
+        or {}
+    )
+
+    email = str(
+        merchant_data.get(
+            "email",
+            "",
+        )
+    ).strip()
+
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="No email associated with this merchant account",
+        )
+
+    return {
+        "success": True,
+        "email": email,
+    }
 
 
 @app.post("/auth/reset-password")
