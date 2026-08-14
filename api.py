@@ -1315,6 +1315,134 @@ def send_otp(data: SendOTPRequest):
         "twofactor_details": result.get("Details"),
     }
 
+def merchant_auth_email(phone: str) -> str:
+    """
+    Generate the internal Firebase Authentication email
+    used exclusively for merchant accounts.
+
+    The merchant's real email remains stored in
+    commerce_users.email.
+    """
+
+    phone = str(phone).strip()
+
+    # Keep only digits
+    clean_phone = "".join(
+        ch for ch in phone
+        if ch.isdigit()
+    )
+
+    # Remove country code if supplied
+    if clean_phone.startswith("91") and len(clean_phone) == 12:
+        clean_phone = clean_phone[2:]
+
+    if len(clean_phone) != 10:
+        raise ValueError(
+            "Invalid merchant phone number"
+        )
+
+    return (
+        f"merchant_{clean_phone}"
+        "@auth.kishanseva.internal"
+    )
+
+class MerchantAvailabilityRequest(BaseModel):
+    email: str
+    phone: str
+
+
+@app.post("/auth/check-merchant-availability")
+def check_merchant_availability(
+    data: MerchantAvailabilityRequest,
+):
+
+    email = data.email.strip().lower()
+    phone = normalize_phone(data.phone)
+
+    # Remove +91 for Firestore storage/search
+    clean_phone = phone
+
+    if clean_phone.startswith("+91"):
+        clean_phone = clean_phone[3:]
+
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="Email is required",
+        )
+
+    if len(clean_phone) != 10 or not clean_phone.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid mobile number",
+        )
+
+    # =====================================================
+    # CHECK REAL EMAIL IN commerce_users
+    # =====================================================
+
+    email_query = (
+        db.collection("commerce_users")
+        .where(
+            "email",
+            "==",
+            email,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    email_doc = next(
+        email_query,
+        None,
+    )
+
+    if email_doc is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This email is already registered as a merchant.",
+        )
+
+    # =====================================================
+    # CHECK PHONE IN commerce_users
+    # =====================================================
+
+    phone_query = (
+        db.collection("commerce_users")
+        .where(
+            "phone",
+            "==",
+            clean_phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    phone_doc = next(
+        phone_query,
+        None,
+    )
+
+    if phone_doc is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This mobile number is already registered as a merchant.",
+        )
+
+    # =====================================================
+    # GENERATE INTERNAL FIREBASE AUTH EMAIL
+    # =====================================================
+
+    internal_auth_email = merchant_auth_email(
+        clean_phone
+    )
+
+    return {
+        "success": True,
+        "available": True,
+        "authEmail": internal_auth_email,
+    }
+
 
 @app.post("/auth/verify-otp")
 def verify_otp(data: VerifyOTPRequest):
