@@ -1146,6 +1146,10 @@ def send_new_order_notification(
 
         return False
     
+# =========================================================
+# OTP AUTHENTICATION
+# =========================================================
+
 TWOFACTOR_API_KEY = os.getenv("TWOFACTOR_API_KEY")
 
 if not TWOFACTOR_API_KEY:
@@ -1157,8 +1161,19 @@ class SendOTPRequest(BaseModel):
     purpose: str = "signup"
 
 
+class VerifyOTPRequest(BaseModel):
+    phone: str
+    otp: str
+    purpose: str = "signup"
+
+
 def normalize_phone(phone: str) -> str:
-    phone = phone.strip().replace(" ", "").replace("-", "")
+    phone = (
+        phone
+        .strip()
+        .replace(" ", "")
+        .replace("-", "")
+    )
 
     if phone.startswith("+91"):
         return phone
@@ -1169,18 +1184,50 @@ def normalize_phone(phone: str) -> str:
     return f"+91{phone}"
 
 
+def otp_document_id(phone: str, purpose: str) -> str:
+    """
+    OTP is isolated by BOTH phone and purpose.
 
+    Examples:
+        signup_+919876543210
+        merchant_login_+919876543210
+        merchant_reset_password_+919876543210
+    """
+    clean_purpose = (
+        purpose
+        .strip()
+        .lower()
+        .replace("/", "_")
+        .replace(" ", "_")
+    )
+
+    return f"{clean_purpose}_{phone}"
 
 
 @app.post("/auth/send-otp")
 def send_otp(data: SendOTPRequest):
 
     phone = normalize_phone(data.phone)
+    purpose = data.purpose.strip().lower()
 
-    # Generate secure 6-digit OTP
+    if not phone:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number",
+        )
+
+    if not purpose:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP purpose",
+        )
+
+    # -----------------------------------------------------
+    # GENERATE OTP
+    # -----------------------------------------------------
+
     otp = f"{secrets.randbelow(1_000_000):06d}"
 
-    # Hash OTP before storing it
     otp_hash = hashlib.sha256(
         otp.encode("utf-8")
     ).hexdigest()
@@ -1190,20 +1237,10 @@ def send_otp(data: SendOTPRequest):
         + timedelta(minutes=5)
     )
 
-    # Store OTP
-    db.collection("otp_verifications") \
-        .document(phone) \
-        .set({
-            "phone": phone,
-            "otpHash": otp_hash,
-            "purpose": data.purpose,
-            "attempts": 0,
-            "expiresAt": expires_at,
-            "verified": False,
-            "createdAt": firestore.SERVER_TIMESTAMP,
-        })
+    # -----------------------------------------------------
+    # SEND OTP FIRST
+    # -----------------------------------------------------
 
-    # Send OTP through 2Factor SMS OTP API
     url = (
         f"https://2factor.in/API/V1/"
         f"{TWOFACTOR_API_KEY}/SMS/{phone}/{otp}"
@@ -1215,8 +1252,15 @@ def send_otp(data: SendOTPRequest):
             timeout=15,
         )
 
-        print("2FACTOR SMS STATUS:", response.status_code)
-        print("2FACTOR SMS RESPONSE:", response.text)
+        print(
+            "2FACTOR SMS STATUS:",
+            response.status_code,
+        )
+
+        print(
+            "2FACTOR SMS RESPONSE:",
+            response.text,
+        )
 
         result = response.json()
 
@@ -1226,224 +1270,242 @@ def send_otp(data: SendOTPRequest):
                 or "2Factor SMS OTP failed"
             )
 
-        return {
-            "success": True,
-            "message": "OTP sent successfully",
-            "twofactor_status": result.get("Status"),
-            "twofactor_details": result.get("Details"),
-        }
-
     except Exception as e:
-        print("2FACTOR SMS ERROR:", str(e))
 
-        db.collection("otp_verifications") \
-            .document(phone) \
-            .delete()
+        print(
+            "2FACTOR SMS ERROR:",
+            str(e),
+        )
 
         raise HTTPException(
             status_code=502,
             detail="Unable to send OTP",
         )
 
-class VerifyOTPRequest(BaseModel):
-    phone: str
-    otp: str
-    purpose: str = "signup"
+    # -----------------------------------------------------
+    # STORE OTP AFTER SMS PROVIDER ACCEPTS IT
+    # -----------------------------------------------------
+
+    doc_id = otp_document_id(
+        phone,
+        purpose,
+    )
+
+    doc_ref = (
+        db.collection("otp_verifications")
+        .document(doc_id)
+    )
+
+    doc_ref.set({
+        "phone": phone,
+        "purpose": purpose,
+        "otpHash": otp_hash,
+        "attempts": 0,
+        "verified": False,
+        "expiresAt": expires_at,
+        "createdAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    return {
+        "success": True,
+        "message": "OTP sent successfully",
+        "phone": phone,
+        "purpose": purpose,
+        "twofactor_status": result.get("Status"),
+        "twofactor_details": result.get("Details"),
+    }
 
 
 @app.post("/auth/verify-otp")
 def verify_otp(data: VerifyOTPRequest):
 
     phone = normalize_phone(data.phone)
+    purpose = data.purpose.strip().lower()
+    submitted_otp = data.otp.strip()
 
-    doc_ref = db.collection("otp_verifications").document(phone)
-    doc = doc_ref.get()
-
-    if not doc.exists:
+    if len(submitted_otp) != 6 or not submitted_otp.isdigit():
         raise HTTPException(
             status_code=400,
-            detail="OTP not found or expired",
+            detail="Enter a valid 6 digit OTP",
         )
 
-    otp_data = doc.to_dict()
+    # -----------------------------------------------------
+    # PURPOSE-SPECIFIC OTP DOCUMENT
+    # -----------------------------------------------------
 
-    if otp_data.get("purpose") != data.purpose:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid OTP purpose",
-        )
-
-    if otp_data.get("verified") is True:
-        raise HTTPException(
-            status_code=400,
-            detail="OTP already used",
-        )
-
-    expires_at = otp_data.get("expiresAt")
-
-    if expires_at and datetime.now(timezone.utc) > expires_at:
-        doc_ref.delete()
-
-        raise HTTPException(
-            status_code=400,
-            detail="OTP expired",
-        )
-
-    attempts = int(otp_data.get("attempts", 0))
-
-    if attempts >= 5:
-        doc_ref.delete()
-
-        raise HTTPException(
-            status_code=429,
-            detail="Too many OTP attempts",
-        )
-
-    # Increment attempts
-    doc_ref.update({
-        "attempts": attempts + 1
-    })
-
-    submitted_hash = hashlib.sha256(
-        data.otp.strip().encode("utf-8")
-    ).hexdigest()
-
-    stored_hash = otp_data.get("otpHash")
-
-    if not hmac.compare_digest(
-        submitted_hash,
-        stored_hash or ""
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid OTP",
-        )
-
-    # Mark verified
-    doc_ref.update({
-        "verified": True,
-        "verifiedAt": firestore.SERVER_TIMESTAMP,
-    })
-
-# =========================================================
-# FRSHQO / MERCHANT AUTH HELPERS
-# =========================================================
-
-def normalize_merchant_email(email: str) -> str:
-    return email.strip().lower()
-
-
-def normalize_merchant_phone(phone: str) -> str:
-    phone = normalize_phone(phone)
-    return phone.replace("+91", "")
-
-
-def merchant_auth_email(phone: str) -> str:
-    """
-    Internal Firebase Auth email for Merchant accounts.
-
-    The merchant's REAL email remains in:
-        commerce_users.email
-
-    This internal email exists only inside Firebase Authentication.
-    """
-    clean_phone = normalize_merchant_phone(phone)
-
-    digest = hashlib.sha256(
-        clean_phone.encode("utf-8")
-    ).hexdigest()[:24]
-
-    return f"merchant_{digest}@auth.kishanseva.app"
-
-
-class MerchantAvailabilityRequest(BaseModel):
-    email: str
-    phone: str
-
-
-@app.post("/auth/check-merchant-availability")
-def check_merchant_availability(
-    data: MerchantAvailabilityRequest,
-):
-
-    email = normalize_merchant_email(data.email)
-    phone = normalize_merchant_phone(data.phone)
-
-    if not email:
-        raise HTTPException(
-            status_code=400,
-            detail="Email is required",
-        )
-
-    if len(phone) != 10 or not phone.isdigit():
-        raise HTTPException(
-            status_code=400,
-            detail="Enter a valid 10 digit mobile number",
-        )
-
-    # -----------------------------------------
-    # CHECK MOBILE IN commerce_users
-    # -----------------------------------------
-
-    phone_query = (
-        db.collection("commerce_users")
-        .where(
-            "phone",
-            "==",
-            phone,
-        )
-        .limit(1)
-        .stream()
+    doc_id = otp_document_id(
+        phone,
+        purpose,
     )
 
-    phone_doc = next(
-        phone_query,
-        None,
+    doc_ref = (
+        db.collection("otp_verifications")
+        .document(doc_id)
     )
 
-    if phone_doc is not None:
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def verify_transaction(transaction):
+
+        doc = transaction.get(doc_ref)
+
+        if not doc.exists:
+            return {
+                "success": False,
+                "status": 400,
+                "detail": "OTP not found or expired",
+            }
+
+        otp_data = doc.to_dict() or {}
+
+        # -------------------------------------------------
+        # PURPOSE CHECK
+        # -------------------------------------------------
+
+        stored_purpose = (
+            str(
+                otp_data.get("purpose", "")
+            )
+            .strip()
+            .lower()
+        )
+
+        if stored_purpose != purpose:
+            return {
+                "success": False,
+                "status": 400,
+                "detail": "Invalid OTP purpose",
+            }
+
+        # -------------------------------------------------
+        # ALREADY VERIFIED
+        # -------------------------------------------------
+
+        if otp_data.get("verified") is True:
+            return {
+                "success": False,
+                "status": 400,
+                "detail": "OTP already used",
+            }
+
+        # -------------------------------------------------
+        # EXPIRY
+        # -------------------------------------------------
+
+        expires_at = otp_data.get("expiresAt")
+
+        if expires_at:
+            now = datetime.now(timezone.utc)
+
+            if now > expires_at:
+
+                transaction.delete(doc_ref)
+
+                return {
+                    "success": False,
+                    "status": 400,
+                    "detail": "OTP expired",
+                }
+
+        # -------------------------------------------------
+        # ATTEMPT LIMIT
+        # -------------------------------------------------
+
+        attempts = int(
+            otp_data.get("attempts", 0)
+        )
+
+        if attempts >= 5:
+
+            transaction.delete(doc_ref)
+
+            return {
+                "success": False,
+                "status": 429,
+                "detail": "Too many OTP attempts. Request a new OTP.",
+            }
+
+        # -------------------------------------------------
+        # HASH COMPARISON
+        # -------------------------------------------------
+
+        submitted_hash = hashlib.sha256(
+            submitted_otp.encode("utf-8")
+        ).hexdigest()
+
+        stored_hash = str(
+            otp_data.get("otpHash", "")
+        )
+
+        if not hmac.compare_digest(
+            submitted_hash,
+            stored_hash,
+        ):
+
+            new_attempts = attempts + 1
+
+            if new_attempts >= 5:
+
+                transaction.delete(
+                    doc_ref
+                )
+
+                return {
+                    "success": False,
+                    "status": 429,
+                    "detail": "Too many OTP attempts. Request a new OTP.",
+                }
+
+            transaction.update(
+                doc_ref,
+                {
+                    "attempts": new_attempts,
+                },
+            )
+
+            return {
+                "success": False,
+                "status": 400,
+                "detail": "Invalid OTP",
+            }
+
+        # -------------------------------------------------
+        # SUCCESS
+        # -------------------------------------------------
+
+        transaction.update(
+            doc_ref,
+            {
+                "verified": True,
+                "verifiedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        return {
+            "success": True,
+        }
+
+    result = verify_transaction(transaction)
+
+    if not result.get("success"):
         raise HTTPException(
-            status_code=409,
-            detail="This mobile number is already registered as a merchant.",
+            status_code=result.get(
+                "status",
+                400,
+            ),
+            detail=result.get(
+                "detail",
+                "Invalid OTP",
+            ),
         )
 
-    # -----------------------------------------
-    # CHECK EMAIL IN commerce_users
-    # -----------------------------------------
+    # =====================================================
+    # KISHANSEVA FARMER LOGIN
+    # =====================================================
 
-    email_query = (
-        db.collection("commerce_users")
-        .where(
-            "email",
-            "==",
-            email,
-        )
-        .limit(1)
-        .stream()
-    )
-
-    email_doc = next(
-        email_query,
-        None,
-    )
-
-    if email_doc is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="This email is already registered as a merchant.",
-        )
-
-    return {
-        "success": True,
-        "available": True,
-        "authEmail": merchant_auth_email(phone),
-    }
-
-    # -----------------------------------------
-# LOGIN: CREATE FIREBASE CUSTOM TOKEN
-# -----------------------------------------
-
-    if data.purpose == "login":
+    if purpose == "login":
 
         phone_without_country_code = phone
 
@@ -1457,13 +1519,16 @@ def check_merchant_availability(
             .where(
                 "personal.phone",
                 "==",
-                phone_without_country_code
+                phone_without_country_code,
             )
             .limit(1)
             .stream()
         )
 
-        farmer_doc = next(farmer_query, None)
+        farmer_doc = next(
+            farmer_query,
+            None,
+        )
 
         if farmer_doc is None:
             raise HTTPException(
@@ -1481,14 +1546,15 @@ def check_merchant_availability(
             "success": True,
             "message": "OTP verified successfully",
             "phone": phone,
-            "customToken": custom_token.decode("utf-8"),
+            "customToken":
+                custom_token.decode("utf-8"),
         }
 
-     # -----------------------------------------
-    # MERCHANT LOGIN: CREATE FIREBASE CUSTOM TOKEN
-    # -----------------------------------------
+    # =====================================================
+    # MERCHANT LOGIN
+    # =====================================================
 
-    if data.purpose == "merchant_login":
+    if purpose == "merchant_login":
 
         phone_without_country_code = phone
 
@@ -1516,7 +1582,10 @@ def check_merchant_availability(
         if merchant_doc is None:
             raise HTTPException(
                 status_code=404,
-                detail="Merchant account not found. Please sign up first.",
+                detail=(
+                    "Merchant account not found. "
+                    "Please sign up first."
+                ),
             )
 
         merchant_data = (
@@ -1543,25 +1612,20 @@ def check_merchant_availability(
 
         return {
             "success": True,
-            "message": "Merchant OTP verified successfully",
+            "message":
+                "Merchant OTP verified successfully",
             "phone": phone,
             "userType": "merchant",
             "uid": firebase_uid,
-            "customToken": custom_token.decode(
-                "utf-8"
-            ),
+            "customToken":
+                custom_token.decode("utf-8"),
         }
-        # -----------------------------------------
+
+    # =====================================================
     # MERCHANT PASSWORD RESET
-    # -----------------------------------------
+    # =====================================================
 
-    if data.purpose == "merchant_reset_password":
-
-        doc_ref.update({
-            "verified": True,
-            "verifiedAt":
-                firestore.SERVER_TIMESTAMP,
-        })
+    if purpose == "merchant_reset_password":
 
         return {
             "success": True,
@@ -1570,10 +1634,9 @@ def check_merchant_availability(
             "phone": phone,
         }
 
-
-# -----------------------------------------
-# SIGNUP
-# -----------------------------------------
+    # =====================================================
+    # SIGNUP
+    # =====================================================
 
     return {
         "success": True,
