@@ -1757,9 +1757,15 @@ def reset_password(data: ResetPasswordRequest):
         )
 
     # Get OTP record
-    doc_ref = db.collection(
-        "otp_verifications"
-    ).document(phone)
+    doc_ref = (
+    db.collection("otp_verifications")
+    .document(
+        otp_document_id(
+            phone,
+            "reset_password",
+        )
+    )
+)
 
     doc = doc_ref.get()
 
@@ -1888,11 +1894,14 @@ def merchant_reset_password(
     # -----------------------------------------
 
     doc_ref = (
-        db.collection(
-            "otp_verifications"
+    db.collection("otp_verifications")
+    .document(
+        otp_document_id(
+            phone,
+            "merchant_reset_password",
         )
-        .document(phone)
     )
+)
 
     doc = doc_ref.get()
 
