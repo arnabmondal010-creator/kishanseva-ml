@@ -1325,6 +1325,120 @@ def verify_otp(data: VerifyOTPRequest):
         "verifiedAt": firestore.SERVER_TIMESTAMP,
     })
 
+# =========================================================
+# FRSHQO / MERCHANT AUTH HELPERS
+# =========================================================
+
+def normalize_merchant_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def normalize_merchant_phone(phone: str) -> str:
+    phone = normalize_phone(phone)
+    return phone.replace("+91", "")
+
+
+def merchant_auth_email(phone: str) -> str:
+    """
+    Internal Firebase Auth email for Merchant accounts.
+
+    The merchant's REAL email remains in:
+        commerce_users.email
+
+    This internal email exists only inside Firebase Authentication.
+    """
+    clean_phone = normalize_merchant_phone(phone)
+
+    digest = hashlib.sha256(
+        clean_phone.encode("utf-8")
+    ).hexdigest()[:24]
+
+    return f"merchant_{digest}@auth.kishanseva.app"
+
+
+class MerchantAvailabilityRequest(BaseModel):
+    email: str
+    phone: str
+
+
+@app.post("/auth/check-merchant-availability")
+def check_merchant_availability(
+    data: MerchantAvailabilityRequest,
+):
+
+    email = normalize_merchant_email(data.email)
+    phone = normalize_merchant_phone(data.phone)
+
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="Email is required",
+        )
+
+    if len(phone) != 10 or not phone.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a valid 10 digit mobile number",
+        )
+
+    # -----------------------------------------
+    # CHECK MOBILE IN commerce_users
+    # -----------------------------------------
+
+    phone_query = (
+        db.collection("commerce_users")
+        .where(
+            "phone",
+            "==",
+            phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    phone_doc = next(
+        phone_query,
+        None,
+    )
+
+    if phone_doc is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This mobile number is already registered as a merchant.",
+        )
+
+    # -----------------------------------------
+    # CHECK EMAIL IN commerce_users
+    # -----------------------------------------
+
+    email_query = (
+        db.collection("commerce_users")
+        .where(
+            "email",
+            "==",
+            email,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    email_doc = next(
+        email_query,
+        None,
+    )
+
+    if email_doc is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This email is already registered as a merchant.",
+        )
+
+    return {
+        "success": True,
+        "available": True,
+        "authEmail": merchant_auth_email(phone),
+    }
+
     # -----------------------------------------
 # LOGIN: CREATE FIREBASE CUSTOM TOKEN
 # -----------------------------------------
@@ -1477,9 +1591,9 @@ class MerchantResetPasswordRequest(BaseModel):
     otp: str
     new_password: str
 
-# -----------------------------------------
-# MERCHANT LOGIN - GET EMAIL BY PHONE
-# -----------------------------------------
+# =========================================================
+# MERCHANT LOGIN - GET INTERNAL AUTH EMAIL BY PHONE
+# =========================================================
 
 class MerchantLoginRequest(BaseModel):
     phone: str
@@ -1490,9 +1604,7 @@ def merchant_login_email(
     data: MerchantLoginRequest,
 ):
 
-    phone = normalize_phone(
-        data.phone
-    )
+    phone = normalize_phone(data.phone)
 
     clean_phone = phone.replace(
         "+91",
@@ -1518,7 +1630,7 @@ def merchant_login_email(
     if merchant_doc is None:
         raise HTTPException(
             status_code=404,
-            detail="Merchant account not found",
+            detail="Merchant account not found. Please sign up first.",
         )
 
     merchant_data = (
@@ -1526,24 +1638,49 @@ def merchant_login_email(
         or {}
     )
 
-    email = str(
+    real_email = str(
         merchant_data.get(
             "email",
             "",
         )
     ).strip()
 
-    if not email:
+    firebase_uid = str(
+        merchant_data.get(
+            "uid",
+            merchant_doc.id,
+        )
+    ).strip()
+
+    if not real_email:
         raise HTTPException(
             status_code=400,
-            detail="No email associated with this merchant account",
+            detail="No email associated with this merchant account.",
         )
+
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=400,
+            detail="Merchant Firebase UID not found.",
+        )
+
+    internal_auth_email = merchant_auth_email(
+        clean_phone
+    )
 
     return {
         "success": True,
-        "email": email,
-    }
 
+        # Real email — only for merchant data
+        "email": real_email,
+
+        # Firebase Authentication email
+        "authEmail": internal_auth_email,
+
+        "uid": firebase_uid,
+
+        "userType": "merchant",
+    }
 
 @app.post("/auth/reset-password")
 def reset_password(data: ResetPasswordRequest):
