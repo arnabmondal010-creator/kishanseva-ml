@@ -1348,9 +1348,11 @@ def verify_otp(data: VerifyOTPRequest):
     @firestore.transactional
     def verify_transaction(transaction):
 
-        doc = transaction.get(doc_ref)
+        docs = transaction.get(doc_ref)
 
-        if not doc.exists:
+        doc = next(docs, None)
+
+        if doc is None or not doc.exists:
             return {
                 "success": False,
                 "status": 400,
