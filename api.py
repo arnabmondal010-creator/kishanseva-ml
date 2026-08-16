@@ -4533,6 +4533,8 @@ def finalize_cart(
                 "available": available,
                 "quantity": qty,
                 "line_total": line_total,
+                "platform_commission": platform_commission,
+                "seller_payout": seller_payout,
             })
 
     # ------------------------------------
@@ -4611,9 +4613,11 @@ def finalize_cart(
 
                     "platformCommissionRate": 7,
 
-                    "platformCommission": platform_commission,
+                    "platformCommission":
+                        p["platform_commission"],
 
-                    "sellerPayout": seller_payout,
+                    "sellerPayout":
+                        p["seller_payout"],
 
                     "paymentId": payment_id,
                     "paymentStatus": "paid",
@@ -6576,12 +6580,23 @@ async def verify_pickup_otp(
 
                 seller_refs[seller_id] = seller_ref
 
-                gross_amount = float(
-                    item.get("subtotal", 0) or 0
+                gross_amount = round(
+                    float(item.get("subtotal", 0) or 0),
+                    2,
                 )
 
-                commission = float(
-                    item.get("platformCommission", 0) or 0
+                if gross_amount <= 0:
+                    raise Exception(
+                        "Invalid gross amount"
+                    )
+
+# Always calculate commission from the actual
+# item subtotal. Never trust stored commission.
+                commission_rate = 7.0
+
+                commission = round(
+                    gross_amount * commission_rate / 100,
+                    2,
                 )
 
                 if commission < 0:
@@ -6589,19 +6604,12 @@ async def verify_pickup_otp(
                         "Invalid platform commission"
                     )
 
-                seller_payout_value = item.get(
-                    "sellerPayout"
+# Always calculate seller payout from the
+# actual subtotal and calculated commission.
+                seller_payout = round(
+                    gross_amount - commission,
+                    2,
                 )
-
-                if seller_payout_value is None:
-                    seller_payout = round(
-                        gross_amount - commission,
-                        2,
-                    )
-                else:
-                    seller_payout = float(
-                        seller_payout_value
-                    )
 
                 if seller_payout < 0:
                     raise Exception(
