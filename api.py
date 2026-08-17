@@ -11,6 +11,7 @@ import feedparser
 import hmac
 import hashlib
 import asyncio
+import re
 
 
 from fastapi import (
@@ -1351,6 +1352,42 @@ class MerchantAvailabilityRequest(BaseModel):
     phone: str
 
 
+def buyer_auth_email(phone: str) -> str:
+    """
+    Generate the internal Firebase Authentication email
+    used exclusively for buyer accounts.
+
+    The buyer's real email remains stored in
+    commerce_users.email.
+    """
+
+    phone = str(phone).strip()
+
+    # Keep only digits
+    clean_phone = "".join(
+        ch for ch in phone
+        if ch.isdigit()
+    )
+
+    # Remove country code if supplied
+    if clean_phone.startswith("91") and len(clean_phone) == 12:
+        clean_phone = clean_phone[2:]
+
+    if len(clean_phone) != 10:
+        raise ValueError(
+            "Invalid buyer phone number"
+        )
+
+    return (
+        f"buyer_{clean_phone}"
+        "@auth.kishanseva.internal"
+    )
+
+class BuyerAvailabilityRequest(BaseModel):
+    phone: str
+    email: str
+
+
 @app.post("/auth/check-merchant-availability")
 def check_merchant_availability(
     data: MerchantAvailabilityRequest,
@@ -1443,6 +1480,392 @@ def check_merchant_availability(
         "authEmail": internal_auth_email,
     }
 
+@app.post("/auth/check-buyer-availability")
+def check_buyer_availability(
+    data: BuyerAvailabilityRequest,
+):
+    phone = normalize_phone(data.phone)
+
+    email = (
+        data.email
+        .strip()
+        .lower()
+    )
+
+    # -----------------------------------------
+    # NORMALIZE PHONE
+    # -----------------------------------------
+
+    phone_digits = "".join(
+        ch for ch in phone
+        if ch.isdigit()
+    )
+
+    if (
+        phone_digits.startswith("91")
+        and len(phone_digits) == 12
+    ):
+        phone_digits = phone_digits[2:]
+
+    # -----------------------------------------
+    # VALIDATE PHONE
+    # -----------------------------------------
+
+    if (
+        len(phone_digits) != 10
+        or not phone_digits.isdigit()
+        or phone_digits[0] not in "6789"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a valid 10 digit mobile number.",
+        )
+
+    # -----------------------------------------
+    # FIRESTORE PHONE FORMAT
+    # -----------------------------------------
+
+    firestore_phone = f"+91{phone_digits}"
+
+    # -----------------------------------------
+    # VALIDATE EMAIL
+    # -----------------------------------------
+
+    email_pattern = (
+        r"^[A-Za-z0-9._%+-]+@"
+        r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    )
+
+    if not re.match(
+        email_pattern,
+        email,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a valid email address.",
+        )
+
+    # -----------------------------------------
+    # CHECK BUYER PHONE
+    # -----------------------------------------
+
+    phone_query = (
+        db.collection("buyers")
+        .where(
+            "phone",
+            "==",
+            firestore_phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    existing_phone = next(
+        phone_query,
+        None,
+    )
+
+    if existing_phone is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This mobile number is already registered."
+            ),
+        )
+
+    # -----------------------------------------
+    # CHECK BUYER EMAIL
+    # -----------------------------------------
+
+    email_query = (
+        db.collection("buyers")
+        .where(
+            "email",
+            "==",
+            email,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    existing_email = next(
+        email_query,
+        None,
+    )
+
+    if existing_email is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This email address is already registered."
+            ),
+        )
+
+    # -----------------------------------------
+    # GENERATE INTERNAL BUYER AUTH EMAIL
+    # -----------------------------------------
+
+    auth_email = buyer_auth_email(
+        firestore_phone
+    )
+
+    return {
+        "success": True,
+        "available": True,
+        "phone": firestore_phone,
+        "email": email,
+        "authEmail": auth_email,
+    }
+
+class BuyerSignupRequest(BaseModel):
+    phone: str
+    email: str
+    password: str
+
+    name: str
+    buyerType: str
+    businessName: str = ""
+
+    address: str
+    city: str
+    state: str
+    pincode: str
+
+    buyerLocation: str = ""
+    buyerLatitude: float | None = None
+    buyerLongitude: float | None = None
+
+@app.post("/auth/create-buyer")
+def create_buyer(
+    data: BuyerSignupRequest,
+):
+    # -----------------------------------------
+    # NORMALIZE
+    # -----------------------------------------
+
+    phone_digits = "".join(
+        ch for ch in data.phone
+        if ch.isdigit()
+    )
+
+    if (
+        phone_digits.startswith("91")
+        and len(phone_digits) == 12
+    ):
+        phone_digits = phone_digits[2:]
+
+    if (
+        len(phone_digits) != 10
+        or phone_digits[0] not in "6789"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid mobile number.",
+        )
+
+    phone = f"+91{phone_digits}"
+
+    email = (
+        data.email
+        .strip()
+        .lower()
+    )
+
+    # -----------------------------------------
+    # VERIFY OTP WAS ALREADY VERIFIED
+    # -----------------------------------------
+
+    otp_ref = (
+        db.collection("otp_verifications")
+        .document(
+            otp_document_id(
+                phone,
+                "buyer_signup",
+            )
+        )
+    )
+
+    otp_snapshot = otp_ref.get()
+
+    if not otp_snapshot.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="Mobile verification not completed.",
+        )
+
+    otp_data = otp_snapshot.to_dict() or {}
+
+    if otp_data.get("verified") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Mobile verification is required.",
+        )
+
+    # -----------------------------------------
+    # CHECK BUYER DOES NOT ALREADY EXIST
+    # -----------------------------------------
+
+    phone_query = (
+        db.collection("buyers")
+        .where(
+            "phone",
+            "==",
+            phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    if next(phone_query, None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This mobile number is already registered.",
+        )
+
+    email_query = (
+        db.collection("buyers")
+        .where(
+            "email",
+            "==",
+            email,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    if next(email_query, None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This email address is already registered.",
+        )
+
+    # -----------------------------------------
+    # GENERATE INTERNAL AUTH EMAIL
+    # -----------------------------------------
+
+    auth_email = buyer_auth_email(phone)
+
+    # -----------------------------------------
+    # CREATE FIREBASE AUTH USER
+    # -----------------------------------------
+
+    try:
+        firebase_user = auth.create_user(
+            email=auth_email,
+            password=data.password,
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unable to create buyer account: {str(e)}",
+        )
+
+    uid = firebase_user.uid
+
+    # -----------------------------------------
+    # CREATE BUYER DOCUMENT
+    # -----------------------------------------
+
+    buyer_ref = (
+        db.collection("buyers")
+        .document(uid)
+    )
+    try:
+
+        buyer_ref.set({
+            "uid": uid,
+            "userId": uid,
+
+            "name": data.name.strip(),
+
+            "phone": phone,
+            "phoneVerified": True,
+
+            "email": email,
+            "authEmail": auth_email,
+
+            "businessName":
+                data.businessName.strip(),
+
+            "buyerType":
+                data.buyerType.strip(),
+
+            "address":
+                data.address.strip(),
+
+            "city":
+                data.city.strip(),
+
+            "state":
+                data.state.strip(),
+
+            "pincode":
+                data.pincode.strip(),
+
+            "buyerLocation":
+                data.buyerLocation.strip(),
+
+            "buyerLatitude":
+                data.buyerLatitude,
+
+            "buyerLongitude":
+                data.buyerLongitude,
+
+            "profileImage": "",
+
+            "premiumBuyer": False,
+            "premiumPlan": False,
+
+            "role": "buyer",
+
+            "walletBalance": 0,
+
+            "isActive": True,
+
+            "verified": False,
+
+            "createdAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+    
+    except Exception as e:
+        print(
+            "BUYER FIRESTORE CREATE ERROR:",
+            e,
+        )
+
+        try:
+            auth.delete_user(uid)
+        except Exception as cleanup_error:
+            print(
+                "BUYER AUTH CLEANUP ERROR:",
+                cleanup_error,
+            )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to create buyer profile.",
+        )
+
+    try:
+        otp_ref.delete()
+    except Exception as e:
+        print(
+            "BUYER OTP CLEANUP ERROR:",
+            e,
+        )
+
+    return {
+        "success": True,
+        "uid": uid,
+        "authEmail": auth_email,
+        "message":
+            "Buyer account created successfully.",
+    }
 
 @app.post("/auth/verify-otp")
 def verify_otp(data: VerifyOTPRequest):
@@ -1681,6 +2104,86 @@ def verify_otp(data: VerifyOTPRequest):
         }
 
     # =====================================================
+# BUYER LOGIN
+# =====================================================
+
+    if purpose == "buyer_login":
+
+        phone_without_country_code = phone
+
+        if phone_without_country_code.startswith("+91"):
+            phone_without_country_code = (
+                phone_without_country_code[3:]
+            )
+
+        buyer_query = (
+            db.collection("buyers")
+            .where(
+                "phone",
+                "==",
+                phone,
+            )
+            .limit(1)
+            .stream()
+        )
+
+        buyer_doc = next(
+            buyer_query,
+            None,
+        )
+
+        if buyer_doc is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Buyer account not found. "
+                    "Please sign up first."
+                ),
+            )
+
+        buyer_data = (
+            buyer_doc.to_dict()
+            or {}
+        )
+
+        if not buyer_data.get(
+            "isActive",
+            True,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Buyer account is blocked.",
+            )
+
+        firebase_uid = str(
+            buyer_data.get(
+                "uid",
+                buyer_doc.id,
+            )
+        ).strip()
+
+        if not firebase_uid:
+            raise HTTPException(
+                status_code=400,
+                detail="Buyer Firebase UID not found.",
+            )
+
+        custom_token = auth.create_custom_token(
+            firebase_uid
+        )
+
+        return {
+            "success": True,
+            "message":
+                "Buyer OTP verified successfully",
+            "phone": phone,
+            "userType": "buyer",
+            "uid": firebase_uid,
+            "customToken":
+                custom_token.decode("utf-8"),
+        }
+
+    # =====================================================
     # MERCHANT LOGIN
     # =====================================================
 
@@ -1765,7 +2268,22 @@ def verify_otp(data: VerifyOTPRequest):
         }
 
     # =====================================================
-    # SIGNUP
+    # BUYER SIGNUP
+    # =====================================================
+
+    if purpose == "buyer_signup":
+
+        return {
+            "success": True,
+            "message":
+                "Buyer mobile number verified successfully",
+            "phone": phone,
+            "purpose": "buyer_signup",
+            "phoneVerified": True,
+        }
+
+    # =====================================================
+    # GENERIC SIGNUP
     # =====================================================
 
     return {
@@ -1784,12 +2302,93 @@ class MerchantResetPasswordRequest(BaseModel):
     otp: str
     new_password: str
 
+class BuyerResetPasswordRequest(BaseModel):
+    phone: str
+    new_password: str
+
 # =========================================================
 # MERCHANT LOGIN - GET INTERNAL AUTH EMAIL BY PHONE
 # =========================================================
 
 class MerchantLoginRequest(BaseModel):
     phone: str
+
+class BuyerLoginRequest(BaseModel):
+    phone: str
+
+@app.post("/auth/buyer-login-email")
+def buyer_login_email(
+    data: BuyerLoginRequest,
+):
+    phone = normalize_phone(data.phone)
+
+    clean_phone = phone.replace(
+        "+91",
+        "",
+    )
+
+    buyer_query = (
+        db.collection("buyers")
+        .where(
+            "phone",
+            "==",
+            phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    buyer_doc = next(
+        buyer_query,
+        None,
+    )
+
+    if buyer_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Buyer account not found. "
+                "Please sign up first."
+            ),
+        )
+
+    buyer_data = (
+        buyer_doc.to_dict()
+        or {}
+    )
+
+    if not buyer_data.get(
+        "isActive",
+        True,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Buyer account is blocked.",
+        )
+
+    firebase_uid = str(
+        buyer_data.get(
+            "uid",
+            buyer_doc.id,
+        )
+    ).strip()
+
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=400,
+            detail="Buyer Firebase UID not found.",
+        )
+
+    internal_auth_email = buyer_auth_email(
+        clean_phone
+    )
+
+    return {
+        "success": True,
+        "authEmail": internal_auth_email,
+        "uid": firebase_uid,
+        "userType": "buyer",
+    }
 
 
 @app.post("/auth/merchant-login-email")
@@ -2163,6 +2762,149 @@ def merchant_reset_password(
     return {
         "success": True,
         "message": "Merchant password reset successfully",
+    }
+
+@app.post("/auth/buyer-reset-password")
+def buyer_reset_password(
+    data: BuyerResetPasswordRequest,
+):
+    phone = normalize_phone(data.phone)
+
+    if len(data.new_password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters",
+        )
+
+    # -----------------------------------------
+    # GET VERIFIED BUYER RESET OTP
+    # -----------------------------------------
+
+    doc_ref = (
+        db.collection("otp_verifications")
+        .document(
+            otp_document_id(
+                phone,
+                "buyer_password_reset",
+            )
+        )
+    )
+
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not found or expired",
+        )
+
+    otp_data = doc.to_dict() or {}
+
+    if otp_data.get("purpose") != "buyer_password_reset":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP purpose",
+        )
+
+    if otp_data.get("verified") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP not verified",
+        )
+
+    # -----------------------------------------
+    # FIND BUYER
+    # -----------------------------------------
+
+    buyer_query = (
+        db.collection("buyers")
+        .where(
+            "phone",
+            "==",
+            phone,
+        )
+        .limit(1)
+        .stream()
+    )
+
+    buyer_doc = next(
+        buyer_query,
+        None,
+    )
+
+    if buyer_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Buyer account not found.",
+        )
+
+    buyer_data = (
+        buyer_doc.to_dict()
+        or {}
+    )
+
+    if not buyer_data.get(
+        "isActive",
+        True,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Buyer account is blocked.",
+        )
+
+    # -----------------------------------------
+    # GET FIREBASE UID
+    # -----------------------------------------
+
+    firebase_uid = str(
+        buyer_data.get(
+            "uid",
+            buyer_doc.id,
+        )
+    ).strip()
+
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=400,
+            detail="Buyer Firebase UID not found.",
+        )
+
+    # -----------------------------------------
+    # UPDATE FIREBASE PASSWORD
+    # -----------------------------------------
+
+    try:
+        auth.update_user(
+            firebase_uid,
+            password=data.new_password,
+        )
+
+    except auth.UserNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Firebase Authentication account not found.",
+        )
+
+    except Exception as e:
+        print(
+            "BUYER PASSWORD RESET ERROR:",
+            e,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to reset buyer password.",
+        )
+
+    # -----------------------------------------
+    # DELETE USED OTP
+    # -----------------------------------------
+
+    doc_ref.delete()
+
+    return {
+        "success": True,
+        "message": "Buyer password reset successfully.",
     }
 
 
