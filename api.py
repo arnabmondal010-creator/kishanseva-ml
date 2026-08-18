@@ -1338,6 +1338,8 @@ def send_order_status_notification(
 
 
 
+
+
 @app.post("/auth/send-otp")
 def send_otp(data: SendOTPRequest):
 
@@ -3770,6 +3772,27 @@ async def create_checkout(
         "grandTotal": request.grandTotal,
 
     }
+
+@app.post("/test-buyer-order-notification")
+async def test_buyer_order_notification(
+    user=Depends(verify_firebase_token),
+):
+    buyer_id = user["uid"]
+
+    success = send_order_status_notification(
+        buyer_id=buyer_id,
+        order_id="jH9o23rUr8mVCJu8QjtI",
+        order_status="completed",
+        order_type="cart",
+        product_name="Aloo",
+    )
+
+    return {
+        "success": success,
+        "buyerId": buyer_id,
+        "orderId": "jH9o23rUr8mVCJu8QjtI",
+    }
+
 def calculate_delivery_amount(checkout):
 
     settings_doc = (
