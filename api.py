@@ -5671,7 +5671,6 @@ def finalize_cart(
     buyer_id: str,
 ):
 
-
     checkout_ref = (
         db.collection("commerce_checkouts")
         .document(checkout_id)
@@ -5683,15 +5682,26 @@ def finalize_cart(
         raise Exception("Checkout not found")
 
     checkout = checkout_doc.to_dict()
+
     # Use the values already stored in commerce_checkouts
     subtotal = float(checkout["subtotal"])
-    delivery_charge = float(checkout.get("deliveryCharge", 0))
-    grand_total = float(checkout["grandTotal"])
+    delivery_charge = float(
+        checkout.get("deliveryCharge", 0)
+    )
+    grand_total = float(
+        checkout["grandTotal"]
+    )
 
     import json
 
     print("========== CHECKOUT ITEMS ==========")
-    print(json.dumps(checkout["items"], indent=2, default=str))
+    print(
+        json.dumps(
+            checkout["items"],
+            indent=2,
+            default=str,
+        )
+    )
     print("====================================")
 
     if checkout["buyerId"] != buyer_id:
@@ -5706,10 +5716,14 @@ def finalize_cart(
 
     cart_docs = list(
         db.collection("commerce_cart")
-        .where("buyerId", "==", buyer_id)
+        .where(
+            "buyerId",
+            "==",
+            buyer_id,
+        )
         .stream()
     )
- 
+
     transaction = db.transaction()
 
     @firestore.transactional
@@ -5718,7 +5732,11 @@ def finalize_cart(
         subtotal = 0.0
         seller_totals = {}
 
-        order_ref = db.collection("commerce_orders").document()
+        order_ref = (
+            db.collection("commerce_orders")
+            .document()
+        )
+
         order_id = order_ref.id
 
         # ------------------------------------
@@ -5730,279 +5748,537 @@ def finalize_cart(
         for item in checkout["items"]:
 
             if item["productType"] == "farm":
+
                 listing_ref = (
-                    db.collection("commerce_listings")
-                    .document(item["listingId"])
+                    db.collection(
+                        "commerce_listings"
+                    )
+                    .document(
+                        item["listingId"]
+                    )
                 )
+
             else:
+
                 listing_ref = (
-                    db.collection("commerce_shop_products")
-                    .document(item["listingId"])
+                    db.collection(
+                        "commerce_shop_products"
+                    )
+                    .document(
+                        item["listingId"]
+                    )
                 )
 
-            listing_doc = transaction.get(listing_ref)
+            listing_doc = transaction.get(
+                listing_ref
+            )
 
-            if hasattr(listing_doc, "__next__"):
-                listing_doc = next(listing_doc)
+            if hasattr(
+                listing_doc,
+                "__next__",
+            ):
+                listing_doc = next(
+                    listing_doc
+                )
 
             if not listing_doc.exists:
-                raise Exception("Product not found")
+                raise Exception(
+                    "Product not found"
+                )
 
-            listing = listing_doc.to_dict()
-            seller_id = listing.get("sellerId")
+            listing = (
+                listing_doc.to_dict()
+            )
+
+            seller_id = listing.get(
+                "sellerId"
+            )
 
             if not seller_id:
-                raise Exception("Seller ID missing")
+                raise Exception(
+                    "Seller ID missing"
+                )
 
             seller_ref = (
-                db.collection("commerce_users")
+                db.collection(
+                    "commerce_users"
+                )
                 .document(seller_id)
             )
 
-            seller_doc = transaction.get(seller_ref)
+            seller_doc = transaction.get(
+                seller_ref
+            )
 
-            if hasattr(seller_doc, "__next__"):
-                seller_doc = next(seller_doc)
+            if hasattr(
+                seller_doc,
+                "__next__",
+            ):
+                seller_doc = next(
+                    seller_doc
+                )
 
             if not seller_doc.exists:
-                raise Exception("Seller account not found")
+                raise Exception(
+                    "Seller account not found"
+                )
 
-            seller = seller_doc.to_dict() or {}
+            seller = (
+                seller_doc.to_dict()
+                or {}
+            )
 
-            if not seller.get("isActive", False):
-                raise Exception("Seller account is inactive")
+            if not seller.get(
+                "isActive",
+                False,
+            ):
+                raise Exception(
+                    "Seller account is inactive"
+                )
 
-            if not seller.get("isShopOpen", False):
-                raise Exception("Seller shop is currently closed")
+            if not seller.get(
+                "isShopOpen",
+                False,
+            ):
+                raise Exception(
+                    "Seller shop is currently closed"
+                )
 
-            qty = float(item["quantity"])
+            qty = float(
+                item["quantity"]
+            )
 
             available = (
-                float(listing["quantity"])
-                if item["productType"] == "farm"
-                else float(listing["stock"])
+                float(
+                    listing["quantity"]
+                )
+                if item["productType"]
+                == "farm"
+                else float(
+                    listing["stock"]
+                )
             )
 
             if qty > available:
                 raise Exception(
-                    f"{listing['cropName']} is out of stock"
+                    f"{listing['cropName']} "
+                    "is out of stock"
                 )
 
-            line_total = qty * float(listing["pricePerUnit"])
+            line_total = (
+                qty
+                * float(
+                    listing[
+                        "pricePerUnit"
+                    ]
+                )
+            )
 
             subtotal += line_total
+
             commission_rate = 0.07
 
             platform_commission = round(
-                line_total * commission_rate,
+                line_total
+                * commission_rate,
                 2,
             )
 
             seller_payout = round(
-                line_total - platform_commission,
+                line_total
+                - platform_commission,
                 2,
             )
 
-            seller_totals[listing["sellerId"]] = (
-                seller_totals.get(listing["sellerId"], 0)
+            seller_totals[
+                listing["sellerId"]
+            ] = (
+                seller_totals.get(
+                    listing["sellerId"],
+                    0,
+                )
                 + line_total
             )
 
             products.append({
+
                 "item": item,
+
                 "listing": listing,
+
                 "listing_ref": listing_ref,
+
                 "available": available,
+
                 "quantity": qty,
+
                 "line_total": line_total,
-                "platform_commission": platform_commission,
-                "seller_payout": seller_payout,
+
+                "platform_commission":
+                    platform_commission,
+
+                "seller_payout":
+                    seller_payout,
             })
 
-    # ------------------------------------
-    # PASS 2 : WRITE EVERYTHING
-    # ------------------------------------
+        # ------------------------------------
+        # PASS 2 : WRITE EVERYTHING
+        # ------------------------------------
 
         for p in products:
 
             item = p["item"]
+
             listing = p["listing"]
 
             if item["productType"] == "farm":
+
                 transaction.update(
                     p["listing_ref"],
                     {
                         "quantity":
-                            p["available"] - p["quantity"]
+                            p["available"]
+                            - p["quantity"]
                     },
                 )
+
             else:
+
                 transaction.update(
                     p["listing_ref"],
                     {
                         "stock":
-                            p["available"] - p["quantity"]
+                            p["available"]
+                            - p["quantity"]
                     },
                 )
 
             order_item_ref = (
-                db.collection("commerce_order_items")
+                db.collection(
+                    "commerce_order_items"
+                )
                 .document()
             )
-            item_count = len(checkout["items"])
+
+            item_count = len(
+                checkout["items"]
+            )
 
             if item_count == 1:
-                item_delivery = delivery_charge
+
+                item_delivery = (
+                    delivery_charge
+                )
+
             else:
-                per_item = round(delivery_charge / item_count, 2)
+
+                per_item = round(
+                    delivery_charge
+                    / item_count,
+                    2,
+                )
 
                 if p == products[-1]:
+
                     item_delivery = round(
-                        delivery_charge - per_item * (item_count - 1),
+                        delivery_charge
+                        - per_item
+                        * (
+                            item_count - 1
+                        ),
                         2,
                     )
+
                 else:
-                    item_delivery = per_item
+
+                    item_delivery = (
+                        per_item
+                    )
 
             transaction.set(
                 order_item_ref,
                 {
-                    "orderItemId": order_item_ref.id,
-                    "orderId": order_id,
-                    "checkoutId": checkout_id,
+                    "orderItemId":
+                        order_item_ref.id,
 
-                    "type": "cart",
+                    "orderId":
+                        order_id,
 
-                    "buyerId": buyer_id,
-                    "sellerId": listing["sellerId"],
-                    "buyerNote": "",
-                    "buyerNoteStatus": "none",
-                    "buyerNoteResponse": "",
+                    "checkoutId":
+                        checkout_id,
 
-                    "listingId": item["listingId"],
+                    "type":
+                        "cart",
 
-                    "productName": item["productName"],
+                    "buyerId":
+                        buyer_id,
+
+                    "sellerId":
+                        listing["sellerId"],
+
+                    "buyerNote":
+                        "",
+
+                    "buyerNoteStatus":
+                        "none",
+
+                    "buyerNoteResponse":
+                        "",
+
+                    "listingId":
+                        item["listingId"],
+
+                    "productName":
+                        item["productName"],
+
                     "productImage":
-                        item.get("productImage")
-                        or listing.get("cropImage")
-                        or listing.get("image"),
+                        item.get(
+                            "productImage"
+                        )
+                        or listing.get(
+                            "cropImage"
+                        )
+                        or listing.get(
+                            "image"
+                        ),
 
-                    "quantity": p["quantity"],
-                    "unit": item["unit"],
-                    "pricePerUnit": item["pricePerUnit"],
-                    "subtotal": p["line_total"],
-                    "deliveryCharge": item_delivery,
+                    "quantity":
+                        p["quantity"],
 
-                    "platformCommissionRate": 7,
+                    "unit":
+                        item["unit"],
+
+                    "pricePerUnit":
+                        item["pricePerUnit"],
+
+                    "subtotal":
+                        p["line_total"],
+
+                    "deliveryCharge":
+                        item_delivery,
+
+                    "platformCommissionRate":
+                        7,
 
                     "platformCommission":
-                        p["platform_commission"],
+                        p[
+                            "platform_commission"
+                        ],
 
                     "sellerPayout":
-                        p["seller_payout"],
+                        p[
+                            "seller_payout"
+                        ],
 
-                    "paymentId": payment_id,
-                    "paymentStatus": "paid",
+                    "paymentId":
+                        payment_id,
 
-                    "orderStatus": "confirmed",
+                    "paymentStatus":
+                        "paid",
 
-                    "otpVerified": False,
+                    "orderStatus":
+                        "confirmed",
 
-                    "settlementReleased": False,
-                    "settlementStatus": "pending_delivery",
+                    "otpVerified":
+                        False,
 
-                    "createdAt": firestore.SERVER_TIMESTAMP,
-                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                    "settlementReleased":
+                        False,
+
+                    "settlementStatus":
+                        "pending_delivery",
+
+                    "createdAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
                 },
             )
 
         first_item = checkout["items"][0]
 
-        display_title = first_item["productName"]
+        display_title = (
+            first_item["productName"]
+        )
 
-        if len(checkout["items"]) > 1:
+        if len(
+            checkout["items"]
+        ) > 1:
+
             display_title = (
-                f"{first_item['productName']} +{len(checkout['items'])-1} more"
+                f"{first_item['productName']} "
+                f"+{len(checkout['items']) - 1} more"
             )
 
-        pickup_otp = f"{random.randint(100000,999999)}"
+        pickup_otp = (
+            f"{random.randint(100000, 999999)}"
+        )
 
         transaction.set(
             order_ref,
             {
-                "orderId": order_id,
-                "checkoutId": checkout_id,
-                "type": "cart",
+                "orderId":
+                    order_id,
 
-                "buyerId": buyer_id,
-                "sellerId": checkout["sellerId"],
+                "checkoutId":
+                    checkout_id,
 
-                "cropName": display_title,
-                "image": first_item["productImage"],
-                "itemCount": len(checkout["items"]),
+                "type":
+                    "cart",
 
-                "quantity": first_item["quantity"],
-                "unit": first_item["unit"],
+                "buyerId":
+                    buyer_id,
 
-                "deliveryMethod": checkout["deliveryMethod"],
-                "addressId": checkout.get("addressId"),
-                "address": checkout.get("address"),
+                "sellerId":
+                    checkout["sellerId"],
 
-                "subtotal": subtotal,
-                "deliveryCharge": delivery_charge,
-                "grandTotal": grand_total,
-                "orderAmount": grand_total,
+                "cropName":
+                    display_title,
 
-                "paymentId": payment_id,
-                "paymentStatus": "paid",
-                "razorpayOrderId": razorpay_order_id,
+                "image":
+                    first_item["productImage"],
 
-                "orderStatus": "confirmed",
+                "itemCount":
+                    len(
+                        checkout["items"]
+                    ),
 
-                "pickupOtp": pickup_otp,
-                "pickupScheduled": False,
+                "quantity":
+                    first_item["quantity"],
 
-                "settlementStatus": "pending_delivery",
-                "settlementReleased": False,
+                "unit":
+                    first_item["unit"],
 
-                "createdAt": firestore.SERVER_TIMESTAMP,
-                "updatedAt": firestore.SERVER_TIMESTAMP,
+                "deliveryMethod":
+                    checkout[
+                        "deliveryMethod"
+                    ],
+
+                "addressId":
+                    checkout.get(
+                        "addressId"
+                    ),
+
+                "address":
+                    checkout.get(
+                        "address"
+                    ),
+
+                "subtotal":
+                    subtotal,
+
+                "deliveryCharge":
+                    delivery_charge,
+
+                "grandTotal":
+                    grand_total,
+
+                "orderAmount":
+                    grand_total,
+
+                "paymentId":
+                    payment_id,
+
+                "paymentStatus":
+                    "paid",
+
+                "razorpayOrderId":
+                    razorpay_order_id,
+
+                "orderStatus":
+                    "confirmed",
+
+                "pickupOtp":
+                    pickup_otp,
+
+                "pickupScheduled":
+                    False,
+
+                "settlementStatus":
+                    "pending_delivery",
+
+                "settlementReleased":
+                    False,
+
+                "createdAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
             },
         )
 
         transaction.update(
             checkout_ref,
             {
-                "paymentStatus": "paid",
-                "paymentId": payment_id,
-                "razorpayOrderId": razorpay_order_id,
-                "orderId": order_id,
-                "orderStatus": "confirmed",
-                "settlementStatus": "pending_delivery",
-                "settlementReleased": False,
-                "paidAt": firestore.SERVER_TIMESTAMP,
+                "paymentStatus":
+                    "paid",
+
+                "paymentId":
+                    payment_id,
+
+                "razorpayOrderId":
+                    razorpay_order_id,
+
+                "orderId":
+                    order_id,
+
+                "orderStatus":
+                    "confirmed",
+
+                "settlementStatus":
+                    "pending_delivery",
+
+                "settlementReleased":
+                    False,
+
+                "paidAt":
+                    firestore.SERVER_TIMESTAMP,
             },
         )
 
         for cart_doc in cart_docs:
-            transaction.delete(cart_doc.reference)
+
+            transaction.delete(
+                cart_doc.reference
+            )
 
         return {
-            "alreadyProcessed": False,
-            "orderId": order_id,
-            "orderStatus": "confirmed",
+            "alreadyProcessed":
+                False,
+
+            "orderId":
+                order_id,
+
+            "orderStatus":
+                "confirmed",
         }
-    result = complete_checkout(transaction)
+
     # ============================================================
-# NEW ORDER FCM NOTIFICATIONS
-# ============================================================
+    # COMPLETE CHECKOUT
+    # ============================================================
+
+    result = complete_checkout(
+        transaction
+    )
+
+    # ============================================================
+    # NEW ORDER FCM NOTIFICATIONS — SELLER
+    # ============================================================
 
     try:
-        checkout_order_id = result.get("orderId")
+
+        checkout_order_id = (
+            result.get("orderId")
+        )
 
         if checkout_order_id:
+
             order_items = list(
-                db.collection("commerce_order_items")
+                db.collection(
+                    "commerce_order_items"
+                )
                 .where(
                     "orderId",
                     "==",
@@ -6014,22 +6290,29 @@ def finalize_cart(
             notified_sellers = set()
 
             for item_doc in order_items:
-                item_data = item_doc.to_dict() or {}
+
+                item_data = (
+                    item_doc.to_dict()
+                    or {}
+                )
 
                 seller_id = str(
-                    item_data.get("sellerId", "")
+                    item_data.get(
+                        "sellerId",
+                        "",
+                    )
                 ).strip()
 
                 if not seller_id:
                     continue
 
-            # One notification per seller,
-            # even if the cart contains multiple
-            # products from the same seller.
+                # One notification per seller
                 if seller_id in notified_sellers:
                     continue
 
-                notified_sellers.add(seller_id)
+                notified_sellers.add(
+                    seller_id
+                )
 
                 product_name = str(
                     item_data.get(
@@ -6040,32 +6323,49 @@ def finalize_cart(
 
                 send_new_order_notification(
                     seller_id=seller_id,
-                    order_id=checkout_order_id,
+                    order_id=(
+                        checkout_order_id
+                    ),
                     order_type="cart",
-                    product_name=product_name or "your product",
+                    product_name=(
+                        product_name
+                        or "your product"
+                    ),
                 )
 
     except Exception as e:
+
         # Notification failure must NEVER
         # make a successful order fail.
+
         print(
             f"CART NEW ORDER FCM ERROR: {e}"
         )
 
     # ============================================================
-    # BUYER ORDER CONFIRMED NOTIFICATION
+    # BUYER ORDER CONFIRMED NOTIFICATIONS
     # ============================================================
 
-    if not result.get("alreadyProcessed", False):
+    if not result.get(
+        "alreadyProcessed",
+        False,
+    ):
 
         try:
-            checkout_order_id = result.get("orderId")
+
+            checkout_order_id = (
+                result.get("orderId")
+            )
 
             if checkout_order_id:
 
                 checkout_order_ref = (
-                    db.collection("commerce_orders")
-                    .document(checkout_order_id)
+                    db.collection(
+                        "commerce_orders"
+                    )
+                    .document(
+                        checkout_order_id
+                    )
                 )
 
                 checkout_order_doc = (
@@ -6091,6 +6391,7 @@ def finalize_cart(
                     )
 
                     try:
+
                         item_docs = list(
                             db.collection(
                                 "commerce_order_items"
@@ -6128,7 +6429,7 @@ def finalize_cart(
                     if buyer_id_for_notification:
 
                         # ----------------------------------------
-                        # PUSH NOTIFICATION
+                        # BUYER PUSH NOTIFICATION
                         # ----------------------------------------
 
                         send_order_status_notification(
@@ -6146,7 +6447,7 @@ def finalize_cart(
                         )
 
                         # ----------------------------------------
-                        # IN-APP NOTIFICATION
+                        # BUYER IN-APP NOTIFICATION
                         # ----------------------------------------
 
                         create_buyer_order_notification(
@@ -6174,8 +6475,7 @@ def finalize_cart(
             )
 
     return result
-        
-        
+
 def finalize_cart_with_retry(
     razorpay_order_id: str,
     payment_id: str,
