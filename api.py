@@ -3408,10 +3408,6 @@ async def update_order_status(
             "cancelled",
         ],
 
-        "accepted": [
-            "packing",
-            "cancelled",
-        ],
 
         "packing": [
             "ready",
