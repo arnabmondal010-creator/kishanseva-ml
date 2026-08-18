@@ -3533,15 +3533,18 @@ async def update_order_status(
     if buyer_id:
 
         send_order_status_notification(
-
             buyer_id=buyer_id,
-
             order_id=request.orderId,
-
             order_status=requested_status,
-
             order_type=order_type,
+            product_name=product_name,
+        )
 
+        create_buyer_order_notification(
+            buyer_id=buyer_id,
+            order_id=request.orderId,
+            order_status=requested_status,
+            order_type=order_type,
             product_name=product_name,
         )
 
@@ -3555,7 +3558,6 @@ async def update_order_status(
         "orderStatus":
             requested_status,
     }
-
 
 @app.post("/auth/notification-settings")
 def update_notification_settings(
@@ -6051,8 +6053,8 @@ def finalize_cart(
         )
 
     # ============================================================
-# BUYER ORDER CONFIRMED FCM
-# ============================================================
+    # BUYER ORDER CONFIRMED NOTIFICATION
+    # ============================================================
 
     if not result.get("alreadyProcessed", False):
 
@@ -6077,18 +6079,22 @@ def finalize_cart(
                         or {}
                     )
 
-                    buyer_id = str(
+                    buyer_id_for_notification = str(
                         checkout_order.get(
                             "buyerId",
                             "",
                         )
                     ).strip()
 
-                    product_name = "your order"
+                    product_name_for_notification = (
+                        "your order"
+                    )
 
                     try:
                         item_docs = list(
-                            db.collection("commerce_order_items")
+                            db.collection(
+                                "commerce_order_items"
+                            )
                             .where(
                                 "orderId",
                                 "==",
@@ -6099,9 +6105,13 @@ def finalize_cart(
                         )
 
                         if item_docs:
-                            item_data = item_docs[0].to_dict() or {}
 
-                            product_name = str(
+                            item_data = (
+                                item_docs[0].to_dict()
+                                or {}
+                            )
+
+                            product_name_for_notification = str(
                                 item_data.get(
                                     "productName",
                                     "your order",
@@ -6109,35 +6119,61 @@ def finalize_cart(
                             ).strip() or "your order"
 
                     except Exception as e:
+
                         print(
-                            f"CART BUYER PRODUCT NAME ERROR: {e}"
+                            "CART BUYER PRODUCT NAME ERROR: "
+                            f"{e}"
                         )
 
-                    if buyer_id:
+                    if buyer_id_for_notification:
+
+                        # ----------------------------------------
+                        # PUSH NOTIFICATION
+                        # ----------------------------------------
 
                         send_order_status_notification(
-                            buyer_id=buyer_id,
-                            order_id=checkout_order_id,
+                            buyer_id=(
+                                buyer_id_for_notification
+                            ),
+                            order_id=(
+                                checkout_order_id
+                            ),
                             order_status="confirmed",
                             order_type="cart",
                             product_name=(
-                                product_name
-                                or "your order"
+                                product_name_for_notification
+                            ),
+                        )
+
+                        # ----------------------------------------
+                        # IN-APP NOTIFICATION
+                        # ----------------------------------------
+
+                        create_buyer_order_notification(
+                            buyer_id=(
+                                buyer_id_for_notification
+                            ),
+                            order_id=(
+                                checkout_order_id
+                            ),
+                            order_status="confirmed",
+                            order_type="cart",
+                            product_name=(
+                                product_name_for_notification
                             ),
                         )
 
         except Exception as e:
 
-        # Notification failure must NEVER
-        # make a successful order fail.
+            # Notification failure must NEVER
+            # make a successful order fail.
+
             print(
-                f"CART BUYER ORDER STATUS FCM ERROR: {e}"
+                "CART BUYER ORDER NOTIFICATION ERROR: "
+                f"{e}"
             )
 
-
     return result
-
-
         
         
 def finalize_cart_with_retry(
