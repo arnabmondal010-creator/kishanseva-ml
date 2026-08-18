@@ -3505,7 +3505,7 @@ async def update_order_status(
         update_data
     )
 
-    # ==========================================
+        # ==========================================
     # BUYER NOTIFICATION
     # ==========================================
 
@@ -3528,11 +3528,24 @@ async def update_order_status(
             "type",
             "order",
         )
-    ).strip()
+    ).strip().lower() or "order"
 
     if buyer_id:
 
-        send_order_status_notification(
+        print(
+            "BUYER ORDER STATUS TRIGGER | "
+            f"buyer={buyer_id} | "
+            f"order={request.orderId} | "
+            f"status={requested_status} | "
+            f"type={order_type} | "
+            f"product={product_name}"
+        )
+
+        # ------------------------------------------
+        # FCM PUSH NOTIFICATION
+        # ------------------------------------------
+
+        fcm_result = send_order_status_notification(
             buyer_id=buyer_id,
             order_id=request.orderId,
             order_status=requested_status,
@@ -3540,12 +3553,32 @@ async def update_order_status(
             product_name=product_name,
         )
 
-        create_buyer_order_notification(
-            buyer_id=buyer_id,
-            order_id=request.orderId,
-            order_status=requested_status,
-            order_type=order_type,
-            product_name=product_name,
+        print(
+            "BUYER ORDER STATUS FCM RESULT | "
+            f"order={request.orderId} | "
+            f"status={requested_status} | "
+            f"result={fcm_result}"
+        )
+
+        # ------------------------------------------
+        # IN-APP FIRESTORE NOTIFICATION
+        # ------------------------------------------
+
+        notification_result = (
+            create_buyer_order_notification(
+                buyer_id=buyer_id,
+                order_id=request.orderId,
+                order_status=requested_status,
+                order_type=order_type,
+                product_name=product_name,
+            )
+        )
+
+        print(
+            "BUYER ORDER STATUS DB RESULT | "
+            f"order={request.orderId} | "
+            f"status={requested_status} | "
+            f"result={notification_result}"
         )
 
     return {
