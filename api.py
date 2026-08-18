@@ -1336,6 +1336,93 @@ def send_order_status_notification(
 
         return False
 
+def create_buyer_order_notification(
+    buyer_id: str,
+    order_id: str,
+    order_status: str,
+    order_type: str = "order",
+    product_name: str = "your order",
+):
+    try:
+        status_messages = {
+            "confirmed": (
+                "Order Confirmed",
+                f"Your order for {product_name} has been confirmed.",
+            ),
+            "packing": (
+                "Order Being Packed",
+                f"Your order for {product_name} is being packed.",
+            ),
+            "ready": (
+                "Order Ready",
+                f"Your {product_name} is ready for pickup.",
+            ),
+            "out_for_delivery": (
+                "Out for Delivery",
+                f"Your {product_name} is on the way.",
+            ),
+            "completed": (
+                "Order Completed",
+                f"Your order for {product_name} has been completed.",
+            ),
+            "delivered": (
+                "Order Delivered",
+                f"Your order for {product_name} has been delivered.",
+            ),
+            "cancelled": (
+                "Order Cancelled",
+                f"Your order for {product_name} has been cancelled.",
+            ),
+        }
+
+        title, body = status_messages.get(
+            order_status,
+            (
+                "Order Update",
+                f"Your order for {product_name} has been updated.",
+            ),
+        )
+
+        notification_ref = (
+            db.collection("commerce_notifications")
+            .document()
+        )
+
+        notification_ref.set({
+            "notificationId": notification_ref.id,
+            "userId": buyer_id,
+            "title": title,
+            "body": body,
+            "type": "order_status",
+            "relatedId": order_id,
+            "orderId": order_id,
+            "orderStatus": order_status,
+            "orderType": order_type,
+            "isRead": False,
+            "read": False,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        })
+
+        print(
+            f"BUYER NOTIFICATION CREATED | "
+            f"buyer={buyer_id} | "
+            f"order={order_id} | "
+            f"status={order_status}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            f"BUYER NOTIFICATION CREATE ERROR | "
+            f"buyer={buyer_id} | "
+            f"order={order_id} | "
+            f"status={order_status} | "
+            f"error={e}"
+        )
+
+        return False
+
 
 
 
