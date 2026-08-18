@@ -3342,6 +3342,11 @@ async def update_order_status(
     user=Depends(verify_firebase_token),
 ):
 
+    print("========== UPDATE ORDER STATUS CALLED ==========")
+    print(f"ORDER ID: {request.orderId}")
+    print(f"REQUESTED STATUS: {request.status}")
+    print("=================================================")
+
     seller_id = user["uid"]
 
     allowed_statuses = [
@@ -3351,7 +3356,13 @@ async def update_order_status(
         "cancelled",
     ]
 
-    if request.status not in allowed_statuses:
+    requested_status = (
+        request.status
+        .strip()
+        .lower()
+    )
+
+    if requested_status not in allowed_statuses:
         raise HTTPException(
             status_code=400,
             detail="Invalid order status",
@@ -3385,12 +3396,6 @@ async def update_order_status(
     current_status = str(
         order.get("orderStatus", "")
     ).strip().lower()
-
-    requested_status = (
-        request.status
-        .strip()
-        .lower()
-    )
 
     # ==========================================
     # VALID STATUS TRANSITIONS
@@ -3505,7 +3510,14 @@ async def update_order_status(
         update_data
     )
 
-        # ==========================================
+    print(
+        "ORDER STATUS UPDATED | "
+        f"order={request.orderId} | "
+        f"old={current_status} | "
+        f"new={requested_status}"
+    )
+
+    # ==========================================
     # BUYER NOTIFICATION
     # ==========================================
 
@@ -3530,55 +3542,84 @@ async def update_order_status(
         )
     ).strip().lower() or "order"
 
+    print(
+        "BUYER NOTIFICATION DATA | "
+        f"buyer={buyer_id} | "
+        f"order={request.orderId} | "
+        f"status={requested_status} | "
+        f"type={order_type} | "
+        f"product={product_name}"
+    )
+
     if buyer_id:
 
-        print(
-            "BUYER ORDER STATUS TRIGGER | "
-            f"buyer={buyer_id} | "
-            f"order={request.orderId} | "
-            f"status={requested_status} | "
-            f"type={order_type} | "
-            f"product={product_name}"
-        )
+        # ==========================================
+        # FCM PUSH
+        # ==========================================
 
-        # ------------------------------------------
-        # FCM PUSH NOTIFICATION
-        # ------------------------------------------
+        try:
 
-        fcm_result = send_order_status_notification(
-            buyer_id=buyer_id,
-            order_id=request.orderId,
-            order_status=requested_status,
-            order_type=order_type,
-            product_name=product_name,
-        )
-
-        print(
-            "BUYER ORDER STATUS FCM RESULT | "
-            f"order={request.orderId} | "
-            f"status={requested_status} | "
-            f"result={fcm_result}"
-        )
-
-        # ------------------------------------------
-        # IN-APP FIRESTORE NOTIFICATION
-        # ------------------------------------------
-
-        notification_result = (
-            create_buyer_order_notification(
-                buyer_id=buyer_id,
-                order_id=request.orderId,
-                order_status=requested_status,
-                order_type=order_type,
-                product_name=product_name,
+            fcm_result = (
+                send_order_status_notification(
+                    buyer_id=buyer_id,
+                    order_id=request.orderId,
+                    order_status=requested_status,
+                    order_type=order_type,
+                    product_name=product_name,
+                )
             )
-        )
+
+            print(
+                "BUYER ORDER STATUS FCM RESULT | "
+                f"order={request.orderId} | "
+                f"status={requested_status} | "
+                f"result={fcm_result}"
+            )
+
+        except Exception as e:
+
+            print(
+                "BUYER ORDER STATUS FCM ERROR | "
+                f"order={request.orderId} | "
+                f"error={e}"
+            )
+
+        # ==========================================
+        # FIRESTORE IN-APP NOTIFICATION
+        # ==========================================
+
+        try:
+
+            notification_result = (
+                create_buyer_order_notification(
+                    buyer_id=buyer_id,
+                    order_id=request.orderId,
+                    order_status=requested_status,
+                    order_type=order_type,
+                    product_name=product_name,
+                )
+            )
+
+            print(
+                "BUYER ORDER STATUS DB RESULT | "
+                f"order={request.orderId} | "
+                f"status={requested_status} | "
+                f"result={notification_result}"
+            )
+
+        except Exception as e:
+
+            print(
+                "BUYER ORDER STATUS DB ERROR | "
+                f"order={request.orderId} | "
+                f"error={e}"
+            )
+
+    else:
 
         print(
-            "BUYER ORDER STATUS DB RESULT | "
-            f"order={request.orderId} | "
-            f"status={requested_status} | "
-            f"result={notification_result}"
+            "BUYER NOTIFICATION SKIPPED | "
+            f"No buyerId found for order={request.orderId}"
         )
 
     return {
