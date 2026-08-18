@@ -2603,6 +2603,91 @@ def reset_password(data: ResetPasswordRequest):
         "message": "Password reset successfully",
     }
 
+# =========================================================
+# BUYER LOGIN - GET INTERNAL FIREBASE AUTH EMAIL
+# =========================================================
+
+class BuyerLoginRequest(BaseModel):
+    phone: str
+
+
+@app.post("/auth/buyer-login-email")
+def buyer_login_email(
+    data: BuyerLoginRequest,
+):
+
+    phone = normalize_phone(data.phone)
+
+    clean_phone = phone.replace(
+        "+91",
+        "",
+    )
+
+    if (
+        len(clean_phone) != 10
+        or not clean_phone.isdigit()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid mobile number.",
+        )
+
+    # -----------------------------------------------------
+    # FIND BUYER
+    # -----------------------------------------------------
+
+    buyer_query = (
+        db.collection("buyers")
+        .where(
+            "phone",
+            "==",
+            f"+91{clean_phone}",
+        )
+        .limit(1)
+        .stream()
+    )
+
+    buyer_doc = next(
+        buyer_query,
+        None,
+    )
+
+    if buyer_doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Buyer account not found. Please sign up first.",
+        )
+
+    buyer_data = (
+        buyer_doc.to_dict()
+        or {}
+    )
+
+    # -----------------------------------------------------
+    # CHECK ACCOUNT STATUS
+    # -----------------------------------------------------
+
+    if buyer_data.get("isActive") is False:
+        raise HTTPException(
+            status_code=403,
+            detail="Your buyer account is inactive.",
+        )
+
+    # -----------------------------------------------------
+    # GENERATE INTERNAL FIREBASE AUTH EMAIL
+    # -----------------------------------------------------
+
+    auth_email = buyer_auth_email(
+        clean_phone
+    )
+
+    return {
+        "success": True,
+        "authEmail": auth_email,
+        "uid": buyer_doc.id,
+        "userType": "buyer",
+    }
+
 @app.post("/auth/merchant-reset-password")
 def merchant_reset_password(
     data: MerchantResetPasswordRequest,
