@@ -1204,6 +1204,139 @@ def otp_document_id(phone: str, purpose: str) -> str:
 
     return f"{clean_purpose}_{phone}"
 
+def send_order_status_notification(
+    buyer_id: str,
+    order_id: str,
+    order_status: str,
+    order_type: str = "order",
+    product_name: str = "your order",
+):
+    """
+    Sends an order-status notification to the buyer.
+
+    Notification failure must never fail the order operation.
+    """
+
+    try:
+        buyer_ref = (
+            db.collection("buyers")
+            .document(buyer_id)
+        )
+
+        buyer_doc = buyer_ref.get()
+
+        if not buyer_doc.exists:
+            print(
+                f"FCM STATUS: buyer not found: {buyer_id}"
+            )
+            return False
+
+        buyer_data = buyer_doc.to_dict() or {}
+
+        fcm_token = str(
+            buyer_data.get("fcmToken", "")
+        ).strip()
+
+        if not fcm_token:
+            print(
+                f"FCM STATUS: no FCM token for buyer: {buyer_id}"
+            )
+            return False
+
+        status_messages = {
+
+            "confirmed": (
+                "Order Confirmed",
+                f"Your order for {product_name} has been confirmed."
+            ),
+
+            "packing": (
+                "Order Being Packed",
+                f"Your order for {product_name} is being packed."
+            ),
+
+            "ready": (
+                "Order Ready",
+                f"Your {product_name} is ready for pickup."
+            ),
+
+            "out_for_delivery": (
+                "Out for Delivery",
+                f"Your {product_name} is on the way."
+            ),
+
+            "completed": (
+                "Order Completed",
+                f"Your order for {product_name} has been completed."
+            ),
+
+            "delivered": (
+                "Order Delivered",
+                f"Your order for {product_name} has been delivered."
+            ),
+
+            "cancelled": (
+                "Order Cancelled",
+                f"Your order for {product_name} has been cancelled."
+            ),
+        }
+
+        title, body = status_messages.get(
+            order_status,
+            (
+                "Order Update",
+                f"Your order for {product_name} has been updated."
+            ),
+        )
+
+        message = messaging.Message(
+
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+
+            data={
+                "type": "order_status",
+                "orderId": str(order_id),
+                "orderStatus": str(order_status),
+                "orderType": str(order_type),
+                "title": title,
+                "body": body,
+            },
+
+            token=fcm_token,
+
+            android=messaging.AndroidConfig(
+                priority="high",
+            ),
+        )
+
+        response = messaging.send(message)
+
+        print(
+            f"FCM ORDER STATUS SENT | "
+            f"buyer={buyer_id} | "
+            f"order={order_id} | "
+            f"status={order_status} | "
+            f"message={response}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            f"FCM ORDER STATUS ERROR | "
+            f"buyer={buyer_id} | "
+            f"order={order_id} | "
+            f"status={order_status} | "
+            f"error={e}"
+        )
+
+        return False
+
+
 
 @app.post("/auth/send-otp")
 def send_otp(data: SendOTPRequest):
@@ -1346,6 +1479,7 @@ def merchant_auth_email(phone: str) -> str:
         f"merchant_{clean_phone}"
         "@auth.kishanseva.internal"
     )
+
 
 class MerchantAvailabilityRequest(BaseModel):
     email: str
@@ -3076,6 +3210,8 @@ class CreateCheckoutRequest(BaseModel):
     items: List[CheckoutItem]
 
 
+
+
 def verify_firebase_token(
     authorization: str = Header(...),
 ):
@@ -3105,6 +3241,231 @@ def verify_firebase_token(
         )
 class NotificationSettingsRequest(BaseModel):
     enabled: bool
+
+class UpdateOrderStatusRequest(BaseModel):
+    orderId: str
+    status: str
+
+
+@app.post("/orders/update-status")
+async def update_order_status(
+    request: UpdateOrderStatusRequest,
+    user=Depends(verify_firebase_token),
+):
+
+    seller_id = user["uid"]
+
+    allowed_statuses = [
+        "packing",
+        "ready",
+        "out_for_delivery",
+        "cancelled",
+    ]
+
+    if request.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid order status",
+        )
+
+    order_ref = (
+        db.collection("commerce_orders")
+        .document(request.orderId)
+    )
+
+    order_doc = order_ref.get()
+
+    if not order_doc.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found",
+        )
+
+    order = order_doc.to_dict() or {}
+
+    # ==========================================
+    # SELLER AUTHORIZATION
+    # ==========================================
+
+    if str(order.get("sellerId")) != str(seller_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized seller",
+        )
+
+    current_status = str(
+        order.get("orderStatus", "")
+    ).strip().lower()
+
+    requested_status = (
+        request.status
+        .strip()
+        .lower()
+    )
+
+    # ==========================================
+    # VALID STATUS TRANSITIONS
+    # ==========================================
+
+    valid_transitions = {
+
+        "confirmed": [
+            "packing",
+            "cancelled",
+        ],
+
+        "accepted": [
+            "packing",
+            "cancelled",
+        ],
+
+        "packing": [
+            "ready",
+            "out_for_delivery",
+            "cancelled",
+        ],
+
+        "ready": [
+            "cancelled",
+        ],
+
+        "out_for_delivery": [
+            "cancelled",
+        ],
+    }
+
+    if requested_status not in valid_transitions.get(
+        current_status,
+        [],
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid status transition: "
+                f"{current_status} -> {requested_status}"
+            ),
+        )
+
+    # ==========================================
+    # UPDATE DATA
+    # ==========================================
+
+    update_data = {
+        "orderStatus": requested_status,
+        "updatedAt": firestore.SERVER_TIMESTAMP,
+    }
+
+    # ==========================================
+    # PACKING
+    # ==========================================
+
+    if requested_status == "packing":
+
+        update_data["packingAt"] = (
+            firestore.SERVER_TIMESTAMP
+        )
+
+    # ==========================================
+    # READY / OUT FOR DELIVERY
+    # ==========================================
+
+    if requested_status in [
+        "ready",
+        "out_for_delivery",
+    ]:
+
+        import random
+
+        verification_otp = str(
+            random.randint(
+                100000,
+                999999,
+            )
+        )
+
+        update_data.update({
+
+            "verificationOtp":
+                verification_otp,
+
+            "otpVerified":
+                False,
+
+            "otpGeneratedAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "readyAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+    # ==========================================
+    # CANCELLED
+    # ==========================================
+
+    if requested_status == "cancelled":
+
+        update_data["cancelledAt"] = (
+            firestore.SERVER_TIMESTAMP
+        )
+
+    # ==========================================
+    # FIRESTORE UPDATE
+    # ==========================================
+
+    order_ref.update(
+        update_data
+    )
+
+    # ==========================================
+    # BUYER NOTIFICATION
+    # ==========================================
+
+    product_name = str(
+        order.get(
+            "cropName",
+            "your order",
+        )
+    ).strip() or "your order"
+
+    buyer_id = str(
+        order.get(
+            "buyerId",
+            "",
+        )
+    ).strip()
+
+    order_type = str(
+        order.get(
+            "type",
+            "order",
+        )
+    ).strip()
+
+    if buyer_id:
+
+        send_order_status_notification(
+
+            buyer_id=buyer_id,
+
+            order_id=request.orderId,
+
+            order_status=requested_status,
+
+            order_type=order_type,
+
+            product_name=product_name,
+        )
+
+    return {
+
+        "success": True,
+
+        "orderId":
+            request.orderId,
+
+        "orderStatus":
+            requested_status,
+    }
 
 
 @app.post("/auth/notification-settings")
