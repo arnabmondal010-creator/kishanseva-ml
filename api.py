@@ -3773,25 +3773,7 @@ async def create_checkout(
 
     }
 
-@app.post("/test-buyer-order-notification")
-async def test_buyer_order_notification(
-    user=Depends(verify_firebase_token),
-):
-    buyer_id = user["uid"]
 
-    success = send_order_status_notification(
-        buyer_id=buyer_id,
-        order_id="jH9o23rUr8mVCJu8QjtI",
-        order_status="completed",
-        order_type="cart",
-        product_name="Aloo",
-    )
-
-    return {
-        "success": success,
-        "buyerId": buyer_id,
-        "orderId": "jH9o23rUr8mVCJu8QjtI",
-    }
 
 def calculate_delivery_amount(checkout):
 
@@ -5980,6 +5962,90 @@ def finalize_cart(
         print(
             f"CART NEW ORDER FCM ERROR: {e}"
         )
+
+    # ============================================================
+# BUYER ORDER CONFIRMED FCM
+# ============================================================
+
+    if not result.get("alreadyProcessed", False):
+
+        try:
+            checkout_order_id = result.get("orderId")
+
+            if checkout_order_id:
+
+                checkout_order_ref = (
+                    db.collection("commerce_orders")
+                    .document(checkout_order_id)
+                )
+
+                checkout_order_doc = (
+                    checkout_order_ref.get()
+                )
+
+                if checkout_order_doc.exists:
+
+                    checkout_order = (
+                        checkout_order_doc.to_dict()
+                        or {}
+                    )
+
+                    buyer_id = str(
+                        checkout_order.get(
+                            "buyerId",
+                            "",
+                        )
+                    ).strip()
+
+                    product_name = "your order"
+
+                    try:
+                        item_docs = list(
+                            db.collection("commerce_order_items")
+                            .where(
+                                "orderId",
+                                "==",
+                                checkout_order_id,
+                            )
+                            .limit(1)
+                            .stream()
+                        )
+
+                        if item_docs:
+                            item_data = item_docs[0].to_dict() or {}
+
+                            product_name = str(
+                                item_data.get(
+                                    "productName",
+                                    "your order",
+                                )
+                            ).strip() or "your order"
+
+                    except Exception as e:
+                        print(
+                            f"CART BUYER PRODUCT NAME ERROR: {e}"
+                        )
+
+                    if buyer_id:
+
+                        send_order_status_notification(
+                            buyer_id=buyer_id,
+                            order_id=checkout_order_id,
+                            order_status="confirmed",
+                            order_type="cart",
+                            product_name=(
+                                product_name
+                                or "your order"
+                            ),
+                        )
+
+        except Exception as e:
+
+        # Notification failure must NEVER
+        # make a successful order fail.
+            print(
+                f"CART BUYER ORDER STATUS FCM ERROR: {e}"
+            )
 
 
     return result
