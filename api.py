@@ -1279,6 +1279,16 @@ def send_order_status_notification(
                 "Order Cancelled",
                 f"Your order for {product_name} has been cancelled."
             ),
+
+            "refunded": (
+                "Payment Refunded",
+                f"Your payment for {product_name} has been refunded.",
+            ),
+
+            "payment_failed": (
+                "Payment Failed",
+                f"Your payment for {product_name} could not be completed.",
+            ),
         }
 
         title, body = status_messages.get(
@@ -1373,6 +1383,15 @@ def create_buyer_order_notification(
                 "Order Cancelled",
                 f"Your order for {product_name} has been cancelled.",
             ),
+            "refunded": (
+                "Payment Refunded",
+                f"Your payment for {product_name} has been refunded.",
+            ),
+
+            "payment_failed": (
+                "Payment Failed",
+                f"Your payment for {product_name} could not be completed.",
+            ),
         }
 
         title, body = status_messages.get(
@@ -1423,7 +1442,224 @@ def create_buyer_order_notification(
 
         return False
 
+def send_payment_notification(
+    buyer_id: str,
+    payment_id: str,
+    payment_status: str,
+    product_name: str = "your order",
+    checkout_id: str = "",
+):
+    """
+    Sends a payment-status FCM notification to the buyer.
 
+    Notification failure must never fail the payment operation.
+    """
+
+    try:
+        buyer_ref = (
+            db.collection("buyers")
+            .document(buyer_id)
+        )
+
+        buyer_doc = buyer_ref.get()
+
+        if not buyer_doc.exists:
+            print(
+                f"FCM PAYMENT: buyer not found: {buyer_id}"
+            )
+            return False
+
+        buyer_data = buyer_doc.to_dict() or {}
+
+        fcm_token = str(
+            buyer_data.get("fcmToken", "")
+        ).strip()
+
+        if not fcm_token:
+            print(
+                f"FCM PAYMENT: no FCM token for buyer: {buyer_id}"
+            )
+            return False
+
+        payment_messages = {
+
+            "failed": (
+                "Payment Failed",
+                f"Your payment for {product_name} could not be completed.",
+            ),
+
+            "refunded": (
+                "Payment Refunded",
+                f"Your payment for {product_name} has been refunded.",
+            ),
+
+            "successful": (
+                "Payment Successful",
+                f"Your payment for {product_name} was successful.",
+            ),
+        }
+
+        title, body = payment_messages.get(
+            payment_status,
+            (
+                "Payment Update",
+                f"Your payment for {product_name} has been updated.",
+            ),
+        )
+
+        message = messaging.Message(
+
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+
+            data={
+                "type": "payment_status",
+                "paymentId": str(payment_id),
+                "paymentStatus": str(payment_status),
+                "checkoutId": str(checkout_id),
+                "title": title,
+                "body": body,
+            },
+
+            token=fcm_token,
+
+            android=messaging.AndroidConfig(
+                priority="high",
+            ),
+        )
+
+        response = messaging.send(message)
+
+        print(
+            f"FCM PAYMENT SENT | "
+            f"buyer={buyer_id} | "
+            f"payment={payment_id} | "
+            f"status={payment_status} | "
+            f"message={response}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            f"FCM PAYMENT ERROR | "
+            f"buyer={buyer_id} | "
+            f"payment={payment_id} | "
+            f"status={payment_status} | "
+            f"error={e}"
+        )
+
+        return False
+
+
+def create_buyer_payment_notification(
+    buyer_id: str,
+    payment_id: str,
+    payment_status: str,
+    product_name: str = "your order",
+    checkout_id: str = "",
+):
+    """
+    Creates an in-app payment notification.
+
+    Notification failure must never fail the payment operation.
+    """
+
+    try:
+
+        payment_messages = {
+
+            "failed": (
+                "Payment Failed",
+                f"Your payment for {product_name} could not be completed.",
+            ),
+
+            "refunded": (
+                "Payment Refunded",
+                f"Your payment for {product_name} has been refunded.",
+            ),
+
+            "successful": (
+                "Payment Successful",
+                f"Your payment for {product_name} was successful.",
+            ),
+        }
+
+        title, body = payment_messages.get(
+            payment_status,
+            (
+                "Payment Update",
+                f"Your payment for {product_name} has been updated.",
+            ),
+        )
+
+        notification_ref = (
+            db.collection("commerce_notifications")
+            .document()
+        )
+
+        notification_ref.set({
+
+            "notificationId":
+                notification_ref.id,
+
+            "userId":
+                buyer_id,
+
+            "title":
+                title,
+
+            "body":
+                body,
+
+            "type":
+                "payment_status",
+
+            "relatedId":
+                checkout_id or payment_id,
+
+            "paymentId":
+                payment_id,
+
+            "checkoutId":
+                checkout_id,
+
+            "paymentStatus":
+                payment_status,
+
+            "isRead":
+                False,
+
+            "read":
+                False,
+
+            "createdAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+        print(
+            f"BUYER PAYMENT NOTIFICATION CREATED | "
+            f"buyer={buyer_id} | "
+            f"payment={payment_id} | "
+            f"status={payment_status}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            f"BUYER PAYMENT NOTIFICATION ERROR | "
+            f"buyer={buyer_id} | "
+            f"payment={payment_id} | "
+            f"status={payment_status} | "
+            f"error={e}"
+        )
+
+        return False
 
 
 
@@ -7179,6 +7415,85 @@ async def verify_razorpay_payment(
                         "refundId"
                     ),
                 )
+                # ==========================================
+# BUYER REFUND NOTIFICATION
+# ==========================================
+
+                try:
+
+                    refund_order_id = (
+                        request.razorpay_order_id
+                    )
+
+                    refund_product_name = "your order"
+
+                    if request.listingId:
+
+                        try:
+                            listing_ref = (
+                                db.collection(
+                                    "commerce_listings"
+                                )
+                                .document(
+                                    request.listingId
+                                )
+                            )
+
+                            listing_doc = listing_ref.get()
+
+                            if listing_doc.exists:
+
+                                listing_data = (
+                                    listing_doc.to_dict()
+                                    or {}
+                                )
+
+                                refund_product_name = str(
+                                    listing_data.get(
+                                        "cropName",
+                                        "your order",
+                                    )
+                                ).strip() or "your order"
+
+                        except Exception as product_error:
+
+                            print(
+                                "REFUND PRODUCT NAME ERROR:",
+                                str(product_error),
+                            )
+
+                    send_order_status_notification(
+                        buyer_id=buyer_id,
+                        order_id=refund_order_id,
+                        order_status="refunded",
+                        order_type="instant_buy",
+                        product_name=refund_product_name,
+                    )
+
+                    create_buyer_order_notification(
+                        buyer_id=buyer_id,
+                        order_id=refund_order_id,
+                        order_status="refunded",
+                        order_type="instant_buy",
+                        product_name=refund_product_name,
+                    )
+
+                    print(
+                        "BUYER REFUND NOTIFICATION SENT | "
+                        f"buyer={buyer_id} | "
+                        f"order={refund_order_id}"
+                    )
+
+                except Exception as notification_error:
+
+                    # Notification failure must never
+                    # prevent the refund response.
+
+                    print(
+                        "BUYER REFUND NOTIFICATION ERROR | "
+                        f"payment={request.razorpay_payment_id} | "
+                        f"error={notification_error}"
+                    )
 
                 raise HTTPException(
                     status_code=409,
@@ -7341,6 +7656,366 @@ async def verify_razorpay_payment(
             status_code=500,
             detail="Unable to finalize payment",
         )
+
+class PaymentFailureRequest(BaseModel):
+    checkoutId: Optional[str] = None
+    orderId: Optional[str] = None
+    listingId: Optional[str] = None
+    message: str = "Payment failed"
+
+
+@app.post("/payments/razorpay/failed")
+async def razorpay_payment_failed(
+    request: PaymentFailureRequest,
+    user=Depends(verify_firebase_token),
+):
+
+    buyer_id = user["uid"]
+
+    checkout_id = (
+        str(request.checkoutId).strip()
+        if request.checkoutId
+        else ""
+    )
+
+    order_id = (
+        str(request.orderId).strip()
+        if request.orderId
+        else ""
+    )
+
+    listing_id = (
+        str(request.listingId).strip()
+        if request.listingId
+        else ""
+    )
+
+    # ==========================================================
+    # IDENTIFY PAYMENT TYPE
+    # ==========================================================
+
+    payment_type = ""
+
+    if checkout_id:
+        payment_type = "cart"
+
+    elif order_id:
+        payment_type = "auction"
+
+    elif listing_id:
+        payment_type = "instant_buy"
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "checkoutId, orderId, or listingId "
+                "is required"
+            ),
+        )
+
+    # ==========================================================
+    # COMMON VARIABLES
+    # ==========================================================
+
+    product_name = "your order"
+    payment_reference = ""
+
+    # ==========================================================
+    # CART
+    # ==========================================================
+
+    if payment_type == "cart":
+
+        checkout_ref = (
+            db.collection(
+                "commerce_checkouts"
+            )
+            .document(checkout_id)
+        )
+
+        checkout_doc = checkout_ref.get()
+
+        if not checkout_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Checkout not found",
+            )
+
+        checkout = (
+            checkout_doc.to_dict()
+            or {}
+        )
+
+        checkout_buyer_id = str(
+            checkout.get(
+                "buyerId",
+                "",
+            )
+        ).strip()
+
+        if checkout_buyer_id != str(
+            buyer_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Unauthorized checkout",
+            )
+
+        items = checkout.get(
+            "items",
+            [],
+        )
+
+        if (
+            isinstance(items, list)
+            and len(items) > 0
+        ):
+
+            first_item = items[0]
+
+            if isinstance(
+                first_item,
+                dict,
+            ):
+
+                product_name = str(
+                    first_item.get(
+                        "productName",
+                        "your order",
+                    )
+                ).strip() or "your order"
+
+        current_status = str(
+            checkout.get(
+                "status",
+                "",
+            )
+        ).strip().lower()
+
+        if current_status == "payment_failed":
+
+            return {
+                "success": True,
+                "paymentStatus": "failed",
+                "paymentType": "cart",
+                "checkoutId": checkout_id,
+                "alreadyProcessed": True,
+            }
+
+        payment_reference = checkout_id
+
+        checkout_ref.update({
+
+            "status":
+                "payment_failed",
+
+            "paymentFailureMessage":
+                request.message,
+
+            "paymentFailedAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+    # ==========================================================
+    # AUCTION
+    # ==========================================================
+
+    elif payment_type == "auction":
+
+        order_ref = (
+            db.collection(
+                "commerce_orders"
+            )
+            .document(order_id)
+        )
+
+        order_doc = order_ref.get()
+
+        if not order_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Order not found",
+            )
+
+        order = (
+            order_doc.to_dict()
+            or {}
+        )
+
+        order_buyer_id = str(
+            order.get(
+                "buyerId",
+                "",
+            )
+        ).strip()
+
+        if order_buyer_id != str(
+            buyer_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Unauthorized order",
+            )
+
+        product_name = str(
+            order.get(
+                "cropName",
+                "your order",
+            )
+        ).strip() or "your order"
+
+        current_status = str(
+            order.get(
+                "paymentStatus",
+                "",
+            )
+        ).strip().lower()
+
+        if current_status == "failed":
+
+            return {
+                "success": True,
+                "paymentStatus": "failed",
+                "paymentType": "auction",
+                "orderId": order_id,
+                "alreadyProcessed": True,
+            }
+
+        payment_reference = order_id
+
+        order_ref.update({
+
+            "paymentStatus":
+                "failed",
+
+            "paymentFailureMessage":
+                request.message,
+
+            "paymentFailedAt":
+                firestore.SERVER_TIMESTAMP,
+
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+    # ==========================================================
+    # INSTANT BUY
+    # ==========================================================
+
+    elif payment_type == "instant_buy":
+
+        listing_ref = (
+            db.collection(
+                "commerce_listings"
+            )
+            .document(listing_id)
+        )
+
+        listing_doc = listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Listing not found",
+            )
+
+        listing = (
+            listing_doc.to_dict()
+            or {}
+        )
+
+        product_name = str(
+            listing.get(
+                "cropName",
+                listing.get(
+                    "productName",
+                    "your order",
+                ),
+            )
+        ).strip() or "your order"
+
+        payment_reference = listing_id
+
+        # ------------------------------------------------------
+        # Instant Buy has no commerce_checkouts record.
+        # There is therefore no order to mark as failed here.
+        # The payment failure is tied to the listing/payment
+        # attempt through listingId.
+        # ------------------------------------------------------
+
+    # ==========================================================
+    # PAYMENT FAILURE FCM
+    # ==========================================================
+
+    fcm_result = send_payment_notification(
+
+        buyer_id=buyer_id,
+
+        payment_id=payment_reference,
+
+        payment_status="failed",
+
+        product_name=product_name,
+
+        checkout_id=(
+            checkout_id
+            or order_id
+            or listing_id
+        ),
+    )
+
+    # ==========================================================
+    # PAYMENT FAILURE IN-APP NOTIFICATION
+    # ==========================================================
+
+    db_result = create_buyer_payment_notification(
+
+        buyer_id=buyer_id,
+
+        payment_id=payment_reference,
+
+        payment_status="failed",
+
+        product_name=product_name,
+
+        checkout_id=(
+            checkout_id
+            or order_id
+            or listing_id
+        ),
+    )
+
+    print(
+        "PAYMENT FAILURE PROCESSED | "
+        f"buyer={buyer_id} | "
+        f"type={payment_type} | "
+        f"reference={payment_reference} | "
+        f"fcm={fcm_result} | "
+        f"db={db_result}"
+    )
+
+    return {
+
+        "success":
+            True,
+
+        "paymentStatus":
+            "failed",
+
+        "paymentType":
+            payment_type,
+
+        "reference":
+            payment_reference,
+
+        "alreadyProcessed":
+            False,
+    }
+
 def claim_razorpay_webhook_event(
     event_id: str,
     event_type: str,
