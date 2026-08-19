@@ -9742,7 +9742,10 @@ async def verify_pickup_otp(
         # SELLER PAYMENT RECEIVED NOTIFICATION
         # ==========================================
 
-        if result.get("success") is True:
+        if (
+            result.get("success") is True
+            and result.get("alreadyProcessed") is not True
+        ):
 
             try:
 
