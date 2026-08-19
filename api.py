@@ -3913,6 +3913,203 @@ def get_notification_settings(
         "success": True,
         "notifications_enabled": enabled,
     }
+
+def send_seller_payment_notification(
+    seller_id: str,
+    order_id: str,
+    amount: float,
+    product_name: str = "your order",
+):
+    """
+    Sends seller payment-received FCM notification.
+
+    Notification failure must never fail order settlement.
+    """
+
+    try:
+
+        seller_ref = (
+            db.collection("commerce_users")
+            .document(seller_id)
+        )
+
+        seller_doc = seller_ref.get()
+
+        if not seller_doc.exists:
+
+            print(
+                f"FCM SELLER PAYMENT: "
+                f"seller not found: {seller_id}"
+            )
+
+            return False
+
+        seller_data = (
+            seller_doc.to_dict()
+            or {}
+        )
+
+        fcm_token = str(
+            seller_data.get(
+                "fcmToken",
+                "",
+            )
+        ).strip()
+
+        if not fcm_token:
+
+            print(
+                f"FCM SELLER PAYMENT: "
+                f"no FCM token for seller: {seller_id}"
+            )
+
+            return False
+
+        title = "Payment Received"
+
+        body = (
+            f"₹{amount:.2f} has been added "
+            f"to your earnings for {product_name}."
+        )
+
+        message = messaging.Message(
+
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+
+            data={
+                "type":
+                    "seller_payment",
+
+                "orderId":
+                    str(order_id),
+
+                "amount":
+                    str(amount),
+
+                "title":
+                    title,
+
+                "body":
+                    body,
+            },
+
+            token=fcm_token,
+
+            android=messaging.AndroidConfig(
+                priority="high",
+            ),
+        )
+
+        response = messaging.send(
+            message
+        )
+
+        print(
+            "FCM SELLER PAYMENT SENT | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"amount={amount} | "
+            f"message={response}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "FCM SELLER PAYMENT ERROR | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"error={e}"
+        )
+
+        return False
+
+
+def create_seller_payment_notification(
+    seller_id: str,
+    order_id: str,
+    amount: float,
+    product_name: str = "your order",
+):
+    """
+    Creates seller in-app payment notification.
+    """
+
+    try:
+
+        title = "Payment Received"
+
+        body = (
+            f"₹{amount:.2f} has been added "
+            f"to your earnings for {product_name}."
+        )
+
+        notification_ref = (
+            db.collection(
+                "commerce_notifications"
+            )
+            .document()
+        )
+
+        notification_ref.set({
+
+            "notificationId":
+                notification_ref.id,
+
+            "userId":
+                seller_id,
+
+            "title":
+                title,
+
+            "body":
+                body,
+
+            "type":
+                "seller_payment",
+
+            "relatedId":
+                order_id,
+
+            "orderId":
+                order_id,
+
+            "amount":
+                amount,
+
+            "isRead":
+                False,
+
+            "read":
+                False,
+
+            "createdAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+        print(
+            "SELLER PAYMENT NOTIFICATION CREATED | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"amount={amount}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "SELLER PAYMENT NOTIFICATION ERROR | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"error={e}"
+        )
+
+        return False
 @app.post("/checkout/create")
 async def create_checkout(
     request: CreateCheckoutRequest,
@@ -9515,10 +9712,113 @@ async def verify_pickup_otp(
             "success": True,
             "orderId": request.orderId,
             "orderStatus": "completed",
+
+            "sellerSettlements": [
+                {
+                    "sellerId":
+                        row["seller_id"],
+
+                    "amount":
+                        row["seller_payout"],
+
+                    "productName": str(
+                        row["item"].get(
+                            "productName",
+                            fresh.get(
+                                "cropName",
+                                "your order",
+                            ),
+                        )
+                    ).strip() or "your order",
+                }
+                for row in settlement_rows
+            ],
         }
 
     try:
         result = complete_order(transaction)
+
+                # ==========================================
+        # SELLER PAYMENT RECEIVED NOTIFICATION
+        # ==========================================
+
+        if result.get("success") is True:
+
+            try:
+
+                seller_settlements = result.get(
+                    "sellerSettlements",
+                    [],
+                )
+
+                for settlement in seller_settlements:
+
+                    seller_id = str(
+                        settlement.get(
+                            "sellerId",
+                            "",
+                        )
+                    ).strip()
+
+                    if not seller_id:
+                        continue
+
+                    seller_amount = round(
+                        float(
+                            settlement.get(
+                                "amount",
+                                0,
+                            )
+                        ),
+                        2,
+                    )
+
+                    product_name = str(
+                        settlement.get(
+                            "productName",
+                            "your order",
+                        )
+                    ).strip() or "your order"
+
+                    fcm_result = (
+                        send_seller_payment_notification(
+                            seller_id=seller_id,
+                            order_id=request.orderId,
+                            amount=seller_amount,
+                            product_name=product_name,
+                        )
+                    )
+
+                    db_result = (
+                        create_seller_payment_notification(
+                            seller_id=seller_id,
+                            order_id=request.orderId,
+                            amount=seller_amount,
+                            product_name=product_name,
+                        )
+                    )
+
+                    print(
+                        "SELLER PAYMENT "
+                        "NOTIFICATION RESULT | "
+                        f"seller={seller_id} | "
+                        f"order={request.orderId} | "
+                        f"amount={seller_amount} | "
+                        f"fcm={fcm_result} | "
+                        f"db={db_result}"
+                    )
+
+            except Exception as notification_error:
+
+                # Notification failure must NEVER
+                # roll back successful settlement.
+
+                print(
+                    "SELLER PAYMENT "
+                    "NOTIFICATION ERROR | "
+                    f"order={request.orderId} | "
+                    f"error={notification_error}"
+                )
 
     # ==========================================
     # BUYER COMPLETION NOTIFICATION
