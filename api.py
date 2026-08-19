@@ -8678,13 +8678,80 @@ async def verify_pickup_otp(
         }
 
     try:
-        return complete_order(transaction)
+        result = complete_order(transaction)
+
+    # ==========================================
+    # BUYER COMPLETION NOTIFICATION
+    # ==========================================
+
+        if result.get("success") is True:
+
+            try:
+                buyer_id = str(
+                    order.get(
+                        "buyerId",
+                        "",
+                    )
+                ).strip()
+
+                product_name = str(
+                    order.get(
+                        "cropName",
+                        "your order",
+                    )
+                ).strip() or "your order"
+
+                order_type = str(
+                    order.get(
+                        "type",
+                        "order",
+                    )
+                ).strip()
+
+                if buyer_id:
+
+                    send_order_status_notification(
+                        buyer_id=buyer_id,
+                        order_id=request.orderId,
+                        order_status="completed",
+                        order_type=order_type,
+                        product_name=product_name,
+                    )
+
+                    create_buyer_order_notification(
+                        buyer_id=buyer_id,
+                        order_id=request.orderId,
+                        order_status="completed",
+                        order_type=order_type,
+                        product_name=product_name,
+                    )
+
+                    print(
+                        "BUYER COMPLETION NOTIFICATION SENT | "
+                        f"buyer={buyer_id} | "
+                        f"order={request.orderId}"
+                    )
+
+            except Exception as notification_error:
+
+            # Notification failure must NEVER
+            # roll back a successful order.
+                print(
+                    "BUYER COMPLETION NOTIFICATION ERROR | "
+                    f"order={request.orderId} | "
+                    f"error={notification_error}"
+                )
+
+        return result
+
     except Exception as e:
+
         print(
             "VERIFY PICKUP OTP / SETTLEMENT ERROR:",
             request.orderId,
             str(e),
         )
+
         raise HTTPException(
             status_code=500,
             detail="Order completion failed",
