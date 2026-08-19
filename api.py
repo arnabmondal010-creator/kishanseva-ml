@@ -5557,36 +5557,46 @@ def finalize_instant_buy(
             transaction
         )
     )
-   # ============================================================
-# NEW ORDER FCM NOTIFICATION - INSTANT BUY
+  # ============================================================
+# INSTANT BUY ORDER NOTIFICATIONS
 # ============================================================
 
-    if not result["alreadyProcessed"]:
+    if not result.get(
+        "alreadyProcessed",
+        False,
+    ):
 
-        try:
-
-            instant_buy_order_id = result.get(
-                "orderId"
+        instant_buy_order_id = str(
+            result.get(
+                "orderId",
+                "",
             )
+        ).strip()
 
-            instant_buy_seller_id = str(
-                result.get(
-                    "sellerId",
-                    "",
-                )
-            ).strip()
+        instant_buy_seller_id = str(
+            result.get(
+                "sellerId",
+                "",
+            )
+        ).strip()
 
-            instant_buy_crop_name = str(
-                result.get(
-                    "cropName",
-                    "your product",
-                )
-            ).strip() or "your product"
+        instant_buy_crop_name = str(
+            result.get(
+                "cropName",
+                "your product",
+            )
+        ).strip() or "your product"
 
-            if (
-                instant_buy_order_id
-                and instant_buy_seller_id
-            ):
+    # ========================================================
+    # SELLER — NEW ORDER
+    # ========================================================
+
+        if (
+            instant_buy_order_id
+            and instant_buy_seller_id
+        ):
+
+            try:
 
                 send_new_order_notification(
                     seller_id=
@@ -5602,10 +5612,63 @@ def finalize_instant_buy(
                         instant_buy_crop_name,
                 )
 
+                print(
+                    "INSTANT BUY SELLER "
+                    "NEW ORDER NOTIFICATION SENT | "
+                    f"seller={instant_buy_seller_id} | "
+                    f"order={instant_buy_order_id}"
+                )
+
+            except Exception as e:
+
+                print(
+                    "INSTANT BUY SELLER "
+                    "NOTIFICATION ERROR | "
+                    f"order={instant_buy_order_id} | "
+                    f"error={e}"
+                )
+
+    # ========================================================
+    # BUYER — ORDER CONFIRMED
+    # ========================================================
+
+        try:
+
+            if instant_buy_order_id:
+
+                send_order_status_notification(
+                    buyer_id=buyer_id,
+                    order_id=instant_buy_order_id,
+                    order_status="confirmed",
+                    order_type="instant_buy",
+                    product_name=instant_buy_crop_name,
+                )
+
+                create_buyer_order_notification(
+                    buyer_id=buyer_id,
+                    order_id=instant_buy_order_id,
+                    order_status="confirmed",
+                    order_type="instant_buy",
+                    product_name=instant_buy_crop_name,
+                )
+
+                print(
+                    "INSTANT BUY BUYER "
+                    "CONFIRMED NOTIFICATION SENT | "
+                    f"buyer={buyer_id} | "
+                    f"order={instant_buy_order_id}"
+                )
+
         except Exception as e:
 
+        # Notification failure must never
+        # fail successful payment finalization.
+
             print(
-                f"INSTANT BUY NEW ORDER FCM ERROR: {e}"
+                "INSTANT BUY BUYER "
+                "NOTIFICATION ERROR | "
+                f"order={instant_buy_order_id} | "
+                f"error={e}"
             )
     # ==========================================
     # 10. UPDATE ACTIVE BIDS AFTER TRANSACTION
@@ -6794,9 +6857,111 @@ def finalize_auction_payment(
 
     print(result)
 
-    updated_order = order_ref.get()
+# ============================================================
+# AUCTION PAYMENT NOTIFICATIONS
+# ============================================================
 
-    print(updated_order.to_dict())
+    if not result.get(
+        "alreadyProcessed",
+        False,
+    ):
+
+        try:
+            updated_order = order_ref.get()
+
+            if updated_order.exists:
+
+                updated_order_data = (
+                    updated_order.to_dict()
+                    or {}
+                )
+
+                seller_id_for_notification = str(
+                    updated_order_data.get(
+                        "sellerId",
+                        "",
+                    )
+                ).strip()
+
+                product_name_for_notification = str(
+                    updated_order_data.get(
+                        "cropName",
+                        "your product",
+                    )
+                ).strip() or "your product"
+
+            # =================================================
+            # SELLER — NEW ORDER
+            # =================================================
+
+                if seller_id_for_notification:
+
+                    send_new_order_notification(
+                        seller_id=seller_id_for_notification,
+                        order_id=order_id,
+                        order_type="auction",
+                        product_name=product_name_for_notification,
+                    )
+
+                    print(
+                        "AUCTION SELLER NEW ORDER "
+                        "NOTIFICATION SENT | "
+                        f"seller={seller_id_for_notification} | "
+                        f"order={order_id}"
+                    )
+
+            # =================================================
+            # BUYER — ORDER CONFIRMED
+            # =================================================
+
+                buyer_id_for_notification = str(
+                    updated_order_data.get(
+                        "buyerId",
+                        buyer_id,
+                    )
+                ).strip()
+
+                if buyer_id_for_notification:
+
+                    send_order_status_notification(
+                        buyer_id=buyer_id_for_notification,
+                        order_id=order_id,
+                        order_status="confirmed",
+                        order_type="auction",
+                        product_name=product_name_for_notification,
+                    )
+
+                    create_buyer_order_notification(
+                        buyer_id=buyer_id_for_notification,
+                        order_id=order_id,
+                        order_status="confirmed",
+                        order_type="auction",
+                        product_name=product_name_for_notification,
+                    )
+
+                    print(
+                        "AUCTION BUYER CONFIRMED "
+                        "NOTIFICATION SENT | "
+                        f"buyer={buyer_id_for_notification} | "
+                        f"order={order_id}"
+                    )
+
+        except Exception as e:
+
+        # Notification failure must NEVER
+        # fail successful payment finalization.
+
+            print(
+                "AUCTION PAYMENT NOTIFICATION ERROR | "
+                f"order={order_id} | "
+                f"error={e}"
+            )
+
+    print(
+        "AUCTION PAYMENT FINALIZED:",
+        result,
+    )
+
     return result
 
 @app.post("/payments/razorpay/verify")
