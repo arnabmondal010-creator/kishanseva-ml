@@ -41,6 +41,93 @@ from datetime import datetime, timezone, timedelta
 import secrets
 
 
+
+
+GOOGLE_ROUTES_API_KEY = os.getenv(
+    "GOOGLE_ROUTES_API_KEY"
+)
+
+
+def calculate_road_distance_km(
+    seller_lat: float,
+    seller_lng: float,
+    buyer_lat: float,
+    buyer_lng: float,
+) -> float:
+
+    if not GOOGLE_ROUTES_API_KEY:
+        raise RuntimeError(
+            "GOOGLE_ROUTES_API_KEY is not configured"
+        )
+
+    url = (
+        "https://routes.googleapis.com/"
+        "directions/v2:computeRoutes"
+    )
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key":
+            GOOGLE_ROUTES_API_KEY,
+        "X-Goog-FieldMask":
+            "routes.distanceMeters,"
+            "routes.duration",
+    }
+
+    payload = {
+        "origin": {
+            "location": {
+                "latLng": {
+                    "latitude": seller_lat,
+                    "longitude": seller_lng,
+                }
+            }
+        },
+
+        "destination": {
+            "location": {
+                "latLng": {
+                    "latitude": buyer_lat,
+                    "longitude": buyer_lng,
+                }
+            }
+        },
+
+        "travelMode": "DRIVE",
+
+        "routingPreference":
+            "TRAFFIC_AWARE",
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    result = response.json()
+
+    routes = result.get("routes", [])
+
+    if not routes:
+        raise RuntimeError(
+            "No road route found between "
+            "seller and buyer"
+        )
+
+    distance_meters = routes[0].get("distanceMeters")
+
+    if distance_meters is None:
+        raise RuntimeError(
+            "Road distance was not returned"
+        )
+
+    return float(distance_meters) / 1000.0
+
+
 # ==============================
 # KISHANSEVA OTP AUTHENTICATION
 # ==============================
@@ -276,6 +363,31 @@ CACHE_TTL = 3600  # 1 hour
 # App
 # -----------------------------
 app = FastAPI(title="KishanSeva AI API")
+
+
+class RoadDistanceTestRequest(BaseModel):
+    seller_lat: float
+    seller_lng: float
+    buyer_lat: float
+    buyer_lng: float
+
+
+@app.post("/test-road-distance")
+def test_road_distance(
+    request: RoadDistanceTestRequest,
+):
+    distance_km = calculate_road_distance_km(
+        seller_lat=request.seller_lat,
+        seller_lng=request.seller_lng,
+        buyer_lat=request.buyer_lat,
+        buyer_lng=request.buyer_lng,
+    )
+
+    return {
+        "distanceKm": round(distance_km, 2),
+        "distanceType": "road",
+        "provider": "google_routes",
+    }
 
 @app.get("/")
 def root():
