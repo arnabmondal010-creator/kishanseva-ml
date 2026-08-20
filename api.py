@@ -4399,6 +4399,7 @@ async def create_checkout(
 
         })
         address = None
+        distance_km = 0.0
 
         if request.deliveryMethod == "home":
 
@@ -4428,6 +4429,90 @@ async def create_checkout(
                     status_code=403,
                     detail="Address does not belong to this buyer",
                 )
+
+    # ============================================================
+    # BUYER COORDINATES
+    # ============================================================
+
+            buyer_lat = address.get("latitude")
+            buyer_lng = address.get("longitude")
+
+            if buyer_lat is None or buyer_lng is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Delivery address does not have "
+                        "valid latitude and longitude."
+                    ),
+                )
+
+    # ============================================================
+    # SELLER
+    # Cart is single-seller only.
+    # cart_seller_id already exists in your checkout code.
+    # ============================================================
+
+            seller_ref = (
+                db.collection("commerce_users")
+                .document(cart_seller_id)
+            )
+
+            seller_doc = seller_ref.get()
+
+            if not seller_doc.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Seller not found.",
+                )
+
+            seller = seller_doc.to_dict()
+
+            seller_lat = seller.get("shopLatitude")
+            seller_lng = seller.get("shopLongitude")
+
+            if seller_lat is None or seller_lng is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Seller does not have valid "
+                        "shop coordinates."
+                    ),
+                )
+
+    # ============================================================
+    # ROAD DISTANCE
+    # ============================================================
+
+            distance_km = calculate_road_distance_km(
+                seller_lat=float(seller_lat),
+                seller_lng=float(seller_lng),
+                buyer_lat=float(buyer_lat),
+                buyer_lng=float(buyer_lng),
+            )
+
+    # ============================================================
+    # MAXIMUM ROAD DISTANCE
+    # ============================================================
+
+            if distance_km > 15:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Home delivery is unavailable. "
+                        f"Road distance is "
+                        f"{distance_km:.2f} km; "
+                        f"maximum allowed is 15 km."
+                    ),
+                )
+
+    delivery_charge, grand_total = calculate_delivery_amount(
+        {
+            "deliveryMethod": request.deliveryMethod,
+            "subtotal": subtotal,
+            "totalWeight": total_weight,
+            "distanceKm": distance_km,
+        }
+    )
     checkout_data = {
 
         "checkoutId": checkout_id,
@@ -4446,9 +4531,8 @@ async def create_checkout(
 
         "subtotal": subtotal,
 
-        "deliveryCharge": request.deliveryCharge,
-
-        "grandTotal": request.grandTotal,
+        "deliveryCharge": delivery_charge,
+        "grandTotal": grand_total,
 
         "totalWeight": total_weight,
 
@@ -4459,6 +4543,11 @@ async def create_checkout(
         "createdAt": firestore.SERVER_TIMESTAMP,
 
         "updatedAt": firestore.SERVER_TIMESTAMP,
+        "distanceKm": distance_km,
+
+        "distanceType": "road",
+
+        "distanceProvider": "google_routes",
 
     }
 
@@ -4471,9 +4560,9 @@ async def create_checkout(
 
         "subtotal": subtotal,
 
-        "deliveryCharge": request.deliveryCharge,
-
-        "grandTotal": request.grandTotal,
+        "deliveryCharge": delivery_charge,
+        "grandTotal": grand_total,
+        "distanceKm": distance_km,
 
     }
 
@@ -4501,7 +4590,12 @@ def calculate_delivery_amount(checkout):
 
     subtotal = float(checkout.get("subtotal", 0))
     total_weight = float(checkout.get("totalWeight", 0))
-    distance = float(checkout.get("distanceKm", 0))
+    if distance_km is None:
+        distance_km = float(
+            checkout.get("distanceKm", 0)
+        )
+
+    distance = float(distance_km)
 
     delivery_charge = 0.0
 
@@ -4535,6 +4629,33 @@ def calculate_delivery_amount(checkout):
     )
 
     return delivery_charge, grand_total
+
+def get_checkout_seller_id(items):
+    if not items:
+        raise HTTPException(
+            status_code=400,
+            detail="Checkout contains no items.",
+        )
+
+    seller_ids = {
+        str(item.get("sellerId"))
+        for item in items
+        if item.get("sellerId")
+    }
+
+    if not seller_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Seller information is missing.",
+        )
+
+    if len(seller_ids) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Multiple sellers are not supported.",
+        )
+
+    return next(iter(seller_ids))
 
 
 @app.post("/payments/razorpay/create-order")
@@ -4581,6 +4702,11 @@ async def create_razorpay_order(
             delivery_charge, grand_total = (
                 calculate_delivery_amount(checkout)
             )
+            checkout_ref.update({
+                "deliveryCharge": delivery_charge,
+                "grandTotal": grand_total,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            })
 
             amount = grand_total
             amount_paise = int(round(amount * 100))
