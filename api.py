@@ -3641,9 +3641,11 @@ class CheckoutItem(BaseModel):
 class CreateCheckoutRequest(BaseModel):
     addressId: Optional[str] = None
     deliveryMethod: str
-    subtotal: float
-    deliveryCharge: float
-    grandTotal: float
+    items: List[CheckoutItem]
+
+class CheckoutPreviewRequest(BaseModel):
+    addressId: Optional[str] = None
+    deliveryMethod: str
     items: List[CheckoutItem]
 
 
@@ -4222,6 +4224,339 @@ def create_seller_payment_notification(
         )
 
         return False
+
+@app.post("/checkout/preview")
+async def checkout_preview(
+    request: CheckoutPreviewRequest,
+    user=Depends(verify_firebase_token),
+):
+    buyer_id = user["uid"]
+
+    if not request.items:
+        raise HTTPException(
+            status_code=400,
+            detail="Cart is empty",
+        )
+
+    # ============================================================
+    # RESOLVE PRODUCTS
+    # ============================================================
+
+    subtotal = 0.0
+    total_weight = 0.0
+    seller_id = None
+
+    for item in request.items:
+
+        listing_doc = (
+            db.collection("commerce_listings")
+            .document(item.listingId)
+            .get()
+        )
+
+        product_type = "farm"
+
+        if not listing_doc.exists:
+            listing_doc = (
+                db.collection("commerce_shop_products")
+                .document(item.listingId)
+                .get()
+            )
+
+            product_type = "retail"
+
+        if not listing_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Product {item.listingId} "
+                    "not found"
+                ),
+            )
+
+        listing = listing_doc.to_dict()
+
+        if product_type == "farm":
+            available_qty = float(
+                listing.get("quantity", 0)
+            )
+        else:
+            available_qty = float(
+                listing.get("stock", 0)
+            )
+
+        if item.quantity <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid quantity",
+            )
+
+        if item.quantity > available_qty:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{listing.get('cropName') or listing.get('productName') or 'Product'} "
+                    "is out of stock"
+                ),
+            )
+
+        price = float(
+            listing.get("pricePerUnit", 0)
+        )
+
+        subtotal += (
+            price * item.quantity
+        )
+
+        weight_per_unit = float(
+            listing.get(
+                "weightPerUnit",
+                1,
+            )
+        )
+
+        total_weight += (
+            weight_per_unit *
+            item.quantity
+        )
+
+        current_seller_id = str(
+            listing.get("sellerId", "")
+        )
+
+        if not current_seller_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Product seller information "
+                    "is missing."
+                ),
+            )
+
+        if seller_id is None:
+            seller_id = current_seller_id
+
+        elif seller_id != current_seller_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cart can contain products "
+                    "from only one seller."
+                ),
+            )
+
+    # ============================================================
+    # PICKUP
+    # ============================================================
+
+    if request.deliveryMethod != "home":
+
+        return {
+            "success": True,
+            "subtotal": round(
+                subtotal,
+                2,
+            ),
+            "totalWeight": round(
+                total_weight,
+                2,
+            ),
+            "distanceKm": 0,
+            "distanceType": "road",
+            "distanceProvider": "google_routes",
+            "deliveryCharge": 0,
+            "grandTotal": round(
+                subtotal,
+                2,
+            ),
+            "homeDeliveryAvailable": True,
+        }
+
+    # ============================================================
+    # HOME DELIVERY ADDRESS
+    # ============================================================
+
+    if not request.addressId:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Address is required "
+                "for home delivery."
+            ),
+        )
+
+    address_ref = (
+        db.collection("commerce_addresses")
+        .document(request.addressId)
+    )
+
+    address_doc = address_ref.get()
+
+    if not address_doc.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery address not found",
+        )
+
+    address = address_doc.to_dict()
+
+    if address.get("buyerId") != buyer_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Address does not belong "
+                "to this buyer"
+            ),
+        )
+
+    buyer_lat = address.get("latitude")
+    buyer_lng = address.get("longitude")
+
+    if buyer_lat is None or buyer_lng is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Delivery address does not "
+                "have valid coordinates."
+            ),
+        )
+
+    # ============================================================
+    # SELLER
+    # ============================================================
+
+    seller_ref = (
+        db.collection("commerce_users")
+        .document(seller_id)
+    )
+
+    seller_doc = seller_ref.get()
+
+    if not seller_doc.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Seller not found.",
+        )
+
+    seller = seller_doc.to_dict()
+
+    if seller.get("isActive") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Seller is currently inactive.",
+        )
+
+    if seller.get("isShopOpen") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Seller shop is currently closed.",
+        )
+
+    if seller.get("deliveryAvailable") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Home delivery is not available "
+                "for this seller."
+            ),
+        )
+
+    seller_lat = seller.get(
+        "shopLatitude"
+    )
+    seller_lng = seller.get(
+        "shopLongitude"
+    )
+
+    if seller_lat is None or seller_lng is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Seller does not have valid "
+                "shop coordinates."
+            ),
+        )
+
+    # ============================================================
+    # ROAD DISTANCE
+    # ============================================================
+
+    distance_km = calculate_road_distance_km(
+        seller_lat=float(seller_lat),
+        seller_lng=float(seller_lng),
+        buyer_lat=float(buyer_lat),
+        buyer_lng=float(buyer_lng),
+    )
+
+    if distance_km > 15:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Home delivery is unavailable. "
+                f"Road distance is "
+                f"{distance_km:.2f} km; "
+                f"maximum allowed is 15 km."
+            ),
+        )
+
+    # ============================================================
+    # DELIVERY PRICE
+    # ============================================================
+
+    delivery_charge, grand_total = (
+        calculate_delivery_amount(
+            {
+                "deliveryMethod":
+                    request.deliveryMethod,
+                "subtotal":
+                    subtotal,
+                "totalWeight":
+                    total_weight,
+                "distanceKm":
+                    distance_km,
+            },
+            distance_km=distance_km,
+        )
+    )
+
+    return {
+        "success": True,
+
+        "subtotal": round(
+            subtotal,
+            2,
+        ),
+
+        "totalWeight": round(
+            total_weight,
+            2,
+        ),
+
+        "distanceKm": round(
+            distance_km,
+            2,
+        ),
+
+        "distanceType": "road",
+
+        "distanceProvider":
+            "google_routes",
+
+        "deliveryCharge":
+            round(
+                delivery_charge,
+                2,
+            ),
+
+        "grandTotal":
+            round(
+                grand_total,
+                2,
+            ),
+
+        "homeDeliveryAvailable":
+            True,
+    }
 @app.post("/checkout/create")
 async def create_checkout(
     request: CreateCheckoutRequest,
@@ -4568,7 +4903,10 @@ async def create_checkout(
 
 
 
-def calculate_delivery_amount(checkout):
+def calculate_delivery_amount(
+    checkout,
+    distance_km=None,
+):
 
     settings_doc = (
         db.collection("delivery_settings")
