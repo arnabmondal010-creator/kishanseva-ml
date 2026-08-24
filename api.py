@@ -3978,6 +3978,301 @@ async def update_order_status(
             requested_status,
     }
 
+FCM_BATCH_SIZE = 500
+
+
+def _chunk_list(items, size):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+def get_broadcast_fcm_tokens(audience: str):
+    audience = str(audience or "Everyone").strip().lower()
+
+    tokens = set()
+
+    # Buyers
+    if audience in {
+        "everyone",
+        "buyers",
+        "premium buyers",
+    }:
+        buyer_docs = (
+            db.collection("buyers")
+            .where("isActive", "==", True)
+            .stream()
+        )
+
+        for doc in buyer_docs:
+            data = doc.to_dict() or {}
+
+            if (
+                audience == "premium buyers"
+                and data.get("premiumBuyer") is not True
+            ):
+                continue
+
+            token = str(
+                data.get("fcmToken", "")
+            ).strip()
+
+            if token:
+                tokens.add(token)
+
+    # Sellers
+    if audience in {
+        "everyone",
+        "sellers",
+        "verified sellers",
+    }:
+        seller_docs = (
+            db.collection("commerce_users")
+            .where("isActive", "==", True)
+            .stream()
+        )
+
+        for doc in seller_docs:
+            data = doc.to_dict() or {}
+
+            if (
+                audience == "verified sellers"
+                and data.get("verified") is not True
+            ):
+                continue
+
+            token = str(
+                data.get("fcmToken", "")
+            ).strip()
+
+            if token:
+                tokens.add(token)
+
+    return list(tokens)
+
+def send_broadcast_fcm(
+    title: str,
+    message: str,
+    image: str,
+    notification_id: str,
+    tokens: list,
+):
+    success_count = 0
+    failure_count = 0
+
+    for batch in _chunk_list(
+        tokens,
+        FCM_BATCH_SIZE,
+    ):
+        fcm_message = messaging.MulticastMessage(
+            notification=messaging.Notification(
+                title=title,
+                body=message,
+                image=image or None,
+            ),
+            data={
+                "type": "broadcast",
+                "notificationId": str(
+                    notification_id
+                ),
+            },
+            tokens=batch,
+        )
+
+        response = (
+            messaging.send_each_for_multicast(
+                fcm_message
+            )
+        )
+
+        success_count += response.success_count
+        failure_count += response.failure_count
+
+    return {
+        "successCount": success_count,
+        "failureCount": failure_count,
+    }
+
+@app.post("/notifications/broadcast/{notification_id}")
+def process_broadcast_notification(
+    notification_id: str,
+    user=Depends(verify_firebase_token),
+):
+    notification_ref = (
+        db.collection("commerce_notifications")
+        .document(notification_id)
+    )
+
+    notification_doc = notification_ref.get()
+
+    if not notification_doc.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Notification not found",
+        )
+
+    notification = notification_doc.to_dict() or {}
+
+    # Only broadcast notifications can use this endpoint.
+    if notification.get("type") != "broadcast":
+        raise HTTPException(
+            status_code=400,
+            detail="This is not a broadcast notification",
+        )
+
+    # Prevent duplicate processing.
+    if notification.get("status") != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Notification is not pending. "
+                f"Current status: "
+                f"{notification.get('status')}"
+            ),
+        )
+
+    # Lock the job before sending.
+    notification_ref.update({
+        "status": "processing",
+        "updatedAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    try:
+        title = str(
+            notification.get("title", "")
+        ).strip()
+
+        message = str(
+            notification.get("message", "")
+        ).strip()
+
+        image = str(
+            notification.get("image", "")
+        ).strip()
+
+        audience = str(
+            notification.get(
+                "audience",
+                "Everyone",
+            )
+        ).strip()
+
+        if not title:
+            raise Exception(
+                "Notification title is empty"
+            )
+
+        if not message:
+            raise Exception(
+                "Notification message is empty"
+            )
+
+        # Get eligible FCM tokens.
+        tokens = get_broadcast_fcm_tokens(
+            audience
+        )
+
+        print(
+            "BROADCAST NOTIFICATION:",
+            notification_id,
+            "audience=",
+            audience,
+            "tokens=",
+            len(tokens),
+        )
+
+        # No eligible devices.
+        if not tokens:
+            notification_ref.update({
+                "status": "completed",
+                "sentCount": 0,
+                "deliveredCount": 0,
+                "error": "No FCM tokens found",
+                "completedAt":
+                    firestore.SERVER_TIMESTAMP,
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            })
+
+            return {
+                "success": True,
+                "notificationId":
+                    notification_id,
+                "sentCount": 0,
+                "failedCount": 0,
+                "message":
+                    "No FCM tokens found",
+            }
+
+        # Send through Firebase Cloud Messaging.
+        result = send_broadcast_fcm(
+            title=title,
+            message=message,
+            image=image,
+            notification_id=
+                notification_id,
+            tokens=tokens,
+        )
+
+        success_count = result[
+            "successCount"
+        ]
+
+        failure_count = result[
+            "failureCount"
+        ]
+
+        notification_ref.update({
+            "status": (
+                "completed"
+                if success_count > 0
+                else "failed"
+            ),
+            "sentCount": success_count,
+            "deliveredCount": 0,
+            "error": (
+                ""
+                if failure_count == 0
+                else (
+                    f"{failure_count} "
+                    "FCM messages failed"
+                )
+            ),
+            "sentAt":
+                firestore.SERVER_TIMESTAMP,
+            "completedAt":
+                firestore.SERVER_TIMESTAMP,
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+        return {
+            "success": True,
+            "notificationId":
+                notification_id,
+            "audience": audience,
+            "totalTokens": len(tokens),
+            "sentCount": success_count,
+            "failedCount": failure_count,
+        }
+
+    except Exception as e:
+        print(
+            "BROADCAST NOTIFICATION ERROR:",
+            notification_id,
+            str(e),
+        )
+
+        notification_ref.update({
+            "status": "failed",
+            "error": str(e),
+            "updatedAt":
+                firestore.SERVER_TIMESTAMP,
+        })
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to send broadcast notification",
+        )
+
 @app.post("/auth/notification-settings")
 def update_notification_settings(
     data: NotificationSettingsRequest,
