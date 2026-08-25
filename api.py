@@ -1257,6 +1257,52 @@ def send_new_order_notification(
         )
 
         return False
+
+def create_seller_new_order_notification(
+    seller_id: str,
+    order_id: str,
+    order_type: str = "order",
+    product_name: str = "your product",
+):
+    try:
+        title = "New Order"
+        body = f"New order received for {product_name}."
+
+        notification_ref = (
+            db.collection("commerce_notifications")
+            .document()
+        )
+
+        notification_ref.set({
+            "notificationId": notification_ref.id,
+            "userId": seller_id,
+            "title": title,
+            "body": body,
+            "type": "order_received",
+            "relatedId": order_id,
+            "orderId": order_id,
+            "orderType": order_type,
+            "isRead": False,
+            "read": False,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        })
+
+        print(
+            "SELLER NEW ORDER NOTIFICATION CREATED | "
+            f"seller={seller_id} | "
+            f"order={order_id}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            "SELLER NEW ORDER NOTIFICATION ERROR | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"error={e}"
+        )
+        return False
     
 # =========================================================
 # OTP AUTHENTICATION
@@ -4436,6 +4482,53 @@ def send_seller_payment_notification(
 
         return False
 
+def create_seller_order_completed_notification(
+    seller_id: str,
+    order_id: str,
+    product_name: str = "your order",
+):
+    try:
+        title = "Order Completed"
+        body = (
+            f"Your order for {product_name} has been completed."
+        )
+
+        notification_ref = (
+            db.collection("commerce_notifications")
+            .document()
+        )
+
+        notification_ref.set({
+            "notificationId": notification_ref.id,
+            "userId": seller_id,
+            "title": title,
+            "body": body,
+            "type": "order_completed",
+            "relatedId": order_id,
+            "orderId": order_id,
+            "orderStatus": "completed",
+            "isRead": False,
+            "read": False,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        })
+
+        print(
+            "SELLER ORDER COMPLETED NOTIFICATION CREATED | "
+            f"seller={seller_id} | "
+            f"order={order_id}"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            "SELLER ORDER COMPLETED NOTIFICATION ERROR | "
+            f"seller={seller_id} | "
+            f"order={order_id} | "
+            f"error={e}"
+        )
+        return False
+
 
 def create_seller_payment_notification(
     seller_id: str,
@@ -6914,6 +7007,12 @@ def finalize_instant_buy(
                     product_name=
                         instant_buy_crop_name,
                 )
+                create_seller_new_order_notification(
+                    seller_id=instant_buy_seller_id,
+                    order_id=instant_buy_order_id,
+                    order_type="instant_buy",
+                    product_name=instant_buy_crop_name,
+                )
 
                 print(
                     "INSTANT BUY SELLER "
@@ -7768,6 +7867,12 @@ def finalize_cart(
                         or "your product"
                     ),
                 )
+                create_seller_new_order_notification(
+                    seller_id=seller_id,
+                    order_id=(checkout_order_id),
+                    order_type="cart",
+                    product_name=(product_name or "your product"),
+                )
 
     except Exception as e:
 
@@ -8200,6 +8305,12 @@ def finalize_auction_payment(
                 if seller_id_for_notification:
 
                     send_new_order_notification(
+                        seller_id=seller_id_for_notification,
+                        order_id=order_id,
+                        order_type="auction",
+                        product_name=product_name_for_notification,
+                    )
+                    create_seller_new_order_notification(
                         seller_id=seller_id_for_notification,
                         order_id=order_id,
                         order_type="auction",
@@ -10669,6 +10780,11 @@ async def verify_pickup_otp(
                             amount=seller_amount,
                             product_name=product_name,
                         )
+                    )
+                    create_seller_order_completed_notification(
+                        seller_id=seller_id,
+                        order_id=request.orderId,
+                        product_name=product_name,
                     )
 
                     print(
