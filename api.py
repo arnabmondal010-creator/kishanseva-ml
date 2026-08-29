@@ -10521,8 +10521,11 @@ async def verify_pickup_otp(
         # RELEASE ORDER
         # -------------------------------
         order_update = {
+           
             "otpVerified": True,
             "pickupOtpVerified": True,
+            "pickupOtpVerifiedAt": firestore.SERVER_TIMESTAMP,
+           
             "pickupOtpVerifiedAt":
                 firestore.SERVER_TIMESTAMP,
 
