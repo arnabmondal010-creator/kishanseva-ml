@@ -10284,7 +10284,9 @@ async def verify_pickup_otp(
         )
 
     stored_otp = str(
-        order.get("verificationOtp", "")
+        order.get("verificationOtp")
+        or order.get("pickupOtp")
+        or ""
     ).strip()
 
     entered_otp = request.otp.strip()
