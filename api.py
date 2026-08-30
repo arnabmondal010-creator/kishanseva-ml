@@ -7551,6 +7551,8 @@ def finalize_cart(
                     "sellerId":
                         listing["sellerId"],
 
+                    "deliveryMethod": checkout["deliveryMethod"],
+
                     "buyerNote":
                         "",
 
@@ -10341,6 +10343,32 @@ async def verify_pickup_otp(
             # -------------------------------
             seller_refs = {}
 
+            cart_subtotal = round(
+                float(
+                    fresh.get(
+                        "subtotal",
+                        fresh.get("orderAmount", 0),
+                    ) or 0
+                ),
+                2,
+            )
+
+            delivery_method = str(
+                fresh.get("deliveryMethod", "")
+            ).strip().lower()
+
+            service_charge = 0.0
+
+            if delivery_method == "home":
+                if cart_subtotal >= 2000:
+                    service_charge = 50.0
+                elif cart_subtotal >= 1500:
+                    service_charge = 40.0
+                elif cart_subtotal >= 1000:
+                    service_charge = 30.0
+                elif cart_subtotal >= 500:
+                    service_charge = 20.0
+
             for item_doc in order_items:
                 item = item_doc.to_dict() or {}
 
@@ -10380,30 +10408,6 @@ async def verify_pickup_otp(
                         "Invalid gross amount"
                     )
 
-# Always calculate commission from the actual
-# item subtotal. Never trust stored commission.
-                delivery_method = str(
-                    item.get("deliveryMethod", "")
-                ).strip().lower()
-
-                service_charge = 0.0
-
-                order_type = str(
-                    fresh.get("type", "")
-                ).strip().lower()
-
-                if (
-                    order_type == "cart"
-                    and delivery_method == "home"
-                ):
-                    if gross_amount >= 2000:
-                        service_charge = 50.0
-                    elif gross_amount >= 1500:
-                        service_charge = 40.0
-                    elif gross_amount >= 1000:
-                        service_charge = 30.0
-                    elif gross_amount >= 500:
-                        service_charge = 20.0
                 commission_rate = 7.0
 
                 commission = round(
@@ -10418,12 +10422,8 @@ async def verify_pickup_otp(
 
 # Always calculate seller payout from the
 # actual subtotal and calculated commission.
-                total_platform_deduction = round(
-                    commission + service_charge,
-                    2,
-                )
                 seller_payout = round(
-                    gross_amount - total_platform_deduction,
+                    gross_amount - commission,
                     2,
                 )
 
@@ -10439,10 +10439,35 @@ async def verify_pickup_otp(
                     "seller_id": seller_id,
                     "gross_amount": gross_amount,
                     "commission": commission,
-                    "service_charge": service_charge,
-                    "total_platform_deduction": total_platform_deduction,
                     "seller_payout": seller_payout,
                 })
+            cart_total_gross = round(
+                sum(
+                    row["gross_amount"]
+                    for row in settlement_rows
+                ),
+                2,
+            )
+            
+            cart_total_commission = round(
+                sum(
+                    row["commission"]
+                    for row in settlement_rows
+                ),
+                2,
+            )
+            
+            cart_seller_payout = round(
+                cart_total_gross
+                - cart_total_commission
+                - service_charge,
+                2,
+            )
+            
+            if cart_seller_payout < 0:
+                raise Exception(
+                    "Invalid cart seller payout"
+                )
 
         else:
             # -------------------------------
@@ -10539,6 +10564,7 @@ async def verify_pickup_otp(
                 "commission": commission,
                 "seller_payout": seller_payout,
             })
+            
 
         if not settlement_rows:
             raise Exception(
@@ -10594,13 +10620,41 @@ async def verify_pickup_otp(
         # -------------------------------
         # RELEASE SELLER MONEY
         # -------------------------------
-        for row in settlement_rows:
-            item = row["item"]
-            seller_ref = row["seller_ref"]
-            seller_amount = row["seller_payout"]
+                # -------------------------------
+        # RELEASE SELLER MONEY
+        # -------------------------------
 
-            # Seller revenue is represented by walletBalance.
-            # Do not derive it from totalEarnings/totalRevenue.
+        if order_items:
+            # Cart supports only one seller.
+            # Credit the seller exactly once with the
+            # cart-level payout after service charge.
+            seller_ref = settlement_rows[0]["seller_ref"]
+
+            transaction.update(
+                seller_ref,
+                {
+                    "walletBalance":
+                        firestore.Increment(
+                            cart_seller_payout
+                        ),
+
+                    "totalSales":
+                        firestore.Increment(1),
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                },
+            )
+
+        else:
+            # Auction / Instant Buy
+            row = settlement_rows[0]
+            seller_ref = row["seller_ref"]
+            if order_items:
+                seller_amount = cart_seller_payout
+            else:
+                seller_amount = row["seller_payout"]
+
             transaction.update(
                 seller_ref,
                 {
@@ -10617,53 +10671,122 @@ async def verify_pickup_otp(
                 },
             )
 
-            wallet_tx_ref = (
-                db.collection("wallet_transactions")
-                .document()
-            )
+        wallet_tx_ref = (
+            db.collection("wallet_transactions")
+            .document()
+        )
 
-            transaction.set(
-                wallet_tx_ref,
-                {
-                    "transactionId":
-                        wallet_tx_ref.id,
+        transaction.set(
+            wallet_tx_ref,
+            {
+                "transactionId":
+                    wallet_tx_ref.id,
 
-                    "userId":
-                        row["seller_id"],
+                "userId":
+                    row["seller_id"],
 
-                    "orderId":
-                        request.orderId,
+                "orderId":
+                    request.orderId,
 
-                    "buyerId":
-                        fresh.get("buyerId"),
+                "buyerId":
+                    fresh.get("buyerId"),
 
-                    "cropName":
+                "cropName":
+                    item.get(
+                        "productName",
+                        fresh.get(
+                            "cropName",
+                            "",
+                        ),
+                    ),
+
+                "subtotal":
+                    row["gross_amount"],
+
+                "deliveryCharge":
+                    float(
                         item.get(
-                            "productName",
-                            fresh.get(
-                                "cropName",
-                                "",
+                            "deliveryCharge",
+                            0,
+                        ) or 0
+                    ),
+
+                "platformCommissionRate":
+                    float(
+                        item.get(
+                            "platformCommissionRate",
+                            7,
+                        ) or 7
+                    ),
+
+                "platformCommission":
+                    row["commission"],
+
+                "serviceCharge":
+                    service_charge if order_items else 0.0,
+
+                "totalPlatformDeduction":
+                    (
+                        round(
+                            sum(
+                                r["commission"]
+                                for r in settlement_rows
                             ),
-                        ),
+                            2,
+                        ) + service_charge
+                    ) if order_items else row["commission"],
 
-                    "subtotal":
-                        row["gross_amount"],
+                "sellerPayout":
+                    seller_amount,
 
-                    "deliveryCharge":
-                        float(
-                            item.get(
-                                "deliveryCharge",
-                                0,
-                            ) or 0
-                        ),
+                "amount":
+                    seller_amount,
 
-                    "platformCommissionRate":
-                        float(
-                            item.get(
-                                "platformCommissionRate",
-                                7,
-                            ) or 7
-                        ),
+                "type":
+                    "order_credit",
+
+                "status":
+                    "completed",
+
+                "createdAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "paymentId":
+                    fresh.get("paymentId"),
+            },
+        )
+
+            # Cart item status is updated individually.
+        if row["item_doc"] is not None:
+            transaction.update(
+                row["item_doc"].reference,
+                {
+                    "orderStatus":
+                        "completed",
+
+                    "paymentStatus":
+                        "paid",
+
+                    "settlementStatus":
+                        "released",
+
+                    "settlementReleased":
+                        True,
+
+                    "completedAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "updatedAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "sellerPaid":
+                        True,
+
+                    "sellerPaidAmount":
+                        seller_amount,
+
+                    "sellerPaidAt":
+                        firestore.SERVER_TIMESTAMP,
 
                     "platformCommission":
                         row["commission"],
@@ -10676,69 +10799,8 @@ async def verify_pickup_otp(
 
                     "sellerPayout":
                         seller_amount,
-
-                    "amount":
-                        seller_amount,
-
-                    "type":
-                        "order_credit",
-
-                    "status":
-                        "completed",
-
-                    "createdAt":
-                        firestore.SERVER_TIMESTAMP,
-
-                    "paymentId":
-                        fresh.get("paymentId"),
                 },
             )
-
-            # Cart item status is updated individually.
-            if row["item_doc"] is not None:
-                transaction.update(
-                    row["item_doc"].reference,
-                    {
-                        "orderStatus":
-                            "completed",
-
-                        "paymentStatus":
-                            "paid",
-
-                        "settlementStatus":
-                            "released",
-
-                        "settlementReleased":
-                            True,
-
-                        "completedAt":
-                            firestore.SERVER_TIMESTAMP,
-
-                        "updatedAt":
-                            firestore.SERVER_TIMESTAMP,
-
-                        "sellerPaid":
-                            True,
-
-                        "sellerPaidAmount":
-                            seller_amount,
-
-                        "sellerPaidAt":
-                            firestore.SERVER_TIMESTAMP,
-
-                        "platformCommission":
-                            row["commission"],
-
-                        "serviceCharge":
-                            row["service_charge"],
-
-                        "totalPlatformDeduction":
-                            row["total_platform_deduction"],
-
-                        "sellerPayout":
-                            seller_amount,
-                    },
-                )
 
         return {
             "success": True,
