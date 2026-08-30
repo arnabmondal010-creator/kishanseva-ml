@@ -10361,13 +10361,13 @@ async def verify_pickup_otp(
 
             if delivery_method == "home":
                 if cart_subtotal >= 2000:
-                    service_charge = 50.0
-                elif cart_subtotal >= 1500:
-                    service_charge = 40.0
-                elif cart_subtotal >= 1000:
                     service_charge = 30.0
-                elif cart_subtotal >= 500:
+                elif cart_subtotal >= 1500:
+                    service_charge = 25.0
+                elif cart_subtotal >= 1000:
                     service_charge = 20.0
+                elif cart_subtotal >= 500:
+                    service_charge = 15.0
 
             for item_doc in order_items:
                 item = item_doc.to_dict() or {}
