@@ -10671,11 +10671,16 @@ async def verify_pickup_otp(
                 },
             )
 
-        for row in settlement_rows:
+        if order_items:
+            settlement_transaction_rows = [settlement_rows[-1]]
+        else:
+            settlement_transaction_rows = settlement_rows
+
+        for row in settlement_transaction_rows:
             item = row["item"]
 
             if order_items:
-                seller_amount = row["seller_payout"]
+                seller_amount = cart_seller_payout
             else:
                 seller_amount = row["seller_payout"]
 
@@ -10710,7 +10715,9 @@ async def verify_pickup_otp(
                         ),
 
                     "subtotal":
-                        row["gross_amount"],
+                        cart_total_gross
+                        if order_items
+                        else row["gross_amount"],
 
                     "deliveryCharge":
                         float(
@@ -10798,7 +10805,11 @@ async def verify_pickup_otp(
                             True,
 
                         "sellerPaidAmount":
-                            seller_amount,
+                            (
+                                cart_seller_payout
+                                if order_items and row is settlement_rows[-1]
+                                else row["seller_payout"]
+                            ),
 
                         "sellerPaidAt":
                             firestore.SERVER_TIMESTAMP,
@@ -10844,7 +10855,9 @@ async def verify_pickup_otp(
                         row["seller_id"],
 
                     "amount":
-                        row["seller_payout"],
+                        cart_seller_payout
+                        if order_items
+                        else row["seller_payout"],
 
                     "grossAmount":
                         row["gross_amount"],
@@ -10853,13 +10866,24 @@ async def verify_pickup_otp(
                         row["commission"],
 
                     "serviceCharge":
-                        row["service_charge"],
+                        service_charge
+                        if order_items
+                        else 0.0,
 
                     "totalPlatformDeduction":
-                        row["total_platform_deduction"],
+                        (
+                            round(
+                                cart_total_commission + service_charge,
+                                2,
+                            )
+                            if order_items
+                            else row["total_platform_deduction"]
+                        ),
 
                     "sellerPayout":
-                        row["seller_payout"],
+                        cart_seller_payout
+                        if order_items
+                        else row["seller_payout"],
 
                     "productName": str(
                         row["item"].get(
