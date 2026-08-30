@@ -10382,6 +10382,28 @@ async def verify_pickup_otp(
 
 # Always calculate commission from the actual
 # item subtotal. Never trust stored commission.
+                delivery_method = str(
+                    item.get("deliveryMethod", "")
+                ).strip().lower()
+
+                service_charge = 0.0
+
+                order_type = str(
+                    fresh.get("type", "")
+                ).strip().lower()
+
+                if (
+                    order_type == "cart"
+                    and delivery_method == "home"
+                ):
+                    if gross_amount >= 2000:
+                        service_charge = 50.0
+                    elif gross_amount >= 1500:
+                        service_charge = 40.0
+                    elif gross_amount >= 1000:
+                        service_charge = 30.0
+                    elif gross_amount >= 500:
+                        service_charge = 20.0
                 commission_rate = 7.0
 
                 commission = round(
@@ -10396,8 +10418,12 @@ async def verify_pickup_otp(
 
 # Always calculate seller payout from the
 # actual subtotal and calculated commission.
+                total_platform_deduction = round(
+                    commission + service_charge,
+                    2,
+                )
                 seller_payout = round(
-                    gross_amount - commission,
+                    gross_amount - total_platform_deduction,
                     2,
                 )
 
@@ -10413,6 +10439,8 @@ async def verify_pickup_otp(
                     "seller_id": seller_id,
                     "gross_amount": gross_amount,
                     "commission": commission,
+                    "service_charge": service_charge,
+                    "total_platform_deduction": total_platform_deduction,
                     "seller_payout": seller_payout,
                 })
 
@@ -10640,6 +10668,12 @@ async def verify_pickup_otp(
                     "platformCommission":
                         row["commission"],
 
+                    "serviceCharge":
+                        row["service_charge"],
+
+                    "totalPlatformDeduction":
+                        row["total_platform_deduction"],
+
                     "sellerPayout":
                         seller_amount,
 
@@ -10691,6 +10725,18 @@ async def verify_pickup_otp(
 
                         "sellerPaidAt":
                             firestore.SERVER_TIMESTAMP,
+
+                        "platformCommission":
+                            row["commission"],
+
+                        "serviceCharge":
+                            row["service_charge"],
+
+                        "totalPlatformDeduction":
+                            row["total_platform_deduction"],
+
+                        "sellerPayout":
+                            seller_amount,
                     },
                 )
 
@@ -10707,6 +10753,21 @@ async def verify_pickup_otp(
                     "amount":
                         row["seller_payout"],
 
+                    "grossAmount":
+                        row["gross_amount"],
+
+                    "platformCommission":
+                        row["commission"],
+
+                    "serviceCharge":
+                        row["service_charge"],
+
+                    "totalPlatformDeduction":
+                        row["total_platform_deduction"],
+
+                    "sellerPayout":
+                        row["seller_payout"],
+
                     "productName": str(
                         row["item"].get(
                             "productName",
@@ -10717,6 +10778,7 @@ async def verify_pickup_otp(
                         )
                     ).strip() or "your order",
                 }
+
                 for row in settlement_rows
             ],
         }
