@@ -10671,136 +10671,167 @@ async def verify_pickup_otp(
                 },
             )
 
-        wallet_tx_ref = (
-            db.collection("wallet_transactions")
-            .document()
-        )
+        for row in settlement_rows:
+            item = row["item"]
 
-        transaction.set(
-            wallet_tx_ref,
-            {
-                "transactionId":
-                    wallet_tx_ref.id,
+            if order_items:
+                seller_amount = row["seller_payout"]
+            else:
+                seller_amount = row["seller_payout"]
 
-                "userId":
-                    row["seller_id"],
+            wallet_tx_ref = (
+                db.collection("wallet_transactions")
+                .document()
+            )
+            
 
-                "orderId":
-                    request.orderId,
-
-                "buyerId":
-                    fresh.get("buyerId"),
-
-                "cropName":
-                    item.get(
-                        "productName",
-                        fresh.get(
-                            "cropName",
-                            "",
-                        ),
-                    ),
-
-                "subtotal":
-                    row["gross_amount"],
-
-                "deliveryCharge":
-                    float(
-                        item.get(
-                            "deliveryCharge",
-                            0,
-                        ) or 0
-                    ),
-
-                "platformCommissionRate":
-                    float(
-                        item.get(
-                            "platformCommissionRate",
-                            7,
-                        ) or 7
-                    ),
-
-                "platformCommission":
-                    row["commission"],
-
-                "serviceCharge":
-                    service_charge if order_items else 0.0,
-
-                "totalPlatformDeduction":
-                    (
-                        round(
-                            sum(
-                                r["commission"]
-                                for r in settlement_rows
-                            ),
-                            2,
-                        ) + service_charge
-                    ) if order_items else row["commission"],
-
-                "sellerPayout":
-                    seller_amount,
-
-                "amount":
-                    seller_amount,
-
-                "type":
-                    "order_credit",
-
-                "status":
-                    "completed",
-
-                "createdAt":
-                    firestore.SERVER_TIMESTAMP,
-
-                "paymentId":
-                    fresh.get("paymentId"),
-            },
-        )
-
-            # Cart item status is updated individually.
-        if row["item_doc"] is not None:
-            transaction.update(
-                row["item_doc"].reference,
+            transaction.set(
+                wallet_tx_ref,
                 {
-                    "orderStatus":
-                        "completed",
+                    "transactionId":
+                        wallet_tx_ref.id,
 
-                    "paymentStatus":
-                        "paid",
+                    "userId":
+                        row["seller_id"],
 
-                    "settlementStatus":
-                        "released",
+                    "orderId":
+                        request.orderId,
 
-                    "settlementReleased":
-                        True,
+                    "buyerId":
+                        fresh.get("buyerId"),
 
-                    "completedAt":
-                        firestore.SERVER_TIMESTAMP,
+                    "cropName":
+                        item.get(
+                            "productName",
+                            fresh.get(
+                                "cropName",
+                                "",
+                            ),
+                        ),
 
-                    "updatedAt":
-                        firestore.SERVER_TIMESTAMP,
+                    "subtotal":
+                        row["gross_amount"],
 
-                    "sellerPaid":
-                        True,
+                    "deliveryCharge":
+                        float(
+                            item.get(
+                                "deliveryCharge",
+                                0,
+                            ) or 0
+                        ),
 
-                    "sellerPaidAmount":
-                        seller_amount,
-
-                    "sellerPaidAt":
-                        firestore.SERVER_TIMESTAMP,
+                    "platformCommissionRate":
+                        float(
+                            item.get(
+                                "platformCommissionRate",
+                                7,
+                            ) or 7
+                        ),
 
                     "platformCommission":
                         row["commission"],
 
-                    "serviceCharge":
-                        row["service_charge"],
+                                        "serviceCharge":
+                        service_charge if (
+                            order_items
+                            and row is settlement_rows[-1]
+                        ) else 0.0,
 
                     "totalPlatformDeduction":
-                        row["total_platform_deduction"],
+                        round(
+                            row["commission"]
+                            + (
+                                service_charge
+                                if (
+                                    order_items
+                                    and row is settlement_rows[-1]
+                                )
+                                else 0.0
+                            ),
+                            2,
+                        ),
 
                     "sellerPayout":
                         seller_amount,
+
+                    "amount":
+                        seller_amount,
+
+                    "type":
+                        "order_credit",
+
+                    "status":
+                        "completed",
+
+                    "createdAt":
+                        firestore.SERVER_TIMESTAMP,
+
+                    "paymentId":
+                        fresh.get("paymentId"),
                 },
             )
+
+            # Cart item status is updated individually.
+            if row["item_doc"] is not None:
+                transaction.update(
+                    row["item_doc"].reference,
+                    {
+                        "orderStatus":
+                            "completed",
+
+                        "paymentStatus":
+                            "paid",
+
+                        "settlementStatus":
+                            "released",
+
+                        "settlementReleased":
+                            True,
+
+                        "completedAt":
+                            firestore.SERVER_TIMESTAMP,
+
+                        "updatedAt":
+                            firestore.SERVER_TIMESTAMP,
+
+                        "sellerPaid":
+                            True,
+
+                        "sellerPaidAmount":
+                            seller_amount,
+
+                        "sellerPaidAt":
+                            firestore.SERVER_TIMESTAMP,
+
+                        "platformCommission":
+                            row["commission"],
+
+                        "serviceCharge":
+                            service_charge
+                            if (
+                                order_items
+                                and row is settlement_rows[-1]
+                            )
+                            else 0.0,
+
+                        "totalPlatformDeduction":
+                            round(
+                                row["commission"]
+                                + (
+                                    service_charge
+                                    if (
+                                        order_items
+                                        and row is settlement_rows[-1]
+                                    )
+                                    else 0.0
+                                ),
+                                2,
+                            ),
+
+                        "sellerPayout":
+                            seller_amount,
+                    },
+                )
 
         return {
             "success": True,
