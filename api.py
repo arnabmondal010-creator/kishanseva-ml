@@ -4882,7 +4882,7 @@ async def checkout_preview(
                 f"Home delivery is unavailable. "
                 f"Road distance is "
                 f"{distance_km:.2f} km; "
-                f"maximum allowed is 15 km."
+                f"maximum allowed is 10 km."
             ),
         )
 
@@ -5223,7 +5223,7 @@ async def create_checkout(
                         f"Home delivery is unavailable. "
                         f"Road distance is "
                         f"{distance_km:.2f} km; "
-                        f"maximum allowed is 15 km."
+                        f"maximum allowed is 10 km."
                     ),
                 )
 
