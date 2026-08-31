@@ -4875,7 +4875,7 @@ async def checkout_preview(
         buyer_lng=float(buyer_lng),
     )
 
-    if distance_km > 15:
+    if distance_km > 10:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -5216,7 +5216,7 @@ async def create_checkout(
     # MAXIMUM ROAD DISTANCE
     # ============================================================
 
-            if distance_km > 15:
+            if distance_km > 10:
                 raise HTTPException(
                     status_code=400,
                     detail=(
