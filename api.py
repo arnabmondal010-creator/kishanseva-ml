@@ -10640,9 +10640,6 @@ async def verify_pickup_otp(
         # -------------------------------
         # RELEASE SELLER MONEY
         # -------------------------------
-                # -------------------------------
-        # RELEASE SELLER MONEY
-        # -------------------------------
 
         if order_items:
             # Cart supports only one seller.
@@ -10670,10 +10667,7 @@ async def verify_pickup_otp(
             # Auction / Instant Buy
             row = settlement_rows[0]
             seller_ref = row["seller_ref"]
-            if order_items:
-                seller_amount = cart_seller_payout
-            else:
-                seller_amount = row["seller_payout"]
+            seller_amount = row["seller_payout"]
 
             transaction.update(
                 seller_ref,
@@ -10881,7 +10875,11 @@ async def verify_pickup_otp(
                                 2,
                             )
                             if order_items
-                            else row["total_platform_deduction"]
+                            else round(
+                                row["commission"]
+                                + float(fresh.get("serviceCharge", 0) or 0),
+                                2,
+                            )
                         ),
 
                     "sellerPayout":
