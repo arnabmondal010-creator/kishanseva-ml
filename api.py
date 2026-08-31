@@ -10602,14 +10602,34 @@ async def verify_pickup_otp(
                 firestore.SERVER_TIMESTAMP,
         }
 
-        # Store the calculated settlement on single-item
-        # order types. Cart orders keep settlement per item.
-        if not order_items:
+        # Store settlement values on commerce_orders.
+        #
+        # For cart orders, serviceCharge is an ORDER-LEVEL charge calculated
+        # once from the complete cart subtotal. It must not be taken from, or
+        # duplicated across, individual commerce_order_items documents.
+        if order_items:
+            order_update.update({
+                "serviceCharge": service_charge,
+                "platformCommission": cart_total_commission,
+                "totalPlatformDeduction": round(
+                    cart_total_commission + service_charge,
+                    2,
+                ),
+                "sellerPayout": cart_seller_payout,
+            })
+        else:
             order_update.update({
                 "platformCommission":
                     settlement_rows[0]["commission"],
                 "sellerPayout":
                     settlement_rows[0]["seller_payout"],
+                "serviceCharge":
+                    float(fresh.get("serviceCharge", 0) or 0),
+                "totalPlatformDeduction": round(
+                    settlement_rows[0]["commission"]
+                    + float(fresh.get("serviceCharge", 0) or 0),
+                    2,
+                ),
             })
 
         transaction.update(
@@ -10738,23 +10758,19 @@ async def verify_pickup_otp(
                     "platformCommission":
                         row["commission"],
 
-                                        "serviceCharge":
-                        service_charge if (
-                            order_items
-                            and row is settlement_rows[-1]
-                        ) else 0.0,
+                                        # Cart service charge belongs to the whole
+                    # commerce_orders document and is applied exactly once.
+                    "serviceCharge":
+                        service_charge if order_items else 0.0,
 
                     "totalPlatformDeduction":
                         round(
-                            row["commission"]
-                            + (
-                                service_charge
-                                if (
-                                    order_items
-                                    and row is settlement_rows[-1]
-                                )
-                                else 0.0
-                            ),
+                            (
+                                cart_total_commission
+                                + service_charge
+                            )
+                            if order_items
+                            else row["commission"],
                             2,
                         ),
 
@@ -10817,25 +10833,13 @@ async def verify_pickup_otp(
                         "platformCommission":
                             row["commission"],
 
-                        "serviceCharge":
-                            service_charge
-                            if (
-                                order_items
-                                and row is settlement_rows[-1]
-                            )
-                            else 0.0,
+                        # Service charge is order-level for carts.
+                        # Do not duplicate it onto individual item documents.
+                        "serviceCharge": 0.0,
 
                         "totalPlatformDeduction":
                             round(
-                                row["commission"]
-                                + (
-                                    service_charge
-                                    if (
-                                        order_items
-                                        and row is settlement_rows[-1]
-                                    )
-                                    else 0.0
-                                ),
+                                row["commission"],
                                 2,
                             ),
 
