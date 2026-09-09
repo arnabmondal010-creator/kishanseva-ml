@@ -7411,7 +7411,7 @@ def finalize_cart(
 
             subtotal += line_total
 
-            commission_rate = 0.07
+            commission_rate = 0.0826
 
             platform_commission = round(
                 line_total
@@ -7595,7 +7595,7 @@ def finalize_cart(
                         item_delivery,
 
                     "platformCommissionRate":
-                        7,
+                        8.26,
 
                     "platformCommission":
                         p[
@@ -10408,7 +10408,7 @@ async def verify_pickup_otp(
                         "Invalid gross amount"
                     )
 
-                commission_rate = 7.0
+                commission_rate = 8.26
 
                 commission = round(
                     gross_amount * commission_rate / 100,
@@ -10528,7 +10528,7 @@ async def verify_pickup_otp(
 
             if existing_commission is None:
                 commission = round(
-                    gross_amount * 0.07,
+                    gross_amount * 0.0826,
                     2,
                 )
             else:
@@ -10745,8 +10745,8 @@ async def verify_pickup_otp(
                         float(
                             item.get(
                                 "platformCommissionRate",
-                                7,
-                            ) or 7
+                                8.26,
+                            ) or 8.26
                         ),
 
                     "platformCommission":
