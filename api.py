@@ -8203,8 +8203,8 @@ def finalize_listing_promotion_with_retry(
     listing_id: str,
     promotion_plan: str,
     buyer_id: str,
-    max_attempts: int = 3,
     promotion_type: str = "farm_listing",
+    max_attempts: int = 3,
 ):
     import time
     from google.api_core.exceptions import Aborted
