@@ -5579,7 +5579,10 @@ async def create_razorpay_order(
                 # AUCTION EXPIRY CHECK
                 # --------------------------------------------------------
 
-                auction_end = listing.get("auctionEnd")
+                auction_end = (
+                    product.get("auctionEndTime")
+                    or product.get("auctionEnd")
+                )
 
                 if auction_end:
 
