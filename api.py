@@ -5575,28 +5575,17 @@ async def create_razorpay_order(
                         ),
                     )
 
-                # ----------------------------------------------------
+                # --------------------------------------------------------
                 # AUCTION EXPIRY CHECK
-                # ----------------------------------------------------
+                # --------------------------------------------------------
 
-                auction_end = (
-                    product.get(
-                        "auctionEndTime"
-                    )
-                    or product.get(
-                        "auctionEnd"
-                    )
-                )
+                auction_end = listing.get("auctionEnd")
 
                 if auction_end:
 
                     try:
 
-                        if hasattr(
-                            auction_end,
-                            "timestamp",
-                        ):
-
+                        if hasattr(auction_end, "timestamp"):
                             auction_end_dt = (
                                 datetime.fromtimestamp(
                                     auction_end.timestamp(),
@@ -5604,10 +5593,24 @@ async def create_razorpay_order(
                                 )
                             )
 
-                        else:
+                        elif isinstance(auction_end, datetime):
 
-                            auction_end_dt = (
-                                auction_end
+                            auction_end_dt = auction_end
+
+                            if auction_end_dt.tzinfo is None:
+                                auction_end_dt = auction_end_dt.replace(
+                                    tzinfo=timezone.utc
+                                )
+                            else:
+                                auction_end_dt = (
+                                    auction_end_dt.astimezone(
+                                        timezone.utc
+                                    )
+                                )
+
+                        else:
+                            raise ValueError(
+                                "Unsupported auctionEnd type"
                             )
 
                         now = datetime.now(
@@ -5618,22 +5621,26 @@ async def create_razorpay_order(
 
                             raise HTTPException(
                                 status_code=400,
-                                detail=(
-                                    "Auction has "
-                                    "already ended"
-                                ),
+                                detail="Auction has already ended",
                             )
 
                     except HTTPException:
                         raise
 
-                    except Exception:
+                    except Exception as e:
+
+                        print(
+                            "PROMOTION AUCTION EXPIRY ERROR:",
+                            repr(e),
+                            "value=",
+                            repr(auction_end),
+                            "type=",
+                            type(auction_end).__name__,
+                        )
 
                         raise HTTPException(
                             status_code=400,
-                            detail=(
-                                "Invalid auction expiry"
-                            ),
+                            detail="Invalid auction expiry",
                         )
 
             # ========================================================
@@ -8042,7 +8049,7 @@ def finalize_listing_promotion(
         # PREVENT ACTIVE PROMOTION
         # --------------------------------------------------------
 
-        from datetime import datetime, timezone, timedelta
+      
 
         now = datetime.now(
             timezone.utc
