@@ -10768,6 +10768,115 @@ async def razorpay_webhook(
             order_id = notes.get("orderId")
             payment_type = notes.get("type", "instant_buy")
 
+            if payment_type == "listing_promotion":
+
+                promotion_type = (
+                    notes.get("promotionType")
+                    or "farm_listing"
+                )
+
+                promotion_id = (
+                    notes.get("productId")
+                    or notes.get("listingId")
+                    or notes.get("shopProductId")
+                )
+
+                promotion_plan = notes.get(
+                    "promotionPlan"
+                )
+
+                if not promotion_id:
+                    raise Exception(
+                        "Missing promotion product ID"
+                    )
+
+                if not promotion_plan:
+                    raise Exception(
+                        "Missing promotion plan"
+                    )
+
+                if promotion_type not in [
+                    "farm_listing",
+                    "shop_product",
+                ]:
+                    raise Exception(
+                        "Invalid promotion type"
+                    )
+
+                result = await asyncio.to_thread(
+                    finalize_listing_promotion_with_retry,
+                    razorpay_order_id,
+                    payment_id,
+                    promotion_id,
+                    promotion_plan,
+                    buyer_id,
+                    promotion_type,
+                )
+
+                event_ref.update({
+                    "status": "processed",
+
+                    "paymentType":
+                        "listing_promotion",
+
+                    "promotionType":
+                        promotion_type,
+
+                    "listingId":
+                        notes.get("listingId"),
+
+                    "shopProductId":
+                        notes.get("shopProductId"),
+
+                    "promotionPlan":
+                        promotion_plan,
+
+                    "productId":
+                        promotion_id,
+
+                    "paymentId":
+                        payment_id,
+
+                    "razorpayOrderId":
+                        razorpay_order_id,
+
+                    "alreadyProcessed":
+                        result.get(
+                            "alreadyProcessed",
+                            False,
+                        ),
+
+                    "processedAt":
+                        firestore.SERVER_TIMESTAMP,
+                })
+
+                print(
+                    "RAZORPAY PROMOTION WEBHOOK PROCESSED:",
+                    "event=",
+                    x_razorpay_event_id,
+                    "promotionType=",
+                    promotion_type,
+                    "productId=",
+                    promotion_id,
+                    "plan=",
+                    promotion_plan,
+                    "payment=",
+                    payment_id,
+                )
+
+                return {
+                    "success": True,
+
+                    "promotion":
+                        True,
+
+                    "alreadyProcessed":
+                        result.get(
+                            "alreadyProcessed",
+                            False,
+                        ),
+                }
+
             # --------------------------
             # VALIDATE KISHANSEVA DATA
             # --------------------------
@@ -10788,7 +10897,6 @@ async def razorpay_webhook(
             if payment_type == "auction":
 
                 if not order_id:
-
                     event_ref.update({
                         "status": "ignored",
                         "reason": "Missing orderId",
@@ -10800,10 +10908,45 @@ async def razorpay_webhook(
                         "ignored": True,
                     }
 
+            elif payment_type == "cart":
+
+                checkout_id = notes.get("checkoutId")
+
+                if not checkout_id:
+                    event_ref.update({
+                        "status": "ignored",
+                        "reason": "Missing checkoutId",
+                        "processedAt": firestore.SERVER_TIMESTAMP,
+                    })
+
+                    return {
+                        "success": True,
+                        "ignored": True,
+                    }
+
+            elif payment_type == "listing_promotion":
+
+                promotion_id = (
+                    notes.get("productId")
+                    or notes.get("listingId")
+                    or notes.get("shopProductId")
+                )
+
+                if not promotion_id:
+                    event_ref.update({
+                        "status": "ignored",
+                        "reason": "Missing promotion product ID",
+                        "processedAt": firestore.SERVER_TIMESTAMP,
+                    })
+
+                    return {
+                        "success": True,
+                        "ignored": True,
+                    }
+
             else:
 
                 if not listing_id:
-
                     event_ref.update({
                         "status": "ignored",
                         "reason": "Missing listingId",
@@ -10829,7 +10972,52 @@ async def razorpay_webhook(
             # it creates the order and locks listing.
             # ======================================
 
-            if payment_type == "auction":
+            if payment_type == "listing_promotion":
+
+                promotion_type = (
+                    notes.get("promotionType")
+                    or "farm_listing"
+                )
+
+                promotion_id = (
+                    notes.get("productId")
+                    or notes.get("listingId")
+                    or notes.get("shopProductId")
+                )
+
+                promotion_plan = (
+                    notes.get("promotionPlan")
+                )
+
+                if not promotion_id:
+                    raise Exception(
+                        "Missing promotion product ID"
+                    )
+
+                if not promotion_plan:
+                    raise Exception(
+                        "Missing promotion plan"
+                    )
+
+                if promotion_type not in [
+                    "farm_listing",
+                    "shop_product",
+                ]:
+                    raise Exception(
+                        "Invalid promotion type"
+                    )
+
+                result = await asyncio.to_thread(
+                    finalize_listing_promotion_with_retry,
+                    razorpay_order_id,
+                    payment_id,
+                    promotion_id,
+                    promotion_plan,
+                    buyer_id,
+                    promotion_type,
+                )
+
+            elif payment_type == "auction":
 
                 result = await asyncio.to_thread(
                     finalize_auction_payment_with_retry,
@@ -10838,8 +11026,15 @@ async def razorpay_webhook(
                     order_id,
                     buyer_id,
                 )
+
             elif payment_type == "cart":
+
                 checkout_id = notes.get("checkoutId")
+
+                if not checkout_id:
+                    raise Exception(
+                    "Missing checkoutId"
+                    )
 
                 result = await asyncio.to_thread(
                     finalize_cart_with_retry,
