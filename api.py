@@ -3662,17 +3662,19 @@ from typing import Optional
 
 class CreateRazorpayOrderRequest(BaseModel):
     listingId: Optional[str] = None
+    shopProductId: Optional[str] = None
     orderId: Optional[str] = None
-    checkoutId: Optional[str] = None     # Cart Checkout
+    checkoutId: Optional[str] = None
     promotionPlan: Optional[str] = None
 class VerifyRazorpayPaymentRequest(BaseModel):
     razorpay_payment_id: str
     razorpay_order_id: str
     razorpay_signature: str
 
-    listingId: str | None = None
+    listingId: Optional[str] = None
+    shopProductId: Optional[str] = None
     checkoutId: Optional[str] = None
-    orderId: str | None = None
+    orderId: Optional[str] = None
     promotionPlan: Optional[str] = None
 
 class VerifyPickupOtpRequest(BaseModel):
@@ -5393,9 +5395,10 @@ async def create_razorpay_order(
     try:
         # Firebase UID from verified token
         buyer_id = user["uid"]
+
         # ============================================================
-# LISTING PROMOTION
-# ============================================================
+        # LISTING / SHOP PRODUCT PROMOTION
+        # ============================================================
 
         if request.promotionPlan:
 
@@ -5403,15 +5406,51 @@ async def create_razorpay_order(
                 request.promotionPlan
             ).strip()
 
-            if not request.listingId:
-                raise HTTPException(
-                    status_code=400,
-                    detail="listingId required for promotion",
+            # --------------------------------------------------------
+            # DETERMINE PROMOTION TARGET
+            # --------------------------------------------------------
+
+            if request.shopProductId:
+
+                promotion_id = str(
+                    request.shopProductId
+                ).strip()
+
+                promotion_collection = (
+                    "commerce_shop_products"
                 )
 
-    # --------------------------------------------------------
-    # SERVER-CONTROLLED PROMOTION PLANS
-    # --------------------------------------------------------
+                promotion_type = (
+                    "shop_product"
+                )
+
+            elif request.listingId:
+
+                promotion_id = str(
+                    request.listingId
+                ).strip()
+
+                promotion_collection = (
+                    "commerce_listings"
+                )
+
+                promotion_type = (
+                    "farm_listing"
+                )
+
+            else:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "listingId or shopProductId "
+                        "required for promotion"
+                    ),
+                )
+
+            # --------------------------------------------------------
+            # SERVER-CONTROLLED PROMOTION PLANS
+            # --------------------------------------------------------
 
             promotion_plans = {
                 "49": {
@@ -5427,47 +5466,54 @@ async def create_razorpay_order(
             }
 
             plan = promotion_plans.get(
-            promotion_plan
+                promotion_plan
             )
 
             if not plan:
+
                 raise HTTPException(
                     status_code=400,
                     detail="Invalid promotion plan",
                 )
 
-    # --------------------------------------------------------
-    # LISTING
-    # --------------------------------------------------------
+            # --------------------------------------------------------
+            # TARGET DOCUMENT
+            # --------------------------------------------------------
 
-            listing_ref = (
+            product_ref = (
                 db.collection(
-                    "commerce_listings"
+                    promotion_collection
                 )
                 .document(
-                    request.listingId
+                    promotion_id
                 )
             )
 
-            listing_doc = listing_ref.get()
+            product_doc = (
+                product_ref.get()
+            )
 
-            if not listing_doc.exists:
+            if not product_doc.exists:
+
                 raise HTTPException(
                     status_code=404,
-                    detail="Listing not found",
+                    detail="Product not found",
                 )
 
-            listing = (
-                listing_doc.to_dict()
+            product = (
+                product_doc.to_dict()
                 or {}
             )
 
-    # --------------------------------------------------------
-    # SELLER AUTHORIZATION
-    # --------------------------------------------------------
+            # --------------------------------------------------------
+            # SELLER AUTHORIZATION
+            # --------------------------------------------------------
 
             if str(
-                listing.get("sellerId", "")
+                product.get(
+                    "sellerId",
+                    "",
+                )
             ) != str(buyer_id):
 
                 raise HTTPException(
@@ -5475,92 +5521,199 @@ async def create_razorpay_order(
                     detail="Unauthorized seller",
                 )
 
-    # --------------------------------------------------------
-    # LISTING STATUS
-    # --------------------------------------------------------
+            # ========================================================
+            # FARM / AUCTION LISTING VALIDATION
+            # ========================================================
 
-            if listing.get("status") != "active":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Listing is not active",
-                )
+            if promotion_type == "farm_listing":
 
-            if listing.get("sold", False) is True:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Listing is already sold",
-                )
+                # ----------------------------------------------------
+                # LISTING STATUS
+                # ----------------------------------------------------
 
-    # --------------------------------------------------------
-    # AUCTION / ACCEPTED BID CHECK
-    # --------------------------------------------------------
+                if product.get(
+                    "status"
+                ) != "active":
 
-            if listing.get(
-                "bidAccepted",
-                False,
-            ) is True:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail="Listing already has an accepted bid",
-                )
-
-    # --------------------------------------------------------
-    # AUCTION EXPIRY CHECK
-    # --------------------------------------------------------
-
-            auction_end = listing.get(
-                "auctionEnd"
-            )
-
-            if auction_end:
-
-                try:
-
-                    if hasattr(
-                        auction_end,
-                        "timestamp",
-                    ):
-                        auction_end_dt = (
-                            datetime.fromtimestamp(
-                                auction_end.timestamp(),
-                                tz=timezone.utc,
-                            )
-                        )
-
-                    else:
-                        auction_end_dt = auction_end
-
-                    now = datetime.now(
-                        timezone.utc
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Listing is not active"
+                        ),
                     )
 
-                    if auction_end_dt <= now:
+                # ----------------------------------------------------
+                # SOLD CHECK
+                # ----------------------------------------------------
+
+                if product.get(
+                    "sold",
+                    False,
+                ) is True:
+
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Listing is already sold"
+                        ),
+                    )
+
+                # ----------------------------------------------------
+                # ACCEPTED BID CHECK
+                # ----------------------------------------------------
+
+                if product.get(
+                    "bidAccepted",
+                    False,
+                ) is True:
+
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Listing already has "
+                            "an accepted bid"
+                        ),
+                    )
+
+                # ----------------------------------------------------
+                # AUCTION EXPIRY CHECK
+                # ----------------------------------------------------
+
+                auction_end = (
+                    product.get(
+                        "auctionEndTime"
+                    )
+                    or product.get(
+                        "auctionEnd"
+                    )
+                )
+
+                if auction_end:
+
+                    try:
+
+                        if hasattr(
+                            auction_end,
+                            "timestamp",
+                        ):
+
+                            auction_end_dt = (
+                                datetime.fromtimestamp(
+                                    auction_end.timestamp(),
+                                    tz=timezone.utc,
+                                )
+                            )
+
+                        else:
+
+                            auction_end_dt = (
+                                auction_end
+                            )
+
+                        now = datetime.now(
+                            timezone.utc
+                        )
+
+                        if auction_end_dt <= now:
+
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    "Auction has "
+                                    "already ended"
+                                ),
+                            )
+
+                    except HTTPException:
+                        raise
+
+                    except Exception:
 
                         raise HTTPException(
                             status_code=400,
-                            detail="Auction has already ended",
+                            detail=(
+                                "Invalid auction expiry"
+                            ),
                         )
 
-                except HTTPException:
-                    raise
+            # ========================================================
+            # SHOP PRODUCT VALIDATION
+            # ========================================================
 
-                except Exception:
+            else:
+
+                # ----------------------------------------------------
+                # ACTIVE CHECK
+                # ----------------------------------------------------
+
+                if product.get(
+                    "isActive"
+                ) is not True:
+
                     raise HTTPException(
                         status_code=400,
-                        detail="Invalid auction expiry",
+                        detail=(
+                            "This shop product "
+                            "is inactive"
+                        ),
                     )
 
-    # --------------------------------------------------------
-    # EXISTING ACTIVE PROMOTION
-    # --------------------------------------------------------
+                # ----------------------------------------------------
+                # AVAILABLE CHECK
+                # ----------------------------------------------------
 
-            existing_expiry = listing.get(
-                "promotionExpiry"
+                if product.get(
+                    "available"
+                ) is not True:
+
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "This shop product "
+                            "is unavailable"
+                        ),
+                    )
+
+                # ----------------------------------------------------
+                # STOCK CHECK
+                # ----------------------------------------------------
+
+                try:
+
+                    stock = float(
+                        product.get(
+                            "stock",
+                            0,
+                        )
+                        or 0
+                    )
+
+                except Exception:
+
+                    stock = 0
+
+                if stock <= 0:
+
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "This shop product "
+                            "is out of stock"
+                        ),
+                    )
+
+            # ========================================================
+            # EXISTING ACTIVE PROMOTION
+            # ========================================================
+
+            existing_expiry = (
+                product.get(
+                    "promotionExpiry"
+                )
             )
 
             if (
-                listing.get(
+                product.get(
                     "promoted",
                     False,
                 ) is True
@@ -5573,6 +5726,7 @@ async def create_razorpay_order(
                         existing_expiry,
                         "timestamp",
                     ):
+
                         existing_expiry_dt = (
                             datetime.fromtimestamp(
                                 existing_expiry.timestamp(),
@@ -5581,7 +5735,10 @@ async def create_razorpay_order(
                         )
 
                     else:
-                        existing_expiry_dt = existing_expiry
+
+                        existing_expiry_dt = (
+                            existing_expiry
+                        )
 
                     if existing_expiry_dt > datetime.now(
                         timezone.utc
@@ -5589,18 +5746,23 @@ async def create_razorpay_order(
 
                         raise HTTPException(
                             status_code=400,
-                            detail="Listing is already promoted",
+                            detail=(
+                                "Product is "
+                                "already promoted"
+                            ),
                         )
 
                 except HTTPException:
                     raise
 
                 except Exception:
+                    # Do not block order creation if an
+                    # old/malformed expiry cannot be parsed.
                     pass
 
-    # --------------------------------------------------------
-    # CREATE SERVER-CONTROLLED RAZORPAY ORDER
-    # --------------------------------------------------------
+            # ========================================================
+            # SERVER-CONTROLLED RAZORPAY AMOUNT
+            # ========================================================
 
             amount_paise = int(
                 round(
@@ -5608,24 +5770,48 @@ async def create_razorpay_order(
                 )
             )
 
+            # ========================================================
+            # CREATE RAZORPAY ORDER
+            # ========================================================
+
             razorpay_order = (
                 razorpay_client.order.create(
                     data={
-                        "amount":
-                            amount_paise,
+                        "amount": amount_paise,
 
-                        "currency":
-                            "INR",
+                        "currency": "INR",
 
-                        "receipt":
-                            f"promotion_{request.listingId[:20]}",
+                        "receipt": (
+                            f"promotion_"
+                            f"{promotion_id[:20]}"
+                        ),
 
                         "notes": {
+
                             "type":
                                 "listing_promotion",
 
+                            "promotionType":
+                                promotion_type,
+
+                            "productId":
+                                promotion_id,
+
                             "listingId":
-                                request.listingId,
+                                (
+                                    promotion_id
+                                    if promotion_type
+                                    == "farm_listing"
+                                    else ""
+                                ),
+
+                            "shopProductId":
+                                (
+                                    promotion_id
+                                    if promotion_type
+                                    == "shop_product"
+                                    else ""
+                                ),
 
                             "buyerId":
                                 buyer_id,
@@ -5637,7 +5823,12 @@ async def create_razorpay_order(
                 )
             )
 
+            # ========================================================
+            # RESPONSE TO SELLER APP
+            # ========================================================
+
             return {
+
                 "success":
                     True,
 
@@ -5645,16 +5836,38 @@ async def create_razorpay_order(
                     RAZORPAY_KEY_ID,
 
                 "amount":
-                    razorpay_order["amount"],
+                    razorpay_order[
+                        "amount"
+                    ],
 
                 "currency":
-                    razorpay_order["currency"],
+                    razorpay_order[
+                        "currency"
+                    ],
 
                 "razorpayOrderId":
-                    razorpay_order["id"],
+                    razorpay_order[
+                        "id"
+                    ],
+
+                "promotionType":
+                    promotion_type,
 
                 "listingId":
-                    request.listingId,
+                    (
+                        promotion_id
+                        if promotion_type
+                        == "farm_listing"
+                        else None
+                    ),
+
+                "shopProductId":
+                    (
+                        promotion_id
+                        if promotion_type
+                        == "shop_product"
+                        else None
+                    ),
 
                 "promotionPlan":
                     promotion_plan,
@@ -7449,6 +7662,7 @@ def finalize_listing_promotion(
     listing_id: str,
     promotion_plan: str,
     buyer_id: str,
+    promotion_type: str = "farm_listing",
 ):
     # ============================================================
     # BASIC VALIDATION
@@ -7564,17 +7778,12 @@ def finalize_listing_promotion(
         or {}
     )
 
-    if notes.get("type") != "listing_promotion":
+    if notes.get(
+        "type"
+    ) != "listing_promotion":
+
         raise Exception(
             "Invalid promotion payment type"
-        )
-
-    if str(
-        notes.get("listingId", "")
-    ) != str(listing_id):
-
-        raise Exception(
-            "Promotion listing mismatch"
         )
 
     if str(
@@ -7593,13 +7802,34 @@ def finalize_listing_promotion(
             "Promotion plan mismatch"
         )
 
+    if str(
+        notes.get("promotionType", "")
+    ) != str(promotion_type):
+
+        raise Exception(
+            "Promotion type mismatch"
+        )
+
+    if str(
+        notes.get("productId", "")
+    ) != str(listing_id):
+
+        raise Exception(
+            "Promotion product mismatch"
+        )
     # ============================================================
     # FIRESTORE REFERENCES
     # ============================================================
 
+    promotion_collection = (
+        "commerce_shop_products"
+        if promotion_type == "shop_product"
+        else "commerce_listings"
+    )
+
     listing_ref = (
         db.collection(
-            "commerce_listings"
+            promotion_collection
         )
         .document(listing_id)
     )
@@ -7696,27 +7926,117 @@ def finalize_listing_promotion(
             )
 
         # --------------------------------------------------------
-        # LISTING ELIGIBILITY
+        # PRODUCT ELIGIBILITY
         # --------------------------------------------------------
 
-        if listing.get("status") != "active":
-            raise Exception(
-                "Listing is not active"
+        if promotion_type == "farm_listing":
+
+            if listing.get(
+                "status"
+            ) != "active":
+
+                raise Exception(
+                    "Listing is not active"
+                )
+
+            if listing.get(
+                "sold",
+                False,
+            ) is True:
+
+                raise Exception(
+                    "Listing is already sold"
+                )
+
+            if listing.get(
+                "bidAccepted",
+                False,
+            ) is True:
+
+                raise Exception(
+                    "Listing has an accepted bid"
+                )
+
+    # ----------------------------------------------------
+    # AUCTION EXPIRY
+    # ----------------------------------------------------
+
+            auction_end = (
+                listing.get("auctionEndTime")
+                or listing.get("auctionEnd")
             )
 
-        if listing.get("sold", False) is True:
-            raise Exception(
-                "Listing is already sold"
+            if auction_end:
+
+                try:
+
+                    if hasattr(
+                        auction_end,
+                        "timestamp",
+                    ):
+
+                        auction_end_dt = (
+                            datetime.fromtimestamp(
+                                auction_end.timestamp(),
+                                tz=timezone.utc,
+                            )
+                        )
+
+                    else:
+
+                        auction_end_dt = auction_end
+
+                    if auction_end_dt <= datetime.now(
+                        timezone.utc
+                    ):
+
+                        raise Exception(
+                            "Auction has already ended"
+                        )
+
+                except Exception as e:
+
+                    if "Auction has already ended" in str(e):
+                        raise
+
+                    raise Exception(
+                        "Invalid auction expiry"
+                    )
+
+        else:
+
+            # ----------------------------------------------------
+            # SHOP PRODUCT
+            # ----------------------------------------------------
+
+            if listing.get(
+                "isActive"
+            ) is not True:
+
+                raise Exception(
+                    "This shop product is inactive"
+                )
+
+            if listing.get(
+                "available"
+            ) is not True:
+
+                raise Exception(
+                    "This shop product is unavailable"
+                )
+
+            stock = float(
+                listing.get(
+                    "stock",
+                    0,
+                ) or 0
             )
 
-        if listing.get(
-            "bidAccepted",
-            False,
-        ) is True:
+            if stock <= 0:
 
-            raise Exception(
-                "Listing has an accepted bid"
-            )
+                raise Exception(
+                    "Shop product is out of stock"
+                )
 
         # --------------------------------------------------------
         # PREVENT ACTIVE PROMOTION
@@ -7884,6 +8204,7 @@ def finalize_listing_promotion_with_retry(
     promotion_plan: str,
     buyer_id: str,
     max_attempts: int = 3,
+    promotion_type: str = "farm_listing",
 ):
     import time
     from google.api_core.exceptions import Aborted
@@ -7898,6 +8219,7 @@ def finalize_listing_promotion_with_retry(
                 listing_id=listing_id,
                 promotion_plan=promotion_plan,
                 buyer_id=buyer_id,
+                promotion_type=promotion_type,
             )
 
         except Aborted:
@@ -9206,10 +9528,14 @@ async def verify_razorpay_payment(
             request.checkoutId is None
             and request.orderId is None
             and request.listingId is None
+            and request.shopProductId is None
         ):
             raise HTTPException(
                 status_code=400,
-                detail="checkoutId, orderId or listingId required",
+                detail=(
+                    "checkoutId, orderId, listingId "
+                    "or shopProductId required"
+                ),
             )
         print("========== VERIFY REQUEST ==========")
         print("checkoutId:", request.checkoutId)
@@ -9240,13 +9566,44 @@ async def verify_razorpay_payment(
             )
         elif request.promotionPlan:
 
+            if request.shopProductId:
+
+                promotion_id = (
+                    request.shopProductId
+                )
+
+                promotion_type = (
+                    "shop_product"
+                )
+
+            elif request.listingId:
+
+                promotion_id = (
+                    request.listingId
+                )
+
+                promotion_type = (
+                    "farm_listing"
+                )
+
+            else:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "listingId or shopProductId "
+                        "required for promotion"
+                    ),
+                )
+
             result = await asyncio.to_thread(
                 finalize_listing_promotion_with_retry,
                 request.razorpay_order_id,
                 request.razorpay_payment_id,
-                request.listingId,
+                promotion_id,
                 request.promotionPlan,
                 buyer_id,
+                promotion_type,
             )
 
         else:
