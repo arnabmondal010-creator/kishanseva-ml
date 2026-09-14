@@ -9565,6 +9565,11 @@ async def verify_razorpay_payment(
                 buyer_id,
             )
         elif request.promotionPlan:
+            print("========== PROMOTION VERIFY DATA ==========")
+            print("listingId:", request.listingId)
+            print("shopProductId:", request.shopProductId)
+            print("promotionPlan:", request.promotionPlan)
+            print("===========================================")
 
             if request.shopProductId:
 
