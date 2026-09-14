@@ -3664,6 +3664,7 @@ class CreateRazorpayOrderRequest(BaseModel):
     listingId: Optional[str] = None
     orderId: Optional[str] = None
     checkoutId: Optional[str] = None     # Cart Checkout
+    promotionPlan: Optional[str] = None
 class VerifyRazorpayPaymentRequest(BaseModel):
     razorpay_payment_id: str
     razorpay_order_id: str
@@ -3672,6 +3673,7 @@ class VerifyRazorpayPaymentRequest(BaseModel):
     listingId: str | None = None
     checkoutId: Optional[str] = None
     orderId: str | None = None
+    promotionPlan: Optional[str] = None
 
 class VerifyPickupOtpRequest(BaseModel):
     orderId: str
@@ -5391,6 +5393,272 @@ async def create_razorpay_order(
     try:
         # Firebase UID from verified token
         buyer_id = user["uid"]
+        # ============================================================
+# LISTING PROMOTION
+# ============================================================
+
+        if request.promotionPlan:
+
+            promotion_plan = str(
+                request.promotionPlan
+            ).strip()
+
+            if not request.listingId:
+                raise HTTPException(
+                    status_code=400,
+                    detail="listingId required for promotion",
+                )
+
+    # --------------------------------------------------------
+    # SERVER-CONTROLLED PROMOTION PLANS
+    # --------------------------------------------------------
+
+            promotion_plans = {
+                "49": {
+                    "price": 49.0,
+                    "days": 1,
+                    "score": 100,
+                },
+                "149": {
+                    "price": 149.0,
+                    "days": 7,
+                    "score": 250,
+                },
+            }
+
+            plan = promotion_plans.get(
+            promotion_plan
+            )
+
+            if not plan:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid promotion plan",
+                )
+
+    # --------------------------------------------------------
+    # LISTING
+    # --------------------------------------------------------
+
+            listing_ref = (
+                db.collection(
+                    "commerce_listings"
+                )
+                .document(
+                    request.listingId
+                )
+            )
+
+            listing_doc = listing_ref.get()
+
+            if not listing_doc.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Listing not found",
+                )
+
+            listing = (
+                listing_doc.to_dict()
+                or {}
+            )
+
+    # --------------------------------------------------------
+    # SELLER AUTHORIZATION
+    # --------------------------------------------------------
+
+            if str(
+                listing.get("sellerId", "")
+            ) != str(buyer_id):
+
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized seller",
+                )
+
+    # --------------------------------------------------------
+    # LISTING STATUS
+    # --------------------------------------------------------
+
+            if listing.get("status") != "active":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Listing is not active",
+                )
+
+            if listing.get("sold", False) is True:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Listing is already sold",
+                )
+
+    # --------------------------------------------------------
+    # AUCTION / ACCEPTED BID CHECK
+    # --------------------------------------------------------
+
+            if listing.get(
+                "bidAccepted",
+                False,
+            ) is True:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail="Listing already has an accepted bid",
+                )
+
+    # --------------------------------------------------------
+    # AUCTION EXPIRY CHECK
+    # --------------------------------------------------------
+
+            auction_end = listing.get(
+                "auctionEnd"
+            )
+
+            if auction_end:
+
+                try:
+
+                    if hasattr(
+                        auction_end,
+                        "timestamp",
+                    ):
+                        auction_end_dt = (
+                            datetime.fromtimestamp(
+                                auction_end.timestamp(),
+                                tz=timezone.utc,
+                            )
+                        )
+
+                    else:
+                        auction_end_dt = auction_end
+
+                    now = datetime.now(
+                        timezone.utc
+                    )
+
+                    if auction_end_dt <= now:
+
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Auction has already ended",
+                        )
+
+                except HTTPException:
+                    raise
+
+                except Exception:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid auction expiry",
+                    )
+
+    # --------------------------------------------------------
+    # EXISTING ACTIVE PROMOTION
+    # --------------------------------------------------------
+
+            existing_expiry = listing.get(
+                "promotionExpiry"
+            )
+
+            if (
+                listing.get(
+                    "promoted",
+                    False,
+                ) is True
+                and existing_expiry
+            ):
+
+                try:
+
+                    if hasattr(
+                        existing_expiry,
+                        "timestamp",
+                    ):
+                        existing_expiry_dt = (
+                            datetime.fromtimestamp(
+                                existing_expiry.timestamp(),
+                                tz=timezone.utc,
+                            )
+                        )
+
+                    else:
+                        existing_expiry_dt = existing_expiry
+
+                    if existing_expiry_dt > datetime.now(
+                        timezone.utc
+                    ):
+
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Listing is already promoted",
+                        )
+
+                except HTTPException:
+                    raise
+
+                except Exception:
+                    pass
+
+    # --------------------------------------------------------
+    # CREATE SERVER-CONTROLLED RAZORPAY ORDER
+    # --------------------------------------------------------
+
+            amount_paise = int(
+                round(
+                    plan["price"] * 100
+                )
+            )
+
+            razorpay_order = (
+                razorpay_client.order.create(
+                    data={
+                        "amount":
+                            amount_paise,
+
+                        "currency":
+                            "INR",
+
+                        "receipt":
+                            f"promotion_{request.listingId[:20]}",
+
+                        "notes": {
+                            "type":
+                                "listing_promotion",
+
+                            "listingId":
+                                request.listingId,
+
+                            "buyerId":
+                                buyer_id,
+
+                            "promotionPlan":
+                                promotion_plan,
+                        },
+                    }
+                )
+            )
+
+            return {
+                "success":
+                    True,
+
+                "keyId":
+                    RAZORPAY_KEY_ID,
+
+                "amount":
+                    razorpay_order["amount"],
+
+                "currency":
+                    razorpay_order["currency"],
+
+                "razorpayOrderId":
+                    razorpay_order["id"],
+
+                "listingId":
+                    request.listingId,
+
+                "promotionPlan":
+                    promotion_plan,
+            }
 
 # -----------------------------
 # CART CHECKOUT
@@ -5622,6 +5890,8 @@ async def create_razorpay_order(
             status_code=500,
             detail="Unable to create payment order",
         )
+
+
 def find_existing_razorpay_refund(
     payment_id: str,
 ):
@@ -7173,6 +7443,472 @@ def finalize_instant_buy_with_retry(
             time.sleep(
                 0.25 * attempt
             )
+def finalize_listing_promotion(
+    razorpay_order_id: str,
+    payment_id: str,
+    listing_id: str,
+    promotion_plan: str,
+    buyer_id: str,
+):
+    # ============================================================
+    # BASIC VALIDATION
+    # ============================================================
+
+    if not razorpay_order_id:
+        raise Exception("Missing Razorpay order ID")
+
+    if not payment_id:
+        raise Exception("Missing payment ID")
+
+    if not listing_id:
+        raise Exception("Missing listing ID")
+
+    if not promotion_plan:
+        raise Exception("Missing promotion plan")
+
+    if not buyer_id:
+        raise Exception("Missing buyer ID")
+
+    # ============================================================
+    # SERVER-SIDE PROMOTION PLANS
+    # NEVER TRUST PRICE/DAYS/SCORE FROM FLUTTER
+    # ============================================================
+
+    promotion_plans = {
+        "49": {
+            "price": 49.0,
+            "days": 1,
+            "score": 100,
+        },
+        "149": {
+            "price": 149.0,
+            "days": 7,
+            "score": 250,
+        },
+    }
+
+    plan = promotion_plans.get(
+        str(promotion_plan).strip()
+    )
+
+    if not plan:
+        raise Exception("Invalid promotion plan")
+
+    expected_amount = int(
+        round(plan["price"] * 100)
+    )
+
+    # ============================================================
+    # FETCH RAZORPAY PAYMENT + ORDER
+    # ============================================================
+
+    payment = razorpay_client.payment.fetch(
+        payment_id
+    )
+
+    razorpay_order = razorpay_client.order.fetch(
+        razorpay_order_id
+    )
+
+    # ============================================================
+    # VERIFY PAYMENT BELONGS TO THIS ORDER
+    # ============================================================
+
+    if payment.get("order_id") != razorpay_order_id:
+        raise Exception(
+            "Payment order mismatch"
+        )
+
+    # ============================================================
+    # VERIFY PAYMENT STATUS
+    # ============================================================
+
+    if payment.get("status") not in [
+        "authorized",
+        "captured",
+    ]:
+        raise Exception(
+            "Payment not successful"
+        )
+
+    # ============================================================
+    # VERIFY RAZORPAY ORDER AMOUNT
+    # ============================================================
+
+    if int(
+        razorpay_order.get("amount", 0)
+    ) != expected_amount:
+
+        raise Exception(
+            "Razorpay order amount mismatch"
+        )
+
+    # ============================================================
+    # VERIFY ACTUAL PAYMENT AMOUNT
+    # ============================================================
+
+    if int(
+        payment.get("amount", 0)
+    ) != expected_amount:
+
+        raise Exception(
+            "Payment amount mismatch"
+        )
+
+    # ============================================================
+    # VERIFY RAZORPAY ORDER NOTES
+    # ============================================================
+
+    notes = (
+        razorpay_order.get("notes", {})
+        or {}
+    )
+
+    if notes.get("type") != "listing_promotion":
+        raise Exception(
+            "Invalid promotion payment type"
+        )
+
+    if str(
+        notes.get("listingId", "")
+    ) != str(listing_id):
+
+        raise Exception(
+            "Promotion listing mismatch"
+        )
+
+    if str(
+        notes.get("buyerId", "")
+    ) != str(buyer_id):
+
+        raise Exception(
+            "Promotion buyer mismatch"
+        )
+
+    if str(
+        notes.get("promotionPlan", "")
+    ) != str(promotion_plan):
+
+        raise Exception(
+            "Promotion plan mismatch"
+        )
+
+    # ============================================================
+    # FIRESTORE REFERENCES
+    # ============================================================
+
+    listing_ref = (
+        db.collection(
+            "commerce_listings"
+        )
+        .document(listing_id)
+    )
+
+    payment_lock_ref = (
+        db.collection(
+            "commerce_payment_locks"
+        )
+        .document(razorpay_order_id)
+    )
+
+    # ============================================================
+    # FIRESTORE TRANSACTION
+    # ============================================================
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def activate_promotion(transaction):
+
+        # --------------------------------------------------------
+        # READ PAYMENT LOCK
+        # --------------------------------------------------------
+
+        lock_doc = transaction.get(
+            payment_lock_ref
+        )
+
+        if hasattr(
+            lock_doc,
+            "__next__",
+        ):
+            lock_doc = next(lock_doc)
+
+        # --------------------------------------------------------
+        # READ LISTING
+        # --------------------------------------------------------
+
+        listing_doc = transaction.get(
+            listing_ref
+        )
+
+        if hasattr(
+            listing_doc,
+            "__next__",
+        ):
+            listing_doc = next(
+                listing_doc
+            )
+
+        if not listing_doc.exists:
+            raise Exception(
+                "Listing not found"
+            )
+
+        listing = (
+            listing_doc.to_dict()
+            or {}
+        )
+
+        # --------------------------------------------------------
+        # IDEMPOTENCY
+        # --------------------------------------------------------
+
+        if lock_doc.exists:
+
+            lock = (
+                lock_doc.to_dict()
+                or {}
+            )
+
+            if (
+                lock.get("status")
+                == "finalized"
+            ):
+
+                return {
+                    "alreadyProcessed": True,
+                    "listingId": listing_id,
+                    "promotionPlan": promotion_plan,
+                    "promotionStatus": "active",
+                }
+
+        # --------------------------------------------------------
+        # SELLER OWNERSHIP
+        # --------------------------------------------------------
+
+        if str(
+            listing.get("sellerId", "")
+        ) != str(buyer_id):
+
+            raise Exception(
+                "Seller ownership mismatch"
+            )
+
+        # --------------------------------------------------------
+        # LISTING ELIGIBILITY
+        # --------------------------------------------------------
+
+        if listing.get("status") != "active":
+            raise Exception(
+                "Listing is not active"
+            )
+
+        if listing.get("sold", False) is True:
+            raise Exception(
+                "Listing is already sold"
+            )
+
+        if listing.get(
+            "bidAccepted",
+            False,
+        ) is True:
+
+            raise Exception(
+                "Listing has an accepted bid"
+            )
+
+        # --------------------------------------------------------
+        # PREVENT ACTIVE PROMOTION
+        # --------------------------------------------------------
+
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        existing_expiry = (
+            listing.get(
+                "promotionExpiry"
+            )
+        )
+
+        if existing_expiry:
+
+            try:
+
+                if hasattr(
+                    existing_expiry,
+                    "timestamp",
+                ):
+
+                    expiry_dt = (
+                        existing_expiry
+                    )
+
+                else:
+
+                    expiry_dt = (
+                        existing_expiry
+                    )
+
+                if expiry_dt > now:
+                    raise Exception(
+                        "Listing is already promoted"
+                    )
+
+            except TypeError:
+                pass
+
+        # --------------------------------------------------------
+        # CALCULATE PROMOTION DATES
+        # --------------------------------------------------------
+
+        promotion_started_at = now
+
+        promotion_expiry = (
+            now
+            + timedelta(
+                days=plan["days"]
+            )
+        )
+
+        # --------------------------------------------------------
+        # ACTIVATE PROMOTION
+        # --------------------------------------------------------
+
+        transaction.update(
+            listing_ref,
+            {
+                "promoted": True,
+
+                "promotionPlan":
+                    promotion_plan,
+
+                "promotionPrice":
+                    plan["price"],
+
+                "promotionDays":
+                    plan["days"],
+
+                "promotionScore":
+                    plan["score"],
+
+                "promotionStartedAt":
+                    promotion_started_at,
+
+                "promotionExpiry":
+                    promotion_expiry,
+
+                "promotionPaymentId":
+                    payment_id,
+
+                "promotionRazorpayOrderId":
+                    razorpay_order_id,
+
+                "promotionUpdatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        # --------------------------------------------------------
+        # PAYMENT LOCK
+        # --------------------------------------------------------
+
+        transaction.set(
+            payment_lock_ref,
+            {
+                "paymentId":
+                    payment_id,
+
+                "buyerId":
+                    buyer_id,
+
+                "listingId":
+                    listing_id,
+
+                "promotionPlan":
+                    promotion_plan,
+
+                "razorpayOrderId":
+                    razorpay_order_id,
+
+                "type":
+                    "listing_promotion",
+
+                "status":
+                    "finalized",
+
+                "createdAt":
+                    firestore.SERVER_TIMESTAMP,
+
+                "updatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        return {
+            "alreadyProcessed": False,
+
+            "listingId":
+                listing_id,
+
+            "promotionPlan":
+                promotion_plan,
+
+            "promotionStatus":
+                "active",
+        }
+
+    # ============================================================
+    # EXECUTE TRANSACTION
+    # ============================================================
+
+    result = activate_promotion(
+        transaction
+    )
+
+    print(
+        "LISTING PROMOTION FINALIZED:",
+        result,
+    )
+
+    return result
+
+def finalize_listing_promotion_with_retry(
+    razorpay_order_id: str,
+    payment_id: str,
+    listing_id: str,
+    promotion_plan: str,
+    buyer_id: str,
+    max_attempts: int = 3,
+):
+    import time
+    from google.api_core.exceptions import Aborted
+
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+
+            return finalize_listing_promotion(
+                razorpay_order_id=razorpay_order_id,
+                payment_id=payment_id,
+                listing_id=listing_id,
+                promotion_plan=promotion_plan,
+                buyer_id=buyer_id,
+            )
+
+        except Aborted:
+
+            if attempt >= max_attempts:
+                raise
+
+            time.sleep(
+                0.25 * attempt
+            )
+
 def finalize_auction_payment_with_retry(
     razorpay_order_id: str,
     payment_id: str,
@@ -8500,6 +9236,16 @@ async def verify_razorpay_payment(
                 request.razorpay_order_id,
                 request.razorpay_payment_id,
                 request.orderId,
+                buyer_id,
+            )
+        elif request.promotionPlan:
+
+            result = await asyncio.to_thread(
+                finalize_listing_promotion_with_retry,
+                request.razorpay_order_id,
+                request.razorpay_payment_id,
+                request.listingId,
+                request.promotionPlan,
                 buyer_id,
             )
 
