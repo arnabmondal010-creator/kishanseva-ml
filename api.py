@@ -8332,9 +8332,56 @@ def finalize_cart(
     @firestore.transactional
     def complete_checkout(transaction):
 
+    # ============================================================
+    # FRESH TRANSACTIONAL CHECKOUT READ
+    # Prevent duplicate orders when /verify and Razorpay webhook
+    # finalize the same payment at the same time.
+    # ============================================================
+
+        fresh_checkout_doc = transaction.get(
+            checkout_ref
+        )
+
+        if not fresh_checkout_doc.exists:
+            raise Exception("Checkout not found")
+
+        fresh_checkout = (
+            fresh_checkout_doc.to_dict()
+            or {}
+        )
+
+    # ------------------------------------------------------------
+    # IDEMPOTENCY CHECK
+    # If another finalizer already completed this checkout,
+    # return the existing order instead of creating another one.
+    # ------------------------------------------------------------
+
+        if (
+            fresh_checkout.get("paymentStatus")
+            == "paid"
+            and fresh_checkout.get("orderId")
+        ):
+            return {
+                "alreadyProcessed": True,
+                "orderId": fresh_checkout.get(
+                    "orderId"
+                ),
+                "orderStatus": fresh_checkout.get(
+                    "orderStatus",
+                    "confirmed",
+                ),
+            }
+
+    # ------------------------------------------------------------
+    # Use the FRESH transactional checkout from this point.
+    # ------------------------------------------------------------
+
+        checkout = fresh_checkout
+
         subtotal = 0.0
         seller_totals = {}
 
+    # Create the order ONLY after the idempotency check.
         order_ref = (
             db.collection("commerce_orders")
             .document()
@@ -8868,90 +8915,104 @@ def finalize_cart(
         transaction
     )
 
-    # ============================================================
-    # NEW ORDER FCM NOTIFICATIONS — SELLER
-    # ============================================================
+# ============================================================
+# NEW ORDER FCM NOTIFICATIONS — SELLER
+# ============================================================
 
-    try:
+# Send seller notifications ONLY when this call actually
+# created the order. If /verify and Razorpay webhook both
+# finalize the same checkout, the second call returns
+# alreadyProcessed=True and must NOT notify sellers again.
 
-        checkout_order_id = (
-            result.get("orderId")
-        )
+    if not result.get(
+        "alreadyProcessed",
+        False,
+    ):
 
-        if checkout_order_id:
+        try:
 
-            order_items = list(
-                db.collection(
-                    "commerce_order_items"
-                )
-                .where(
-                    "orderId",
-                    "==",
-                    checkout_order_id,
-                )
-                .stream()
+            checkout_order_id = (
+                result.get("orderId")
             )
 
-            notified_sellers = set()
+            if checkout_order_id:
 
-            for item_doc in order_items:
-
-                item_data = (
-                    item_doc.to_dict()
-                    or {}
+                order_items = list(
+                    db.collection(
+                        "commerce_order_items"
+                    )
+                    .where(
+                        "orderId",
+                        "==",
+                        checkout_order_id,
+                    )
+                    .stream()
                 )
 
-                seller_id = str(
-                    item_data.get(
-                        "sellerId",
-                        "",
-                    )
-                ).strip()
+                notified_sellers = set()
 
-                if not seller_id:
-                    continue
+                for item_doc in order_items:
+
+                    item_data = (
+                        item_doc.to_dict()
+                        or {}
+                    )
+
+                    seller_id = str(
+                        item_data.get(
+                            "sellerId",
+                            "",
+                        )
+                    ).strip()
+
+                    if not seller_id:
+                        continue
 
                 # One notification per seller
-                if seller_id in notified_sellers:
-                    continue
+                    if seller_id in notified_sellers:
+                        continue
 
-                notified_sellers.add(
-                    seller_id
-                )
-
-                product_name = str(
-                    item_data.get(
-                        "productName",
-                        "your product",
+                    notified_sellers.add(
+                        seller_id
                     )
-                ).strip()
 
-                send_new_order_notification(
-                    seller_id=seller_id,
-                    order_id=(
-                        checkout_order_id
-                    ),
-                    order_type="cart",
-                    product_name=(
-                        product_name
-                        or "your product"
-                    ),
-                )
-                create_seller_new_order_notification(
-                    seller_id=seller_id,
-                    order_id=(checkout_order_id),
-                    order_type="cart",
-                    product_name=(product_name or "your product"),
-                )
+                    product_name = str(
+                        item_data.get(
+                            "productName",
+                            "your product",
+                        )
+                    ).strip()
 
-    except Exception as e:
+                    send_new_order_notification(
+                        seller_id=seller_id,
+                        order_id=(
+                            checkout_order_id
+                        ),
+                        order_type="cart",
+                        product_name=(
+                            product_name
+                            or "your product"
+                        ),
+                    )
+
+                    create_seller_new_order_notification(
+                        seller_id=seller_id,
+                        order_id=checkout_order_id,
+                        order_type="cart",
+                        product_name=(
+                            product_name
+                            or "your product"
+                        ),
+                    )
+
+        except Exception as e:
 
         # Notification failure must NEVER
         # make a successful order fail.
 
-        print(
-            f"CART NEW ORDER FCM ERROR: {e}"
-        )
+            print(
+                f"CART NEW ORDER FCM ERROR: {e}"
+            )
 
     # ============================================================
     # BUYER ORDER CONFIRMED NOTIFICATIONS
