@@ -8342,8 +8342,20 @@ def finalize_cart(
             checkout_ref
         )
 
+# Firestore transaction.get() may return a generator
+# in this environment, so resolve it first.
+        if hasattr(
+            fresh_checkout_doc,
+            "__next__",
+        ):
+            fresh_checkout_doc = next(
+                fresh_checkout_doc
+            )
+
         if not fresh_checkout_doc.exists:
-            raise Exception("Checkout not found")
+            raise Exception(
+                "Checkout not found"
+            )
 
         fresh_checkout = (
             fresh_checkout_doc.to_dict()
