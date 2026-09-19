@@ -3532,6 +3532,7 @@ class BuyerLoginRequest(BaseModel):
 @app.post("/auth/buyer-login-email")
 def buyer_login_email(
     data: BuyerLoginRequest,
+    app_check_claims: dict = Depends(require_firebase_app_check),
 ):
     phone = normalize_phone(data.phone)
 
@@ -3830,6 +3831,7 @@ class BuyerLoginRequest(BaseModel):
 @app.post("/auth/buyer-login-email")
 def buyer_login_email(
     data: BuyerLoginRequest,
+    app_check_claims: dict = Depends(require_firebase_app_check),
 ):
 
     phone = normalize_phone(data.phone)
