@@ -1185,6 +1185,16 @@ OTP_MAX_PHONE_1_HOUR = 5
 OTP_MAX_IP_10_MINUTES = 10
 OTP_MAX_IP_1_HOUR = 30
 
+# ============================================================
+# GLOBAL OTP EMERGENCY LIMITS
+# ============================================================
+
+OTP_GLOBAL_MAX_10_MINUTES = 100
+OTP_GLOBAL_MAX_1_HOUR = 500
+
+OTP_GLOBAL_COLLECTION = "otp_global_rate_limits"
+OTP_GLOBAL_DOCUMENT = "global"
+
 
 def _otp_rate_limit_doc_id(
     limit_type: str,
@@ -1514,6 +1524,158 @@ def check_and_record_otp_attempt(
     run_transaction(
         transaction
     )
+
+def check_global_otp_limit():
+    """
+    Global emergency circuit breaker.
+
+    Prevents the entire OTP service from generating
+    excessive SMS traffic even when attackers rotate
+    phone numbers and IP addresses.
+
+    IMPORTANT:
+    This check happens BEFORE calling 2Factor.
+    """
+
+    now = datetime.now(timezone.utc)
+
+    global_ref = (
+        db.collection(
+            OTP_GLOBAL_COLLECTION
+        )
+        .document(
+            OTP_GLOBAL_DOCUMENT
+        )
+    )
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def run_transaction(transaction):
+
+        global_doc = transaction.get(
+            global_ref
+        )
+
+        if hasattr(
+            global_doc,
+            "__next__",
+        ):
+            global_doc = next(
+                global_doc
+            )
+
+        if global_doc.exists:
+
+            data = (
+                global_doc.to_dict()
+                or {}
+            )
+
+            attempts = data.get(
+                "attempts",
+                [],
+            )
+
+        else:
+
+            attempts = []
+
+        cleaned_attempts = []
+
+        for timestamp in attempts:
+
+            if not timestamp:
+                continue
+
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(
+                    tzinfo=timezone.utc
+                )
+
+            age = (
+                now - timestamp
+            ).total_seconds()
+
+            if age <= 3600:
+                cleaned_attempts.append(
+                    timestamp
+                )
+
+        # ========================================================
+        # GLOBAL — 100 REQUESTS / 10 MINUTES
+        # ========================================================
+
+        ten_minute_attempts = [
+            timestamp
+            for timestamp
+            in cleaned_attempts
+            if (
+                now - timestamp
+            ).total_seconds()
+            <= 600
+        ]
+
+        if len(
+            ten_minute_attempts
+        ) >= OTP_GLOBAL_MAX_10_MINUTES:
+
+            print(
+                "🚨 OTP GLOBAL CIRCUIT BREAKER: "
+                "10-minute limit reached"
+            )
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "OTP service is temporarily "
+                    "unavailable. Please try again later."
+                ),
+            )
+
+        # ========================================================
+        # GLOBAL — 500 REQUESTS / HOUR
+        # ========================================================
+
+        if len(
+            cleaned_attempts
+        ) >= OTP_GLOBAL_MAX_1_HOUR:
+
+            print(
+                "🚨 OTP GLOBAL CIRCUIT BREAKER: "
+                "hourly limit reached"
+            )
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "OTP service is temporarily "
+                    "unavailable. Please try again later."
+                ),
+            )
+
+        # ========================================================
+        # RECORD REQUEST
+        # ========================================================
+
+        cleaned_attempts.append(
+            now
+        )
+
+        transaction.set(
+            global_ref,
+            {
+                "type": "global",
+                "attempts":
+                    cleaned_attempts,
+                "updatedAt": now,
+            },
+        )
+
+    run_transaction(
+        transaction
+    )
+
 def send_new_order_notification(
     seller_id: str,
     order_id: str,
@@ -2198,6 +2360,8 @@ def send_otp(
         phone=phone,
         ip_address=client_ip,
     )
+
+    check_global_otp_limit()
 
     # -----------------------------------------------------
     # GENERATE OTP
