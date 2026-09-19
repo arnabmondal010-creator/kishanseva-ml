@@ -2328,9 +2328,7 @@ def create_buyer_payment_notification(
 # ============================================================
 
 ALLOWED_OTP_APP_IDS = {
-    "com.kishanseva.app",
-    "com.kishanseva.buyer",
-    "com.kishanseva.merchant",
+    "1:441045329401:android:65488ee7357bd722d94928",
 }
 
 
@@ -2355,19 +2353,28 @@ def require_firebase_app_check(
             x_firebase_appcheck
         )
 
+        # Firebase App Check `sub` = Firebase App ID
         app_id = str(
             claims.get("sub", "")
         ).strip()
 
+        print(
+            f"APP CHECK VERIFIED: Firebase App ID = {app_id}"
+        )
+
         if app_id not in ALLOWED_OTP_APP_IDS:
             print(
-                f"APP CHECK BLOCKED: Unauthorized app ID: {app_id}"
+                f"APP CHECK BLOCKED: Unauthorized Firebase App ID: {app_id}"
             )
 
             raise HTTPException(
                 status_code=403,
                 detail="Unauthorized application",
             )
+
+        print(
+            f"APP CHECK PASSED: Authorized Firebase App ID: {app_id}"
+        )
 
         return claims
 
