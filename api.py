@@ -2603,6 +2603,7 @@ class BuyerAvailabilityRequest(BaseModel):
 @app.post("/auth/check-merchant-availability")
 def check_merchant_availability(
     data: MerchantAvailabilityRequest,
+    app_check_claims: dict = Depends(require_firebase_app_check),
 ):
 
     email = data.email.strip().lower()
@@ -3608,6 +3609,7 @@ def buyer_login_email(
 @app.post("/auth/merchant-login-email")
 def merchant_login_email(
     data: MerchantLoginRequest,
+    app_check_claims: dict = Depends(require_firebase_app_check),
 ):
 
     phone = normalize_phone(data.phone)
@@ -3909,6 +3911,7 @@ def buyer_login_email(
 @app.post("/auth/merchant-reset-password")
 def merchant_reset_password(
     data: MerchantResetPasswordRequest,
+    app_check_claims: dict = Depends(require_firebase_app_check),
 ):
 
     phone = normalize_phone(
