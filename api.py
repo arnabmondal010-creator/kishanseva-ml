@@ -1171,6 +1171,349 @@ db = firestore.Client(
     credentials=credentials_fs,
     project=firebase_key["project_id"],
 )
+# ============================================================
+# OTP ABUSE PROTECTION
+# ============================================================
+
+OTP_COOLDOWN_SECONDS = 60
+
+# PHONE LIMITS
+OTP_MAX_PHONE_10_MINUTES = 3
+OTP_MAX_PHONE_1_HOUR = 5
+
+# IP LIMITS
+OTP_MAX_IP_10_MINUTES = 10
+OTP_MAX_IP_1_HOUR = 30
+
+
+def _otp_rate_limit_doc_id(
+    limit_type: str,
+    value: str,
+) -> str:
+
+    value_hash = hashlib.sha256(
+        value.encode("utf-8")
+    ).hexdigest()
+
+    return f"{limit_type}_{value_hash}"
+
+
+def check_and_record_otp_attempt(
+    phone: str,
+    ip_address: str,
+):
+    """
+    Atomically checks and records OTP requests.
+
+    PHONE:
+      - 1 request / 60 seconds
+      - 3 requests / 10 minutes
+      - 5 requests / hour
+
+    IP:
+      - 10 requests / 10 minutes
+      - 30 requests / hour
+
+    Blocked requests never call 2Factor.
+    """
+
+    now = datetime.now(timezone.utc)
+
+    phone_ref = (
+        db.collection("otp_rate_limits")
+        .document(
+            _otp_rate_limit_doc_id(
+                "phone",
+                phone,
+            )
+        )
+    )
+
+    ip_ref = (
+        db.collection("otp_rate_limits")
+        .document(
+            _otp_rate_limit_doc_id(
+                "ip",
+                ip_address,
+            )
+        )
+    )
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def run_transaction(transaction):
+
+        # ========================================================
+        # READ PHONE LIMIT DOCUMENT
+        # ========================================================
+
+        phone_doc = transaction.get(
+            phone_ref
+        )
+
+        if hasattr(
+            phone_doc,
+            "__next__",
+        ):
+            phone_doc = next(
+                phone_doc
+            )
+
+        # ========================================================
+        # READ IP LIMIT DOCUMENT
+        # ========================================================
+
+        ip_doc = transaction.get(
+            ip_ref
+        )
+
+        if hasattr(
+            ip_doc,
+            "__next__",
+        ):
+            ip_doc = next(
+                ip_doc
+            )
+
+        # ========================================================
+        # CLEAN PHONE ATTEMPTS
+        # ========================================================
+
+        phone_data = (
+            phone_doc.to_dict()
+            if phone_doc.exists
+            else {}
+        )
+
+        phone_attempts = (
+            phone_data.get(
+                "attempts",
+                [],
+            )
+        )
+
+        cleaned_phone_attempts = []
+
+        for timestamp in phone_attempts:
+
+            if not timestamp:
+                continue
+
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(
+                    tzinfo=timezone.utc
+                )
+
+            age = (
+                now - timestamp
+            ).total_seconds()
+
+            if age <= 3600:
+                cleaned_phone_attempts.append(
+                    timestamp
+                )
+
+        # ========================================================
+        # PHONE — 60 SECOND COOLDOWN
+        # ========================================================
+
+        if cleaned_phone_attempts:
+
+            latest_phone_attempt = max(
+                cleaned_phone_attempts
+            )
+
+            seconds_since_last = (
+                now
+                - latest_phone_attempt
+            ).total_seconds()
+
+            if (
+                seconds_since_last
+                < OTP_COOLDOWN_SECONDS
+            ):
+
+                retry_after = int(
+                    OTP_COOLDOWN_SECONDS
+                    - seconds_since_last
+                ) + 1
+
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        "Please wait "
+                        f"{retry_after} seconds "
+                        "before requesting another OTP."
+                    ),
+                    headers={
+                        "Retry-After": str(
+                            retry_after
+                        )
+                    },
+                )
+
+        # ========================================================
+        # PHONE — 3 REQUESTS / 10 MINUTES
+        # ========================================================
+
+        phone_10_minute_attempts = [
+            timestamp
+            for timestamp
+            in cleaned_phone_attempts
+            if (
+                now - timestamp
+            ).total_seconds()
+            <= 600
+        ]
+
+        if len(
+            phone_10_minute_attempts
+        ) >= OTP_MAX_PHONE_10_MINUTES:
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many OTP requests "
+                    "for this number. "
+                    "Please try again later."
+                ),
+            )
+
+        # ========================================================
+        # PHONE — 5 REQUESTS / HOUR
+        # ========================================================
+
+        if len(
+            cleaned_phone_attempts
+        ) >= OTP_MAX_PHONE_1_HOUR:
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "OTP request limit reached "
+                    "for this number. "
+                    "Please try again later."
+                ),
+            )
+
+        # ========================================================
+        # CLEAN IP ATTEMPTS
+        # ========================================================
+
+        ip_data = (
+            ip_doc.to_dict()
+            if ip_doc.exists
+            else {}
+        )
+
+        ip_attempts = (
+            ip_data.get(
+                "attempts",
+                [],
+            )
+        )
+
+        cleaned_ip_attempts = []
+
+        for timestamp in ip_attempts:
+
+            if not timestamp:
+                continue
+
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(
+                    tzinfo=timezone.utc
+                )
+
+            age = (
+                now - timestamp
+            ).total_seconds()
+
+            if age <= 3600:
+                cleaned_ip_attempts.append(
+                    timestamp
+                )
+
+        # ========================================================
+        # IP — 10 REQUESTS / 10 MINUTES
+        # ========================================================
+
+        ip_10_minute_attempts = [
+            timestamp
+            for timestamp
+            in cleaned_ip_attempts
+            if (
+                now - timestamp
+            ).total_seconds()
+            <= 600
+        ]
+
+        if len(
+            ip_10_minute_attempts
+        ) >= OTP_MAX_IP_10_MINUTES:
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many OTP requests "
+                    "from this network. "
+                    "Please try again later."
+                ),
+            )
+
+        # ========================================================
+        # IP — 30 REQUESTS / HOUR
+        # ========================================================
+
+        if len(
+            cleaned_ip_attempts
+        ) >= OTP_MAX_IP_1_HOUR:
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "OTP request limit reached "
+                    "from this network. "
+                    "Please try again later."
+                ),
+            )
+
+        # ========================================================
+        # RECORD NEW ATTEMPT
+        # ========================================================
+
+        cleaned_phone_attempts.append(
+            now
+        )
+
+        cleaned_ip_attempts.append(
+            now
+        )
+
+        transaction.set(
+            phone_ref,
+            {
+                "type": "phone",
+                "attempts":
+                    cleaned_phone_attempts,
+                "updatedAt": now,
+            },
+        )
+
+        transaction.set(
+            ip_ref,
+            {
+                "type": "ip",
+                "attempts":
+                    cleaned_ip_attempts,
+                "updatedAt": now,
+            },
+        )
+
+    run_transaction(
+        transaction
+    )
 def send_new_order_notification(
     seller_id: str,
     order_id: str,
@@ -1821,7 +2164,10 @@ def create_buyer_payment_notification(
 
 
 @app.post("/auth/send-otp")
-def send_otp(data: SendOTPRequest):
+def send_otp(
+    data: SendOTPRequest,
+    request: Request,
+):
 
     phone = normalize_phone(data.phone)
     purpose = data.purpose.strip().lower()
@@ -1837,6 +2183,21 @@ def send_otp(data: SendOTPRequest):
             status_code=400,
             detail="Invalid OTP purpose",
         )
+
+    # -----------------------------------------------------
+    # OTP ABUSE PROTECTION
+    # -----------------------------------------------------
+
+    client_ip = (
+        request.client.host
+        if request.client
+        else "unknown"
+    )
+
+    check_and_record_otp_attempt(
+        phone=phone,
+        ip_address=client_ip,
+    )
 
     # -----------------------------------------------------
     # GENERATE OTP
