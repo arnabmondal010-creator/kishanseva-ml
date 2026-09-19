@@ -3080,8 +3080,10 @@ def create_buyer(
     }
 
 @app.post("/auth/verify-otp")
-def verify_otp(data: VerifyOTPRequest):
-
+def verify_otp(
+    data: VerifyOTPRequest,
+    app_check_claims: dict = Depends(require_firebase_app_check),
+):
     phone = normalize_phone(data.phone)
     purpose = data.purpose.strip().lower()
     submitted_otp = data.otp.strip()
@@ -3091,7 +3093,6 @@ def verify_otp(data: VerifyOTPRequest):
             status_code=400,
             detail="Enter a valid 6 digit OTP",
         )
-
     # -----------------------------------------------------
     # PURPOSE-SPECIFIC OTP DOCUMENT
     # -----------------------------------------------------
@@ -3687,7 +3688,10 @@ def merchant_login_email(
     }
 
 @app.post("/auth/reset-password")
-def reset_password(data: ResetPasswordRequest):
+def reset_password(
+    data: ResetPasswordRequest,
+    app_check_claims: dict = Depends(require_firebase_app_check),
+):
 
     phone = normalize_phone(data.phone)
 
