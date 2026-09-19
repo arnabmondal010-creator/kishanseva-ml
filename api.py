@@ -1126,7 +1126,7 @@ def get_prices(
 import os
 import json
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials, messaging, app_check
 
 # 🔥 LOAD KEY
 firebase_env = os.getenv("FIREBASE_KEY")
@@ -2323,12 +2323,74 @@ def create_buyer_payment_notification(
 
         return False
 
+# ============================================================
+# FIREBASE APP CHECK PROTECTION
+# ============================================================
 
+ALLOWED_OTP_APP_IDS = {
+    "com.kishanseva.app",
+    "com.kishanseva.buyer",
+    "com.kishanseva.merchant",
+}
+
+
+def require_firebase_app_check(
+    x_firebase_appcheck: str | None = Header(
+        default=None,
+        alias="X-Firebase-AppCheck",
+    ),
+):
+    if not x_firebase_appcheck:
+        print(
+            "APP CHECK BLOCKED: Missing X-Firebase-AppCheck"
+        )
+
+        raise HTTPException(
+            status_code=401,
+            detail="App verification required",
+        )
+
+    try:
+        claims = app_check.verify_token(
+            x_firebase_appcheck
+        )
+
+        app_id = str(
+            claims.get("sub", "")
+        ).strip()
+
+        if app_id not in ALLOWED_OTP_APP_IDS:
+            print(
+                f"APP CHECK BLOCKED: Unauthorized app ID: {app_id}"
+            )
+
+            raise HTTPException(
+                status_code=403,
+                detail="Unauthorized application",
+            )
+
+        return claims
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(
+            f"APP CHECK BLOCKED: Invalid token: {e}"
+        )
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid app verification",
+        )
 
 @app.post("/auth/send-otp")
 def send_otp(
     data: SendOTPRequest,
     request: Request,
+    app_check_claims: dict = Depends(
+        require_firebase_app_check
+    ),
 ):
 
     phone = normalize_phone(data.phone)
