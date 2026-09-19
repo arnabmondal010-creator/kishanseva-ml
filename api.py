@@ -2328,7 +2328,9 @@ def create_buyer_payment_notification(
 # ============================================================
 
 ALLOWED_OTP_APP_IDS = {
+    "1:441045329401:android:2f31b47970bdd15fd94928",
     "1:441045329401:android:65488ee7357bd722d94928",
+    "1:441045329401:android:7f06f4d8ffb70c19d94928",
 }
 
 
