@@ -18,5 +18,6 @@ google-api-core==2.25.1
 scikit-learn==1.7.2
 deep-translator
 feedparser
+psycopg[binary]
 
 
