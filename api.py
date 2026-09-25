@@ -330,7 +330,6 @@ def translate_text(text, lang="bn"):
 
     if key in translation_cache:
         return translation_cache[key]
-
     try:
         url = "https://translate.googleapis.com/translate_a/single"
 
