@@ -14663,6 +14663,7 @@ def verify_play_subscription(
     }
 
 
+
 @app.get("/subscriptions/me")
 def get_my_subscription(
     user=Depends(verify_firebase_token),
@@ -14689,16 +14690,20 @@ def get_my_subscription(
         }
 
     data = snapshot.to_dict() or {}
+    
     expiry = data.get("expiryTime")
 
-    if hasattr(expiry, "to_datetime"):
-        expiry = expiry.to_datetime()
+    if expiry is not None and not isinstance(expiry, datetime):
+        raise HTTPException(
+            status_code=500,
+            detail="Stored subscription expiry has an invalid type",
+        )
 
-    if expiry and expiry.tzinfo is None:
+    if expiry is not None and expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
 
     active = (
-        data.get("isActive", False)
+        data.get("isActive") is True
         and expiry is not None
         and expiry > datetime.now(timezone.utc)
     )
@@ -14707,6 +14712,10 @@ def get_my_subscription(
         "isActive": active,
         "isPro": active and data.get("plan") == "pro",
         "plan": data.get("plan", "free") if active else "free",
-        "billingPeriod": data.get("billingPeriod") if active else None,
-        "expiryTime": expiry.isoformat() if active else None,
+        "billingPeriod": (
+            data.get("billingPeriod") if active else None
+        ),
+        "expiryTime": (
+            expiry.isoformat() if expiry is not None else None
+        ),
     }
