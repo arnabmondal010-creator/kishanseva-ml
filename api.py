@@ -14725,24 +14725,68 @@ def get_my_subscription(
     }
 
 
+# ============================================================
+# AI FARM MANAGER — FIELD-AWARE CHAT
+# ============================================================
 
-
+from pydantic import BaseModel, Field
+from typing import Optional
 
 
 class AIFarmChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
-    history: list[dict[str, str]] = Field(default_factory=list)
+    field_id: str = Field(..., min_length=1, max_length=200)
+    history: list[dict] = Field(default_factory=list)
 
+
+def _safe_datetime(value):
+    """Convert supported Firestore timestamps to ISO text."""
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return None
+    return None
+
+
+def _clean_field_data(data):
+    """Return only useful, non-sensitive field context."""
+    allowed = [
+        "name",
+        "crop",
+        "area",
+        "center",
+        "ndvi",
+        "ndwi",
+        "savi",
+        "soilType",
+        "soil_type",
+        "planting_date",
+        "sowing_date",
+        "growth_stage",
+        "updated_at",
+        "ndvi_updated",
+    ]
+
+    result = {
+        key: data[key]
+        for key in allowed
+        if key in data and data[key] is not None
+    }
+
+    for key in ("updated_at", "ndvi_updated", "planting_date",
+                "sowing_date"):
+        if key in result:
+            result[key] = _safe_datetime(result[key]) or str(result[key])
+
+    return result
 
 
 @app.post("/ai-farm-manager/chat")
 def ai_farm_manager_chat(
-    request: AIFarmChatRequest,
-    user: dict = Depends(verify_firebase_token),
+    req: AIFarmChatRequest,
+    user=Depends(verify_firebase_token),
 ):
-    import json
-    from datetime import datetime, timezone
-
     uid = user.get("uid")
 
     if not uid:
@@ -14751,202 +14795,269 @@ def ai_farm_manager_chat(
             detail="Invalid authentication token",
         )
 
-    # --------------------------------------------------
-    # 1. Verify the user's Pro subscription
-    # --------------------------------------------------
-    subscription_ref = db.collection("subscriptions").document(uid)
-    subscription_doc = subscription_ref.get()
-
-    if not subscription_doc.exists:
+    message = req.message.strip()
+    if not message:
         raise HTTPException(
-            status_code=403,
-            detail="An active Pro subscription is required.",
+            status_code=422,
+            detail="Message cannot be empty",
         )
 
-    subscription = subscription_doc.to_dict() or {}
-    expiry_time = subscription.get("expiryTime")
-
-    if expiry_time and hasattr(expiry_time, "to_datetime"):
-        expiry_time = expiry_time.to_datetime()
-
-    if expiry_time and expiry_time.tzinfo is None:
-        expiry_time = expiry_time.replace(tzinfo=timezone.utc)
-
-    has_pro_access = (
-        subscription.get("isActive") is True
-        and subscription.get("isPro") is True
-        and subscription.get("plan") == "pro"
-        and isinstance(expiry_time, datetime)
-        and expiry_time > datetime.now(timezone.utc)
-    )
-
-    if not has_pro_access:
-        raise HTTPException(
-            status_code=403,
-            detail="An active Pro subscription is required.",
+    # --------------------------------------------------------
+    # 1. VERIFY SERVER-SIDE PRO ENTITLEMENT
+    # --------------------------------------------------------
+    try:
+        subscription_doc = (
+            db.collection("subscriptions")
+            .document(uid)
+            .get()
         )
 
-    # --------------------------------------------------
-    # 2. Retrieve the farmer's profile
-    # --------------------------------------------------
-    farmer_data = {}
+        if not subscription_doc.exists:
+            raise HTTPException(
+                status_code=403,
+                detail="An active Pro subscription is required.",
+            )
 
-    farmer_doc = (
-        db.collection("farmers")
-        .document(uid)
-        .get()
-    )
+        subscription = subscription_doc.to_dict() or {}
 
-    if farmer_doc.exists:
-        farmer_data = farmer_doc.to_dict() or {}
+        expiry = subscription.get("expiryTime")
+        now = datetime.now(timezone.utc)
 
-    # --------------------------------------------------
-    # 3. Retrieve this farmer's registered fields
-    # --------------------------------------------------
-    farmer_fields = []
+        if hasattr(expiry, "to_datetime"):
+            expiry = expiry.to_datetime()
 
-    field_query = (
-        db.collection("farmer_fields")
-        .where("farmer_id", "==", uid)
-        .stream()
-    )
+        if isinstance(expiry, datetime) and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
 
-    for field_doc in field_query:
+        is_active = (
+            subscription.get("isActive") is True
+            and subscription.get("isPro") is True
+            and str(subscription.get("plan", "")).lower() == "pro"
+            and isinstance(expiry, datetime)
+            and expiry > now
+        )
+
+        if not is_active:
+            raise HTTPException(
+                status_code=403,
+                detail="An active Pro subscription is required.",
+            )
+
+    except HTTPException:
+        raise
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to verify your subscription right now.",
+        )
+
+    # --------------------------------------------------------
+    # 2. FETCH THE SELECTED FIELD AND VERIFY OWNERSHIP
+    # --------------------------------------------------------
+    try:
+        field_ref = db.collection("farmer_fields").document(
+            req.field_id
+        )
+        field_doc = field_ref.get()
+
+        if not field_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Selected farm field was not found.",
+            )
+
         field_data = field_doc.to_dict() or {}
 
-        # Convert Firestore values to JSON-safe values.
-        safe_field = json.loads(
-            json.dumps(field_data, default=str)
+        if field_data.get("farmer_id") != uid:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have access to this farm field.",
+            )
+
+        field_context = _clean_field_data(field_data)
+
+    except HTTPException:
+        raise
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to load your selected farm field.",
         )
 
-        safe_field["field_id"] = field_doc.id
+    # --------------------------------------------------------
+    # 3. FETCH RECENT CROP DIARY RECORDS
+    #    Read-only: this endpoint does not modify the diary.
+    # --------------------------------------------------------
+    diary_entries = []
 
-        farmer_fields.append(safe_field)
+    try:
+        diary_ref = field_ref.collection("crop_diary")
+        diary_docs = list(diary_ref.stream())
 
-    # --------------------------------------------------
-    # 4. Build personalized farm context
-    # --------------------------------------------------
-    farm_context = {
-        "farmer_profile": {
-            "name": farmer_data.get("name"),
-            "location": farmer_data.get("location"),
-            "district": farmer_data.get("district"),
-            "state": farmer_data.get("state"),
-        },
-        "registered_fields": farmer_fields,
+        # Sort safely in Python so older records without
+        # created_at are not silently excluded by order_by.
+        def diary_sort_key(doc):
+            value = (doc.to_dict() or {}).get("created_at")
+            if hasattr(value, "timestamp"):
+                try:
+                    return value.timestamp()
+                except Exception:
+                    pass
+            return 0
+
+        diary_docs.sort(key=diary_sort_key, reverse=True)
+
+        for doc in diary_docs[:20]:
+            entry = doc.to_dict() or {}
+
+            # Keep only useful diary context and avoid passing
+            # arbitrary or private document fields to the model.
+            safe_entry = {}
+            for key in (
+                "date",
+                "title",
+                "activity",
+                "type",
+                "description",
+                "notes",
+                "crop",
+                "growth_stage",
+                "irrigation",
+                "irrigation_amount",
+                "fertilizer",
+                "pesticide",
+                "symptoms",
+                "soilType",
+                "soil_type",
+                "created_at",
+            ):
+                if key in entry and entry[key] is not None:
+                    value = entry[key]
+                    safe_entry[key] = (
+                        _safe_datetime(value) or str(value)
+                        if key == "created_at"
+                        else value
+                    )
+
+            diary_entries.append(safe_entry)
+
+    except Exception:
+        # Do not fail all chat requests just because the diary
+        # cannot be read. Tell the model that it is unavailable.
+        traceback.print_exc()
+        diary_entries = None
+
+    # --------------------------------------------------------
+    # 4. BUILD A LIMITED, FIELD-SPECIFIC CONTEXT
+    # --------------------------------------------------------
+    context = {
+        "field": field_context,
+        "recent_crop_diary": diary_entries,
+        "weather": (
+            "No live weather data was supplied to this endpoint. "
+            "Do not claim to know current weather or rainfall."
+        ),
+        "satellite_data_note": (
+            "Use only the NDVI/NDWI/SAVI values provided in the "
+            "field record. If absent, say satellite data is "
+            "unavailable. Do not invent a trend or acquisition date."
+        ),
+        "irrigation_note": (
+            "A diary entry may document completed irrigation. "
+            "A recommendation is not proof that irrigation occurred."
+        ),
     }
 
-    farm_context_json = json.dumps(
-        farm_context,
-        ensure_ascii=False,
-        default=str,
-    )
-
-    system_prompt = f"""
-You are KishanSeva AI Farm Manager, a personalized agricultural
-assistant for farmers in India, especially West Bengal.
-
-Use the authenticated farmer's saved information below to provide
-personalized farming advice.
-
-FARMER PROFILE AND REGISTERED FIELD DATA:
-{farm_context_json}
-
-IMPORTANT INSTRUCTIONS:
-
-1. Inspect the supplied farmer profile and registered fields before
-   answering each farming question.
-
-2. Use saved crop names, cultivated area, field locations, soil
-   information, field boundaries, and available measurements whenever
-   those details are relevant to the question.
-
-3. Do not ask the farmer to repeat information already present in the
-   supplied data.
-
-4. When a question refers to a specific field, use its saved data.
-   If multiple fields could match, ask the farmer to select a field.
-
-5. If the farmer asks about all their fields, summarize the relevant
-   registered fields individually.
-
-6. If a required detail is missing, explain what is unavailable.
-   Ask only for the minimum additional information necessary.
-
-7. Never invent crop stages, planting dates, soil measurements,
-   irrigation records, rainfall, weather forecasts, or satellite values.
-
-8. Provide practical, step-by-step recommendations appropriate for
-   the farmer's crops, location, and field conditions.
-
-9. Do not claim to have retrieved live weather, current satellite
-   imagery, or laboratory results unless those results are included
-   in the supplied data.
-
-10. Treat missing or stale measurements as unknown rather than
-    assuming they describe current field conditions.
-
-11. For pesticide and fertilizer recommendations, emphasize following
-    product labels and local agricultural expert guidance.
-
-12. Keep responses clear, actionable, and easy for farmers to follow.
-"""
-
-    # --------------------------------------------------
-    # 5. Build the conversation messages
-    # --------------------------------------------------
+    # --------------------------------------------------------
+    # 5. VALIDATE AND LIMIT CHAT HISTORY
+    # --------------------------------------------------------
     messages = [
         {
             "role": "system",
-            "content": system_prompt,
+            "content": (
+                "You are KishanSeva AI Farm Manager, a practical "
+                "agricultural assistant. Answer using the selected "
+                "field context supplied below. Never invent field "
+                "measurements, weather, rainfall, diary activities, "
+                "satellite trends, or dates. Clearly distinguish "
+                "observed/recorded facts from estimates and advice. "
+                "If information is missing, state that it is missing "
+                "and ask a focused follow-up question. Do not claim "
+                "irrigation, fertilizer application, spraying, or "
+                "other work was completed unless a diary entry "
+                "records it. Give safe, actionable advice and use "
+                "the user's language where practical.\n\n"
+                "SELECTED FIELD CONTEXT:\n"
+                + json.dumps(context, ensure_ascii=False, default=str)
+            ),
         }
     ]
 
-    # Keep only the last 10 valid conversation messages.
-    for item in request.history[-10:]:
+    # Accept only user/assistant messages and limit both count
+    # and text size to control token usage.
+    for item in req.history[-12:]:
+        if not isinstance(item, dict):
+            continue
+
         role = item.get("role")
-        content = item.get("content", "")
+        content = item.get("content")
 
-        if (
-            role in ("user", "assistant")
-            and isinstance(content, str)
-        ):
-            content = content.strip()[:4000]
+        if role not in ("user", "assistant"):
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
 
-            if content:
-                messages.append({
-                    "role": role,
-                    "content": content,
-                })
+        messages.append({
+            "role": role,
+            "content": content.strip()[:2000],
+        })
 
     messages.append({
         "role": "user",
-        "content": request.message.strip(),
+        "content": message,
     })
 
-    # --------------------------------------------------
-    # 6. Generate the AI response
-    # --------------------------------------------------
+    # --------------------------------------------------------
+    # 6. CALL OPENAI
+    # --------------------------------------------------------
     try:
+        if not os.getenv("OPENAI_API_KEY"):
+            raise HTTPException(
+                status_code=503,
+                detail="AI service is not configured.",
+            )
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=900,
-            temperature=0.4,
+            max_tokens=800,
+            temperature=0.3,
         )
 
-        answer = response.choices[0].message.content or ""
+        answer = (
+            response.choices[0].message.content or ""
+        ).strip()
+
+        if not answer:
+            raise HTTPException(
+                status_code=502,
+                detail="The AI returned an empty response.",
+            )
 
         return {
             "answer": answer,
-            "plan": "pro",
-            "fields_loaded": len(farmer_fields),
+            "field_id": req.field_id,
+            "field_name": field_context.get("name", "Selected field"),
         }
 
+    except HTTPException:
+        raise
     except Exception:
-        # Keep internal errors and credentials out of API responses.
+        traceback.print_exc()
         raise HTTPException(
             status_code=502,
-            detail="The AI Farm Manager is temporarily unavailable.",
+            detail="AI Farm Manager is temporarily unavailable.",
         )
 
