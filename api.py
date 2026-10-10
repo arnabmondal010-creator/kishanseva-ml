@@ -14949,16 +14949,29 @@ def ai_farm_manager_chat(
         traceback.print_exc()
         diary_entries = None
 
+        
+    # Get coordinates from the selected field document.
+    center = field_data.get("center") or {}
+
+    lat = center.get("lat", field_data.get("lat"))
+    lon = center.get("lon", field_data.get("lon"))
+
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        weather_context = get_weather_context(lat, lon)
+    else:
+        weather_context = {
+            "available": False,
+            "reason": "The selected field has no valid coordinates.",
+        }
+
+
     # --------------------------------------------------------
     # 4. BUILD A LIMITED, FIELD-SPECIFIC CONTEXT
     # --------------------------------------------------------
     context = {
         "field": field_context,
         "recent_crop_diary": diary_entries,
-        "weather": (
-            "No live weather data was supplied to this endpoint. "
-            "Do not claim to know current weather or rainfall."
-        ),
+        "weather": weather_context,
         "satellite_data_note": (
             "Use only the NDVI/NDWI/SAVI values provided in the "
             "field record. If absent, say satellite data is "
@@ -15060,4 +15073,55 @@ def ai_farm_manager_chat(
             status_code=502,
             detail="AI Farm Manager is temporarily unavailable.",
         )
+
+
+def get_weather_context(lat, lon):
+    """Fetch current weather for a selected farm field."""
+    key = os.getenv("OPENWEATHER_API_KEY")
+
+    if not key:
+        return {
+            "available": False,
+            "reason": "Weather API key is not configured.",
+        }
+
+    try:
+        response = requests.get(
+            "https://api.openweathermap.org/data/2.5/weather",
+            params={
+                "lat": lat,
+                "lon": lon,
+                "appid": key,
+                "units": "metric",
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        weather_items = data.get("weather") or [{}]
+        main = data.get("main") or {}
+        wind = data.get("wind") or {}
+        rain = data.get("rain") or {}
+
+        return {
+            "available": True,
+            "condition": weather_items[0].get("main"),
+            "description": weather_items[0].get("description"),
+            "temperature_c": main.get("temp"),
+            "feels_like_c": main.get("feels_like"),
+            "humidity_percent": main.get("humidity"),
+            "wind_speed_mps": wind.get("speed"),
+            "rain_last_1h_mm": rain.get("1h"),
+            "rain_last_3h_mm": rain.get("3h"),
+            "observed_at_unix": data.get("dt"),
+        }
+
+    except Exception as exc:
+        print("AI FARM WEATHER ERROR:", exc)
+        return {
+            "available": False,
+            "reason": "Current weather could not be retrieved.",
+        }
+
 
