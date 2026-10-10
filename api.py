@@ -14734,11 +14734,15 @@ class AIFarmChatRequest(BaseModel):
     history: list[dict[str, str]] = Field(default_factory=list)
 
 
+
 @app.post("/ai-farm-manager/chat")
 def ai_farm_manager_chat(
     request: AIFarmChatRequest,
     user: dict = Depends(verify_firebase_token),
 ):
+    import json
+    from datetime import datetime, timezone
+
     uid = user.get("uid")
 
     if not uid:
@@ -14747,7 +14751,9 @@ def ai_farm_manager_chat(
             detail="Invalid authentication token",
         )
 
-    # Verify the user's current Pro entitlement in Firestore.
+    # --------------------------------------------------
+    # 1. Verify the user's Pro subscription
+    # --------------------------------------------------
     subscription_ref = db.collection("subscriptions").document(uid)
     subscription_doc = subscription_ref.get()
 
@@ -14780,32 +14786,133 @@ def ai_farm_manager_chat(
             detail="An active Pro subscription is required.",
         )
 
-    # Keep only valid, bounded conversation history.
+    # --------------------------------------------------
+    # 2. Retrieve the farmer's profile
+    # --------------------------------------------------
+    farmer_data = {}
+
+    farmer_doc = (
+        db.collection("farmers")
+        .document(uid)
+        .get()
+    )
+
+    if farmer_doc.exists:
+        farmer_data = farmer_doc.to_dict() or {}
+
+    # --------------------------------------------------
+    # 3. Retrieve this farmer's registered fields
+    # --------------------------------------------------
+    farmer_fields = []
+
+    field_query = (
+        db.collection("farmer_fields")
+        .where("farmer_id", "==", uid)
+        .stream()
+    )
+
+    for field_doc in field_query:
+        field_data = field_doc.to_dict() or {}
+
+        # Convert Firestore values to JSON-safe values.
+        safe_field = json.loads(
+            json.dumps(field_data, default=str)
+        )
+
+        safe_field["field_id"] = field_doc.id
+
+        farmer_fields.append(safe_field)
+
+    # --------------------------------------------------
+    # 4. Build personalized farm context
+    # --------------------------------------------------
+    farm_context = {
+        "farmer_profile": {
+            "name": farmer_data.get("name"),
+            "location": farmer_data.get("location"),
+            "district": farmer_data.get("district"),
+            "state": farmer_data.get("state"),
+        },
+        "registered_fields": farmer_fields,
+    }
+
+    farm_context_json = json.dumps(
+        farm_context,
+        ensure_ascii=False,
+        default=str,
+    )
+
+    system_prompt = f"""
+You are KishanSeva AI Farm Manager, a personalized agricultural
+assistant for farmers in India, especially West Bengal.
+
+Use the authenticated farmer's saved information below to provide
+personalized farming advice.
+
+FARMER PROFILE AND REGISTERED FIELD DATA:
+{farm_context_json}
+
+IMPORTANT INSTRUCTIONS:
+
+1. Inspect the supplied farmer profile and registered fields before
+   answering each farming question.
+
+2. Use saved crop names, cultivated area, field locations, soil
+   information, field boundaries, and available measurements whenever
+   those details are relevant to the question.
+
+3. Do not ask the farmer to repeat information already present in the
+   supplied data.
+
+4. When a question refers to a specific field, use its saved data.
+   If multiple fields could match, ask the farmer to select a field.
+
+5. If the farmer asks about all their fields, summarize the relevant
+   registered fields individually.
+
+6. If a required detail is missing, explain what is unavailable.
+   Ask only for the minimum additional information necessary.
+
+7. Never invent crop stages, planting dates, soil measurements,
+   irrigation records, rainfall, weather forecasts, or satellite values.
+
+8. Provide practical, step-by-step recommendations appropriate for
+   the farmer's crops, location, and field conditions.
+
+9. Do not claim to have retrieved live weather, current satellite
+   imagery, or laboratory results unless those results are included
+   in the supplied data.
+
+10. Treat missing or stale measurements as unknown rather than
+    assuming they describe current field conditions.
+
+11. For pesticide and fertilizer recommendations, emphasize following
+    product labels and local agricultural expert guidance.
+
+12. Keep responses clear, actionable, and easy for farmers to follow.
+"""
+
+    # --------------------------------------------------
+    # 5. Build the conversation messages
+    # --------------------------------------------------
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are KishanSeva AI Farm Manager, an agricultural "
-                "assistant for farmers in India, especially West Bengal. "
-                "Give practical, clear guidance about crop management, "
-                "irrigation, soil health, pests, diseases, weather-related "
-                "risks, and yield planning. Ask for missing details such "
-                "as crop, growth stage, location, and symptoms when needed. "
-                "Do not claim to have accessed live weather, satellite data, "
-                "or laboratory results unless that data is explicitly "
-                "provided. For pesticide or fertilizer advice, emphasize "
-                "following the product label and local agricultural "
-                "expert guidance."
-            ),
+            "content": system_prompt,
         }
     ]
 
+    # Keep only the last 10 valid conversation messages.
     for item in request.history[-10:]:
         role = item.get("role")
         content = item.get("content", "")
 
-        if role in ("user", "assistant") and isinstance(content, str):
+        if (
+            role in ("user", "assistant")
+            and isinstance(content, str)
+        ):
             content = content.strip()[:4000]
+
             if content:
                 messages.append({
                     "role": role,
@@ -14817,11 +14924,14 @@ def ai_farm_manager_chat(
         "content": request.message.strip(),
     })
 
+    # --------------------------------------------------
+    # 6. Generate the AI response
+    # --------------------------------------------------
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=700,
+            max_tokens=900,
             temperature=0.4,
         )
 
@@ -14830,10 +14940,13 @@ def ai_farm_manager_chat(
         return {
             "answer": answer,
             "plan": "pro",
+            "fields_loaded": len(farmer_fields),
         }
 
     except Exception:
+        # Keep internal errors and credentials out of API responses.
         raise HTTPException(
             status_code=502,
             detail="The AI Farm Manager is temporarily unavailable.",
         )
+
