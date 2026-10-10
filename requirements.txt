@@ -19,5 +19,6 @@ scikit-learn==1.7.2
 deep-translator
 feedparser
 psycopg[binary]
+google-api-python-client
 
 

@@ -37,6 +37,8 @@ from deep_translator import GoogleTranslator
 from datetime import datetime
 from datetime import timedelta
 from datetime import datetime, timezone, timedelta
+from google.oauth2 import service_account as google_service_account
+from googleapiclient.discovery import build
 import secrets
 
 
@@ -14407,3 +14409,304 @@ def translate_api(data: dict):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ==========================================
+# GOOGLE PLAY SUBSCRIPTION VERIFICATION
+# ==========================================
+
+
+GOOGLE_PLAY_PACKAGE_NAME = "com.kishanseva.app"
+
+GOOGLE_PLAY_PRODUCTS = {
+    "kishanseva_basic_monthly": {
+        "plan": "basic",
+        "billing_period": "monthly",
+    },
+    "kishanseva_basic_yearly": {
+        "plan": "basic",
+        "billing_period": "yearly",
+    },
+    "kishanseva_pro_monthly": {
+        "plan": "pro",
+        "billing_period": "monthly",
+    },
+    "kishanseva_pro_yearly": {
+        "plan": "pro",
+        "billing_period": "yearly",
+    },
+}
+
+
+class VerifyPlaySubscriptionRequest(BaseModel):
+    purchaseToken: str
+    productId: str
+
+
+def get_google_play_client():
+    raw_credentials = os.getenv(
+        "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"
+    )
+
+    if not raw_credentials:
+        raise HTTPException(
+            status_code=503,
+            detail="Google Play verification is not configured",
+        )
+
+    try:
+        info = json.loads(raw_credentials)
+
+        credentials = (
+            google_service_account.Credentials
+            .from_service_account_info(
+                info,
+                scopes=[
+                    "https://www.googleapis.com/auth/androidpublisher"
+                ],
+            )
+        )
+
+        return build(
+            "androidpublisher",
+            "v3",
+            credentials=credentials,
+            cache_discovery=False,
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to initialize Google Play verification",
+        )
+
+
+@app.post("/subscriptions/verify")
+def verify_play_subscription(
+    request: VerifyPlaySubscriptionRequest,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Authenticated user ID is missing",
+        )
+
+    product_id = request.productId.strip()
+    purchase_token = request.purchaseToken.strip()
+
+    if not purchase_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Purchase token is required",
+        )
+
+    plan_info = GOOGLE_PLAY_PRODUCTS.get(product_id)
+
+    if not plan_info:
+        raise HTTPException(
+            status_code=400,
+            detail="Unrecognized subscription product",
+        )
+
+    token_hash = hashlib.sha256(
+        purchase_token.encode("utf-8")
+    ).hexdigest()
+
+    token_ref = db.collection(
+        "google_play_purchase_tokens"
+    ).document(token_hash)
+
+    # Prevent the same purchase token from being assigned
+    # to a different Firebase user.
+    existing_token = token_ref.get()
+
+    if existing_token.exists:
+        existing_uid = existing_token.to_dict().get("uid")
+
+        if existing_uid != uid:
+            raise HTTPException(
+                status_code=409,
+                detail="This purchase is linked to another account",
+            )
+
+    try:
+        client = get_google_play_client()
+
+        purchase = (
+            client.purchases()
+            .subscriptionsv2()
+            .get(
+                packageName=GOOGLE_PLAY_PACKAGE_NAME,
+                token=purchase_token,
+            )
+            .execute()
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        # Do not expose Google API errors or credentials.
+        raise HTTPException(
+            status_code=502,
+            detail="Google Play could not verify this purchase",
+        )
+
+    line_items = purchase.get("lineItems", [])
+
+    matching_item = next(
+        (
+            item for item in line_items
+            if item.get("productId") == product_id
+        ),
+        None,
+    )
+
+    if not matching_item:
+        raise HTTPException(
+            status_code=400,
+            detail="Product does not match the verified purchase",
+        )
+
+    expiry_text = matching_item.get("expiryTime")
+
+    try:
+        expiry = datetime.fromisoformat(
+            expiry_text.replace("Z", "+00:00")
+        ) if expiry_text else None
+    except (ValueError, AttributeError):
+        expiry = None
+
+    state = purchase.get("subscriptionState", "")
+
+    allowed_states = {
+        "SUBSCRIPTION_STATE_ACTIVE",
+        "SUBSCRIPTION_STATE_IN_GRACE_PERIOD",
+        "SUBSCRIPTION_STATE_CANCELED",
+    }
+
+    now = datetime.now(timezone.utc)
+
+    is_entitled = (
+        state in allowed_states
+        and expiry is not None
+        and expiry > now
+    )
+
+    if not is_entitled:
+        raise HTTPException(
+            status_code=402,
+            detail="Subscription is not currently entitled",
+        )
+
+    # Acknowledge a newly purchased subscription.
+    # Google Play requires acknowledgement of purchases.
+    if purchase.get("acknowledgementState") == (
+        "ACKNOWLEDGEMENT_STATE_PENDING"
+    ):
+        try:
+            client.purchases().subscriptions().acknowledge(
+                packageName=GOOGLE_PLAY_PACKAGE_NAME,
+                subscriptionId=product_id,
+                token=purchase_token,
+                body={},
+            ).execute()
+        except Exception:
+            # Do not grant access if acknowledgement fails.
+            raise HTTPException(
+                status_code=502,
+                detail="Purchase verified but acknowledgement failed; retry verification",
+            )
+
+    verified_at = datetime.now(timezone.utc)
+
+    subscription_data = {
+        "uid": uid,
+        "plan": plan_info["plan"],
+        "billingPeriod": plan_info["billing_period"],
+        "productId": product_id,
+        "purchaseTokenHash": token_hash,
+        "subscriptionState": state,
+        "expiryTime": expiry,
+        "isActive": True,
+        "isPro": plan_info["plan"] == "pro",
+        "verifiedAt": verified_at,
+        "source": "google_play",
+        "packageName": GOOGLE_PLAY_PACKAGE_NAME,
+    }
+
+    # Persist the verified entitlement and token ownership.
+    db.collection("subscriptions").document(uid).set(
+        subscription_data,
+        merge=True,
+    )
+
+    token_ref.set(
+        {
+            "uid": uid,
+            "productId": product_id,
+            "updatedAt": verified_at,
+        },
+        merge=True,
+    )
+
+    return {
+        "success": True,
+        "plan": plan_info["plan"],
+        "billingPeriod": plan_info["billing_period"],
+        "isActive": True,
+        "isPro": plan_info["plan"] == "pro",
+        "expiryTime": expiry.isoformat(),
+    }
+
+
+@app.get("/subscriptions/me")
+def get_my_subscription(
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Authenticated user ID is missing",
+        )
+
+    snapshot = (
+        db.collection("subscriptions")
+        .document(uid)
+        .get()
+    )
+
+    if not snapshot.exists:
+        return {
+            "isActive": False,
+            "isPro": False,
+            "plan": "free",
+        }
+
+    data = snapshot.to_dict() or {}
+    expiry = data.get("expiryTime")
+
+    if hasattr(expiry, "to_datetime"):
+        expiry = expiry.to_datetime()
+
+    if expiry and expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    active = (
+        data.get("isActive", False)
+        and expiry is not None
+        and expiry > datetime.now(timezone.utc)
+    )
+
+    return {
+        "isActive": active,
+        "isPro": active and data.get("plan") == "pro",
+        "plan": data.get("plan", "free") if active else "free",
+        "billingPeriod": data.get("billingPeriod") if active else None,
+        "expiryTime": expiry.isoformat() if active else None,
+    }
