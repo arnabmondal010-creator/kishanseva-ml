@@ -40,6 +40,10 @@ from datetime import datetime, timezone, timedelta
 from google.oauth2 import service_account as google_service_account
 from googleapiclient.discovery import build
 import secrets
+from typing import Optional
+
+from fastapi import Depends, HTTPException
+from pydantic import BaseModel, Field
 
 
 
@@ -14719,3 +14723,117 @@ def get_my_subscription(
             expiry.isoformat() if expiry is not None else None
         ),
     }
+
+
+
+
+
+
+class AIFarmChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+    history: list[dict[str, str]] = Field(default_factory=list)
+
+
+@app.post("/ai-farm-manager/chat")
+def ai_farm_manager_chat(
+    request: AIFarmChatRequest,
+    user: dict = Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
+
+    # Verify the user's current Pro entitlement in Firestore.
+    subscription_ref = db.collection("subscriptions").document(uid)
+    subscription_doc = subscription_ref.get()
+
+    if not subscription_doc.exists:
+        raise HTTPException(
+            status_code=403,
+            detail="An active Pro subscription is required.",
+        )
+
+    subscription = subscription_doc.to_dict() or {}
+    expiry_time = subscription.get("expiryTime")
+
+    if expiry_time and hasattr(expiry_time, "to_datetime"):
+        expiry_time = expiry_time.to_datetime()
+
+    if expiry_time and expiry_time.tzinfo is None:
+        expiry_time = expiry_time.replace(tzinfo=timezone.utc)
+
+    has_pro_access = (
+        subscription.get("isActive") is True
+        and subscription.get("isPro") is True
+        and subscription.get("plan") == "pro"
+        and isinstance(expiry_time, datetime)
+        and expiry_time > datetime.now(timezone.utc)
+    )
+
+    if not has_pro_access:
+        raise HTTPException(
+            status_code=403,
+            detail="An active Pro subscription is required.",
+        )
+
+    # Keep only valid, bounded conversation history.
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are KishanSeva AI Farm Manager, an agricultural "
+                "assistant for farmers in India, especially West Bengal. "
+                "Give practical, clear guidance about crop management, "
+                "irrigation, soil health, pests, diseases, weather-related "
+                "risks, and yield planning. Ask for missing details such "
+                "as crop, growth stage, location, and symptoms when needed. "
+                "Do not claim to have accessed live weather, satellite data, "
+                "or laboratory results unless that data is explicitly "
+                "provided. For pesticide or fertilizer advice, emphasize "
+                "following the product label and local agricultural "
+                "expert guidance."
+            ),
+        }
+    ]
+
+    for item in request.history[-10:]:
+        role = item.get("role")
+        content = item.get("content", "")
+
+        if role in ("user", "assistant") and isinstance(content, str):
+            content = content.strip()[:4000]
+            if content:
+                messages.append({
+                    "role": role,
+                    "content": content,
+                })
+
+    messages.append({
+        "role": "user",
+        "content": request.message.strip(),
+    })
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=700,
+            temperature=0.4,
+        )
+
+        answer = response.choices[0].message.content or ""
+
+        return {
+            "answer": answer,
+            "plan": "pro",
+        }
+
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="The AI Farm Manager is temporarily unavailable.",
+        )
