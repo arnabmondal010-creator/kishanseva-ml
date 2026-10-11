@@ -727,21 +727,27 @@ def satellite_analysis(req: NDVIRequest):
             "ndwi": round(float(stats.get("NDWI", 0)), 3),
             "savi": round(float(stats.get("SAVI", 0)), 3),
         }
-        # 🔥 SAVE NDVI TO FIRESTORE
+        
+# SAVE ALL SATELLITE METRICS TO EXISTING SATELLITE DOCUMENT
         if req.user_id:
             try:
                 field_id = getattr(req, "field_id", "default")
 
-                db.collection("fields")\
-                    .document(req.user_id)\
-                    .collection("user_fields")\
-                    .document(field_id)\
+                db.collection("fields") \
+                    .document(req.user_id) \
+                    .collection("user_fields") \
+                    .document(field_id) \
                     .set({
                         "ndvi": latest["ndvi"],
-                        "ndvi_updated": datetime.utcnow().isoformat()
-                }, merge=True)
+                        "ndwi": latest["ndwi"],
+                        "savi": latest["savi"],
+                        "satellite_date": latest["date"],
+                        "satellite_updated": datetime.utcnow().isoformat(),
+                    }, merge=True)
+
             except Exception as e:
-                print("NDVI save error:", e)
+                print("Satellite metrics save error:", e)
+
 
         # ================= HISTORY =================
         def to_feature(img):
@@ -14877,6 +14883,59 @@ def ai_farm_manager_chat(
 
         field_context = _clean_field_data(field_data)
 
+        
+        # --------------------------------------------------------
+        # FETCH SATELLITE METRICS FOR THE SELECTED FIELD
+        # --------------------------------------------------------
+        satellite_context = {
+            "available": False,
+            "reason": "Satellite analysis is not available for this field."
+        }
+
+        try:
+            satellite_ref = (
+                db.collection("fields")
+                .document(uid)
+                .collection("user_fields")
+                .document(req.field_id)
+            )
+
+            satellite_doc = satellite_ref.get()
+
+            if satellite_doc.exists:
+                satellite_data = satellite_doc.to_dict() or {}
+                metrics = {}
+
+                for key in ("ndvi", "ndwi", "savi"):
+                    value = satellite_data.get(key)
+
+                    if (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                    ):
+                        metrics[key] = value
+
+                if metrics:
+                    satellite_context = {
+                        "available": True,
+                        "metrics": metrics,
+                        "acquisition_date": satellite_data.get(
+                            "satellite_date"
+                        ),
+                        "updated_at": satellite_data.get(
+                            "satellite_updated"
+                        ),
+                        "source": "Sentinel-2 (Google Earth Engine)"
+                    }
+
+        except Exception:
+            traceback.print_exc()
+            satellite_context = {
+                "available": False,
+                "reason": "Satellite data could not be loaded."
+            }
+
+
     except HTTPException:
         raise
     except Exception:
@@ -14999,10 +15058,14 @@ def ai_farm_manager_chat(
         "recent_crop_diary": diary_entries,
         "weather": weather_context,
         "forecast": forecast_context,
+        "satellite": satellite_context,
         "satellite_data_note": (
-            "Use only the NDVI/NDWI/SAVI values provided in the "
-            "field record. If absent, say satellite data is "
-            "unavailable. Do not invent a trend or acquisition date."
+            "Use the satellite metrics in the satellite context "
+            "when available. Explain that these are satellite-derived "
+            "indicators, not definitive diagnoses. Do not infer "
+            "historical trends from a single observation. If satellite "
+            "metrics or the acquisition date are missing, say so. "
+            "Never invent satellite values, dates, or trends."
         ),
         "irrigation_note": (
             "A diary entry may document completed irrigation. "
@@ -15040,6 +15103,17 @@ def ai_farm_manager_chat(
                 "support that claim. Do not invent weather values or "
                 "treat a missing rain field as a measured rainfall "
                 "observation.\n\n"
+
+                
+                "When satellite data is available, use the "
+                "provided NDVI, NDWI, and SAVI values to help "
+                "assess field conditions. Explain their limitations "
+                "and do not treat them as definitive diagnoses. "
+                "Do not infer historical trends from a single "
+                "observation. Distinguish the satellite acquisition "
+                "date from the last update time. Never invent "
+                "missing values or dates.\n\n"
+
                 "SELECTED FIELD CONTEXT:\n"
                 + json.dumps(context, ensure_ascii=False, default=str)
             ),
