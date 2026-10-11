@@ -1468,8 +1468,8 @@ FEATURE_LIMITS = {
         "pro": None,
     },
     "predict_disease": {
-        "free": 10,
-        "basic": 40,
+        "free": 5,
+        "basic": 30,
         "pro": None,
     },
 }
