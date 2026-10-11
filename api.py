@@ -881,20 +881,47 @@ def satellite_analysis(req: NDVIRequest):
 
         # Ensure chronological order before calculating trends.
         history.sort(key=lambda item: item["date"])
+        
+        # ================= BUILD NDVI HISTORY =================
         history = [
             {"date": date, "ndvi": round(float(value), 3)}
             for date, value in data
             if value is not None
         ] if data else []
 
-        # Ensure chronological order before calculating trends.
+        # Sort observations chronologically.
         history.sort(key=lambda item: item["date"])
 
-        # ================= TREND =================
-        trend = None
+        # ================= SAVE NDVI HISTORY FOR AI =================
+        if req.user_id:
+            try:
+                field_id = req.field_id or "default"
+
+                satellite_ref = (
+                    db.collection("fields")
+                    .document(req.user_id)
+                    .collection("user_fields")
+                    .document(field_id)
+                )
+
+                satellite_ref.set({
+                    "ndvi_history": history[-12:]
+                }, merge=True)
+
+                print(
+                    "NDVI HISTORY SAVED:",
+                    req.user_id,
+                    field_id,
+                    len(history[-12:]),
+                    "observations"
+                )
+
+            except Exception as e:
+                print("NDVI history save error:", e)
 
         # ================= TREND =================
         trend = None
+
 
         if len(history) >= 2:
             start = history[0]["ndvi"]
@@ -15008,8 +15035,9 @@ def ai_farm_manager_chat(
         field_context = _clean_field_data(field_data)
 
         
+        
         # --------------------------------------------------------
-        # FETCH SATELLITE METRICS FOR THE SELECTED FIELD
+        # FETCH SATELLITE METRICS AND NDVI HISTORY
         # --------------------------------------------------------
         satellite_context = {
             "available": False,
@@ -15030,6 +15058,7 @@ def ai_farm_manager_chat(
                 satellite_data = satellite_doc.to_dict() or {}
                 metrics = {}
 
+                # Read current satellite metrics.
                 for key in ("ndvi", "ndwi", "savi"):
                     value = satellite_data.get(key)
 
@@ -15039,9 +15068,41 @@ def ai_farm_manager_chat(
                     ):
                         metrics[key] = value
 
-                if metrics:
+                # Read saved NDVI history.
+                raw_history = satellite_data.get(
+                    "ndvi_history", []
+                )
+
+                ndvi_history = []
+
+                if isinstance(raw_history, list):
+                    for item in raw_history:
+                        if not isinstance(item, dict):
+                            continue
+
+                        date = item.get("date")
+                        value = item.get("ndvi")
+
+                        if (
+                            isinstance(date, str)
+                            and date.strip()
+                            and isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                        ):
+                            ndvi_history.append({
+                                "date": date,
+                                "ndvi": float(value)
+                            })
+
+                # Sort chronologically and retain the latest 12.
+                ndvi_history.sort(
+                    key=lambda item: item["date"]
+                )
+                ndvi_history = ndvi_history[-12:]
+
+                if metrics or ndvi_history:
                     satellite_context = {
-                        "available": True,
+                        "available": bool(metrics),
                         "metrics": metrics,
                         "acquisition_date": satellite_data.get(
                             "satellite_date"
@@ -15049,15 +15110,23 @@ def ai_farm_manager_chat(
                         "updated_at": satellite_data.get(
                             "satellite_updated"
                         ),
-                        "source": "Sentinel-2 (Google Earth Engine)"
+                        "ndvi_history": ndvi_history,
+                        "history_observation_count": len(
+                            ndvi_history
+                        ),
+                        "source": (
+                            "Sentinel-2 (Google Earth Engine)"
+                        )
                     }
 
         except Exception:
             traceback.print_exc()
+
             satellite_context = {
                 "available": False,
                 "reason": "Satellite data could not be loaded."
             }
+
 
 
     except HTTPException:
@@ -15282,6 +15351,23 @@ def ai_farm_manager_chat(
                 "or irrigation applications.\n"
                 "7. Clearly distinguish satellite observations, "
                 "possible explanations, and recommended actions.\n\n"
+
+                
+                "NDVI HISTORY AND TREND ANALYSIS:\n"
+                "Use satellite.ndvi_history when dated observations "
+                "are available. Require at least two valid "
+                "observations on distinct dates before describing "
+                "a trend. Compare the earliest and latest available "
+                "NDVI values and report their dates and numerical "
+                "change. Explain that the comparison covers the "
+                "available observations, not necessarily continuous "
+                "monitoring. Do not infer historical NDWI or SAVI "
+                "trends from NDVI history. Do not claim that an "
+                "observed NDVI change proves a specific cause of "
+                "crop stress. If fewer than two distinct dates are "
+                "available, state that there is insufficient "
+                "historical data to determine a trend.\n\n"
+
 
 
                 "SELECTED FIELD CONTEXT:\n"
