@@ -1463,8 +1463,8 @@ FEATURE_LIMITS = {
         "pro": None,
     },
     "satellite_analysis": {
-        "free": 5,
-        "basic": 30,
+        "free": 10,
+        "basic": 40,
         "pro": None,
     },
     "predict_disease": {
