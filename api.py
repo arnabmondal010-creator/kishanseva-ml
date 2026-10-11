@@ -41,7 +41,7 @@ from google.oauth2 import service_account as google_service_account
 from googleapiclient.discovery import build
 import secrets
 from typing import Optional
-
+from datetime import datetime, date
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -14923,14 +14923,25 @@ def ai_farm_manager_chat(
                 "description",
                 "notes",
                 "crop",
+                "variety",
                 "growth_stage",
+                "growthStage",
+                "cropStage",
                 "irrigation",
+                "irrigationCount",
                 "irrigation_amount",
+                "water",
                 "fertilizer",
+                "fertilizerKg",
+                "fertilizerType",
                 "pesticide",
+                "pesticideCount",
+                "pesticideSprays",
                 "symptoms",
+                "soil",
                 "soilType",
                 "soil_type",
+                "stress",
                 "created_at",
             ):
                 if key in entry and entry[key] is not None:
@@ -14956,6 +14967,8 @@ def ai_farm_manager_chat(
     lat = center.get("lat", field_data.get("lat"))
     lon = center.get("lon", field_data.get("lon"))
 
+    
+
     if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
         weather_context = get_weather_context(lat, lon)
     else:
@@ -14964,6 +14977,19 @@ def ai_farm_manager_chat(
             "reason": "The selected field has no valid coordinates.",
         }
 
+    
+    if (
+        isinstance(lat, (int, float))
+        and isinstance(lon, (int, float))
+        and -90 <= lat <= 90
+        and -180 <= lon <= 180
+    ):
+        forecast_context = get_forecast_context(lat, lon)
+    else:
+        forecast_context = {
+            "available": False,
+            "reason": "The selected field has no valid coordinates."
+        }
 
     # --------------------------------------------------------
     # 4. BUILD A LIMITED, FIELD-SPECIFIC CONTEXT
@@ -14972,6 +14998,7 @@ def ai_farm_manager_chat(
         "field": field_context,
         "recent_crop_diary": diary_entries,
         "weather": weather_context,
+        "forecast": forecast_context,
         "satellite_data_note": (
             "Use only the NDVI/NDWI/SAVI values provided in the "
             "field record. If absent, say satellite data is "
@@ -15074,6 +15101,67 @@ def ai_farm_manager_chat(
             detail="AI Farm Manager is temporarily unavailable.",
         )
 
+def get_forecast_context(lat, lon):
+    """Fetch the 5-day / 3-hour forecast for a farm field."""
+    key = os.getenv("OPENWEATHER_API_KEY")
+
+    if not key:
+        return {
+            "available": False,
+            "reason": "Weather API key is not configured."
+        }
+
+    try:
+        response = requests.get(
+            "https://api.openweathermap.org/data/2.5/forecast",
+            params={
+                "lat": lat,
+                "lon": lon,
+                "appid": key,
+                "units": "metric",
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        forecast_items = data.get("list", [])
+        if not forecast_items:
+            return {
+                "available": False,
+                "reason": "No forecast data is available."
+            }
+
+        results = []
+
+        # Keep the next 8 forecast periods (approximately 24 hours).
+        for item in forecast_items[:8]:
+            weather_items = item.get("weather") or [{}]
+            main = item.get("main") or {}
+
+            results.append({
+                "forecast_time": item.get("dt_txt"),
+                "temperature_c": main.get("temp"),
+                "feels_like_c": main.get("feels_like"),
+                "humidity_percent": main.get("humidity"),
+                "condition": weather_items[0].get("main"),
+                "description": weather_items[0].get("description"),
+                "rain_3h_mm": (item.get("rain") or {}).get("3h", 0),
+                "pop": item.get("pop"),
+            })
+
+        return {
+            "available": True,
+            "periods": results,
+        }
+
+    except Exception as exc:
+        print("AI FARM FORECAST ERROR:", exc)
+        return {
+            "available": False,
+            "reason": "Forecast data could not be retrieved."
+        }
+
 
 def get_weather_context(lat, lon):
     """Fetch current weather for a selected farm field."""
@@ -15123,5 +15211,109 @@ def get_weather_context(lat, lon):
             "available": False,
             "reason": "Current weather could not be retrieved.",
         }
+
+def _json_safe(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {
+            str(k): _json_safe(v)
+            for k, v in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+
+    # Handles Firestore Timestamp and other date-like values.
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+
+    if value is None or isinstance(
+        value, (str, int, float, bool)
+    ):
+        return value
+
+    return str(value)
+
+
+def get_field_diary_context(field_id: str, uid: str):
+    """Read recent diary entries from the farmer's own field."""
+
+    field_ref = db.collection("farmer_fields").document(field_id)
+    field_doc = field_ref.get()
+
+    if not field_doc.exists:
+        raise HTTPException(status_code=404, detail="Farm field not found.")
+
+    field_data = field_doc.to_dict() or {}
+
+    if field_data.get("farmer_id") != uid:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this farm field."
+        )
+
+    diary_docs = (
+        field_ref.collection("crop_diary")
+        .order_by("created_at", direction="DESCENDING")
+        .limit(20)
+        .stream()
+    )
+
+    allowed_diary_fields = {
+        "date", "title", "activity", "type",
+        "description", "notes", "crop", "variety",
+        "cropStage", "growth_stage", "growthStage",
+        "soil", "soilType", "stress", "symptoms",
+        "irrigation", "irrigationCount", "water",
+        "fertilizerKg", "fertilizerType",
+        "pesticideCount", "pesticideSprays",
+        "created_at"
+    }
+
+    diary_entries = []
+
+    for doc in diary_docs:
+        raw = doc.to_dict() or {}
+
+        # Ignore records that do not belong to this farmer/field.
+        if raw.get("farmer_id") != uid:
+            continue
+
+        if raw.get("field_id") != field_id:
+            continue
+
+        entry = {
+            key: raw[key]
+            for key in allowed_diary_fields
+            if key in raw and raw[key] is not None
+        }
+
+        entry["entry_id"] = doc.id
+        diary_entries.append(_json_safe(entry))
+
+    # Preserve the field's useful details without exposing its boundary.
+    field_context = {
+        key: field_data[key]
+        for key in (
+            "name", "crop", "area", "soil", "soilType",
+            "soil_type", "ndvi", "ndwi", "savi",
+            "growth_stage", "planting_date", "sowing_date"
+        )
+        if key in field_data and field_data[key] is not None
+    }
+
+    return {
+        "field": _json_safe(field_context),
+        "diary_entries": diary_entries,
+        "diary_entry_count": len(diary_entries),
+    }
+
+
+
 
 
