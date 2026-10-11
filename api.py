@@ -15029,6 +15029,17 @@ def ai_farm_manager_chat(
                 "other work was completed unless a diary entry "
                 "records it. Give safe, actionable advice and use "
                 "the user's language where practical.\n\n"
+
+                "When the user requests a multi-day forecast, use "
+                "the supplied forecast.periods data. Group forecast "
+                "periods by calendar date and summarize conditions, "
+                "temperature range, humidity, and available "
+                "precipitation probabilities. Clearly identify dates "
+                "with missing data. Never claim the forecast covers "
+                "five complete days unless the supplied timestamps "
+                "support that claim. Do not invent weather values or "
+                "treat a missing rain field as a measured rainfall "
+                "observation.\n\n"
                 "SELECTED FIELD CONTEXT:\n"
                 + json.dumps(context, ensure_ascii=False, default=str)
             ),
@@ -15101,14 +15112,15 @@ def ai_farm_manager_chat(
             detail="AI Farm Manager is temporarily unavailable.",
         )
 
+
 def get_forecast_context(lat, lon):
-    """Fetch the 5-day / 3-hour forecast for a farm field."""
+    """Fetch and return the available 5-day / 3-hour forecast."""
     key = os.getenv("OPENWEATHER_API_KEY")
 
     if not key:
         return {
             "available": False,
-            "reason": "Weather API key is not configured."
+            "reason": "Weather API key is not configured.",
         }
 
     try:
@@ -15120,22 +15132,25 @@ def get_forecast_context(lat, lon):
                 "appid": key,
                 "units": "metric",
             },
-            timeout=8,
+            timeout=10,
         )
         response.raise_for_status()
         data = response.json()
 
-        forecast_items = data.get("list", [])
+        forecast_items = data.get("list") or []
+
         if not forecast_items:
             return {
                 "available": False,
-                "reason": "No forecast data is available."
+                "reason": "No forecast data is available.",
             }
 
         results = []
 
-        # Keep the next 8 forecast periods (approximately 24 hours).
-        for item in forecast_items[:8]:
+        # Preserve all forecast periods returned by the API.
+        # OpenWeatherMap's standard 5-day endpoint normally
+        # returns forecast periods at 3-hour intervals.
+        for item in forecast_items:
             weather_items = item.get("weather") or [{}]
             main = item.get("main") or {}
 
@@ -15152,6 +15167,7 @@ def get_forecast_context(lat, lon):
 
         return {
             "available": True,
+            "period_count": len(results),
             "periods": results,
         }
 
@@ -15159,9 +15175,8 @@ def get_forecast_context(lat, lon):
         print("AI FARM FORECAST ERROR:", exc)
         return {
             "available": False,
-            "reason": "Forecast data could not be retrieved."
+            "reason": "Forecast data could not be retrieved.",
         }
-
 
 def get_weather_context(lat, lon):
     """Fetch current weather for a selected farm field."""
