@@ -674,7 +674,7 @@ def satellite_analysis(
             if time.time() - ts < CACHE_TTL:
                 cached_result = dict(data)
                 cached_result["usage"] = usage
-                return data
+                return cached_result
 
         boundary = req.boundary
 
@@ -1259,6 +1259,7 @@ def analyze_image(image_bytes, crop, lang):
 
 
 # 🔥 API
+
 @app.post("/predict-disease")
 async def predict_disease(
     crop: str = Form(...),
@@ -1269,31 +1270,39 @@ async def predict_disease(
     print("LANG RECEIVED:", lang)
 
     try:
-        contents = await file.read()
+        # Enforce monthly quota before running the AI model.
+        usage = enforce_feature_usage(user_id, "predict_disease")
 
+        contents = await file.read()
         result = analyze_image(contents, crop, lang)
 
         return {
             "crop": crop,
             "disease": result.get("disease", ""),
-            "advice": result.get("advice", "")
+            "advice": result.get("advice", ""),
+            "usage": usage,
         }
+
+    except HTTPException:
+        # Preserve quota errors, including HTTP 429.
+        raise
 
     except Exception as e:
         print("ERROR:", e)
 
         return {
-            "disease":
+            "disease": (
                 "অজানা" if lang == "bn"
-        else "अज्ञात" if lang == "hi"
-        else "Unknown",
-
-             "advice":
+                else "अज्ञात" if lang == "hi"
+                else "Unknown"
+            ),
+            "advice": (
                 "সার্ভার সমস্যা" if lang == "bn"
-        else "सर्वर समस्या" if lang == "hi"
-        else "Server error"
+                else "सर्वर समस्या" if lang == "hi"
+                else "Server error"
+            )
         }
-    
+
 
 from fastapi import Query
 from sqlalchemy import create_engine, text
@@ -1455,6 +1464,11 @@ FEATURE_LIMITS = {
     },
     "satellite_analysis": {
         "free": 5,
+        "basic": 30,
+        "pro": None,
+    },
+    "predict_disease": {
+        "free": 10,
         "basic": 30,
         "pro": None,
     },
