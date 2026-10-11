@@ -548,80 +548,119 @@ def predict_yield(data: YieldInput):
         "history": get_history(user_id, data.field_id)
     }
 
+
 @app.post("/satellite-analysis")
 def satellite_analysis(req: NDVIRequest):
-
     try:
         import ee
         import json
 
-        # 🔥 CACHE
+        # ================= CACHE =================
         key = f"{req.user_id or 'guest'}_{req.field_id or 'default'}"
+
         if key in NDVI_CACHE:
             data, ts = NDVI_CACHE[key]
             if time.time() - ts < CACHE_TTL:
                 return data
 
         boundary = req.boundary
-        # 🔥 FETCH FROM DB FIRST (CRITICAL)
+
+        # ================= FETCH BOUNDARY FROM FIRESTORE =================
         if (not boundary or len(boundary) < 3) and req.user_id:
             try:
-                field_id = getattr(req, "field_id", "default")
+                field_id = req.field_id or "default"
 
-                doc = db.collection("fields")\
-                .document(req.user_id)\
-                .collection("user_fields")\
-                .document(field_id)\
-                .get()
+                doc = (
+                    db.collection("fields")
+                    .document(req.user_id)
+                    .collection("user_fields")
+                    .document(field_id)
+                    .get()
+                )
 
                 if doc.exists:
-                    boundary = doc.to_dict().get("boundary")
+                    boundary = (doc.to_dict() or {}).get("boundary")
+
                 print("BOUNDARY FROM DB:", boundary)
-            except:
+
+            except Exception as e:
+                print("Boundary fetch error:", e)
                 boundary = None
 
-        try:
-            if isinstance(boundary, str):
+        if isinstance(boundary, str):
+            try:
                 boundary = json.loads(boundary)
-        except:
-            boundary = None
+            except (json.JSONDecodeError, TypeError):
+                boundary = None
 
         # ================= GEOMETRY =================
         if isinstance(boundary, list) and len(boundary) >= 3:
-            if req.user_id:
-                field_id = getattr(req, "field_id", "default")
+            coords = []
 
-                db.collection("fields")\
-                    .document(req.user_id)\
-                    .collection("user_fields")\
-                    .document(field_id)\
-                    .set({
-                        "boundary": boundary
-                    }, merge=True)
+            for point in boundary:
+                if not isinstance(point, dict):
+                    continue
 
-            coords = [
-                [float(p["lon"]), float(p["lat"])]
-                for p in boundary
-            ]
+                lat_value = point.get("lat")
+                lon_value = point.get("lon")
 
-# 🔥 CLOSE POLYGON
+                if not isinstance(lat_value, (int, float)):
+                    continue
+                if not isinstance(lon_value, (int, float)):
+                    continue
+
+                if not (-90 <= lat_value <= 90):
+                    continue
+                if not (-180 <= lon_value <= 180):
+                    continue
+
+                coords.append([
+                    float(lon_value),
+                    float(lat_value)
+                ])
+
+            if len(coords) < 3:
+                return {
+                    "error": "Boundary has fewer than 3 valid points."
+                }
+
+            # Close polygon if necessary.
             if coords[0] != coords[-1]:
                 coords.append(coords[0])
 
             geom = ee.Geometry.Polygon([coords])
 
+            # Preserve the existing boundary in Firestore.
+            if req.user_id:
+                try:
+                    field_id = req.field_id or "default"
+
+                    db.collection("fields") \
+                        .document(req.user_id) \
+                        .collection("user_fields") \
+                        .document(field_id) \
+                        .set({
+                            "boundary": boundary
+                        }, merge=True)
+
+                except Exception as e:
+                    print("Boundary save error:", e)
+
         else:
             return {
                 "error": "Boundary missing. Cannot generate polygon heatmap."
             }
+
         print("BOUNDARY RECEIVED:", req.boundary)
 
-        # ================= COLLECTION =================
+        # ================= SENTINEL-2 COLLECTION =================
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(geom)
-            .filterDate("2024-01-01", "2026-12-31")  # ✅ same as before
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+            .filterDate("2024-01-01", "2026-12-31")
+            .filter(
+                ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30)
+            )
         )
 
         if collection.size().getInfo() == 0:
@@ -632,16 +671,31 @@ def satellite_analysis(req: NDVIRequest):
                 "trend": None
             }
 
-        # ================= INDICES =================
+        # ================= CALCULATE INDICES =================
         def add_indices(img):
-
-            nir  = img.select("B8")
-            red  = img.select("B4")
+            nir = img.select("B8")
+            red = img.select("B4")
             swir = img.select("B11")
 
-            ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
-            ndwi = nir.subtract(swir).divide(nir.add(swir)).rename("NDWI")
-            savi = nir.subtract(red).divide(nir.add(red).add(0.5)).multiply(1.5).rename("SAVI")
+            ndvi = (
+                nir.subtract(red)
+                .divide(nir.add(red))
+                .rename("NDVI")
+            )
+
+            # NIR-SWIR moisture-related index.
+            ndwi = (
+                nir.subtract(swir)
+                .divide(nir.add(swir))
+                .rename("NDWI")
+            )
+
+            savi = (
+                nir.subtract(red)
+                .divide(nir.add(red).add(0.5))
+                .multiply(1.5)
+                .rename("SAVI")
+            )
 
             return img.addBands([ndvi, ndwi, savi])
 
@@ -656,7 +710,8 @@ def satellite_analysis(req: NDVIRequest):
         ndvi_img = latest_img.select("NDVI").updateMask(mask)
         ndwi_img = latest_img.select("NDWI").updateMask(mask)
         savi_img = latest_img.select("SAVI").updateMask(mask)
-        # ================= 🔥 DYNAMIC STRETCH (SAME AS BEFORE) =================
+
+        # ================= DYNAMIC VISUALIZATION STRETCH =================
         ndwi_stats = ndwi_img.reduceRegion(
             reducer=ee.Reducer.minMax(),
             geometry=geom,
@@ -677,7 +732,7 @@ def satellite_analysis(req: NDVIRequest):
         savi_min = float(savi_stats.get("SAVI_min", 0))
         savi_max = float(savi_stats.get("SAVI_max", 1))
 
-        # ================= VIS =================
+        # ================= VISUALIZATION =================
         ndvi_vis = {
             "min": 0,
             "max": 1,
@@ -698,10 +753,10 @@ def satellite_analysis(req: NDVIRequest):
 
         def get_tile(image, vis):
             try:
-                m = ee.Image(image).getMapId(vis)
-                return m["tile_fetcher"].url_format
+                map_data = ee.Image(image).getMapId(vis)
+                return map_data["tile_fetcher"].url_format
             except Exception as e:
-                print("🔥 TILE ERROR:", e)
+                print("TILE ERROR:", e)
                 return None
 
         tiles = {
@@ -710,7 +765,7 @@ def satellite_analysis(req: NDVIRequest):
             "savi": get_tile(savi_img, savi_vis),
         }
 
-        # ================= STATS =================
+        # ================= STATISTICS =================
         stats = latest_img.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
@@ -718,40 +773,79 @@ def satellite_analysis(req: NDVIRequest):
             maxPixels=1e9,
         ).getInfo()
 
-        latest = {
-            "date": ee.Date(
+        acquisition_date = (
+            ee.Date(
                 latest_img.get("system:time_start")
-            ).format("YYYY-MM-dd").getInfo(),
+            )
+            .format("YYYY-MM-dd")
+            .getInfo()
+        )
 
-            "ndvi": round(float(stats.get("NDVI", 0)), 3),
-            "ndwi": round(float(stats.get("NDWI", 0)), 3),
-            "savi": round(float(stats.get("SAVI", 0)), 3),
+        # Do not substitute zero for missing satellite statistics.
+        latest = {
+            "date": acquisition_date,
+            "ndvi": (
+                round(float(stats["NDVI"]), 3)
+                if stats.get("NDVI") is not None else None
+            ),
+            "ndwi": (
+                round(float(stats["NDWI"]), 3)
+                if stats.get("NDWI") is not None else None
+            ),
+            "savi": (
+                round(float(stats["SAVI"]), 3)
+                if stats.get("SAVI") is not None else None
+            ),
         }
-        
-# SAVE ALL SATELLITE METRICS TO EXISTING SATELLITE DOCUMENT
+
+        # ================= SAVE ALL SATELLITE METRICS =================
         if req.user_id:
             try:
-                field_id = getattr(req, "field_id", "default")
+                field_id = req.field_id or "default"
+                satellite_updated = datetime.now(
+                    timezone.utc
+                ).isoformat()
 
-                db.collection("fields") \
-                    .document(req.user_id) \
-                    .collection("user_fields") \
-                    .document(field_id) \
-                    .set({
-                        "ndvi": latest["ndvi"],
-                        "ndwi": latest["ndwi"],
-                        "savi": latest["savi"],
-                        "satellite_date": latest["date"],
-                        "satellite_updated": datetime.utcnow().isoformat(),
-                    }, merge=True)
+                satellite_ref = (
+                    db.collection("fields")
+                    .document(req.user_id)
+                    .collection("user_fields")
+                    .document(field_id)
+                )
+
+                satellite_payload = {
+                    "satellite_date": latest["date"],
+                    "satellite_updated": satellite_updated,
+                }
+
+                for metric in ("ndvi", "ndwi", "savi"):
+                    value = latest[metric]
+
+                    if value is not None:
+                        satellite_payload[metric] = value
+
+                if latest["ndvi"] is not None:
+                    satellite_payload["ndvi_updated"] = satellite_updated
+
+                satellite_ref.set(
+                    satellite_payload,
+                    merge=True
+                )
+
+                print(
+                    "SATELLITE METRICS SAVED:",
+                    req.user_id,
+                    field_id,
+                    latest
+                )
 
             except Exception as e:
+                # Keep satellite analysis available if Firestore
+                # persistence fails, while logging the failure.
                 print("Satellite metrics save error:", e)
 
-
-        # ================= HISTORY =================
+        # ================= NDVI HISTORY =================
         def to_feature(img):
-
             img = add_indices(img)
 
             mean = img.select("NDVI").reduceRegion(
@@ -780,21 +874,27 @@ def satellite_analysis(req: NDVIRequest):
         ).getInfo()
 
         history = [
-            {"date": d, "ndvi": round(float(v), 3)}
-            for d, v in data
+            {"date": date, "ndvi": round(float(value), 3)}
+            for date, value in data
+            if value is not None
         ] if data else []
 
+        # Ensure chronological order before calculating trends.
+        history.sort(key=lambda item: item["date"])
+
         # ================= TREND =================
-       
         trend = None
 
         if len(history) >= 2:
-
             start = history[0]["ndvi"]
             end = history[-1]["ndvi"]
 
             change = round(end - start, 3)
-            change_percent = round((change / start) * 100, 2) if start != 0 else 0
+
+            change_percent = (
+                round((change / start) * 100, 2)
+                if start != 0 else None
+            )
 
             if change > 0.03:
                 trend_type = "improving"
@@ -803,7 +903,6 @@ def satellite_analysis(req: NDVIRequest):
             else:
                 trend_type = "stable"
 
-    # ✅ CORRECT PLACE
             lang = req.lang or "en"
 
             if lang != "en":
@@ -832,8 +931,10 @@ def satellite_analysis(req: NDVIRequest):
         return result
 
     except Exception as e:
-        print("🔥 ERROR:", str(e))
+        print("SATELLITE ANALYSIS ERROR:", str(e))
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 # -----------------------------
 # Irrigation Prediction
 # -----------------------------
