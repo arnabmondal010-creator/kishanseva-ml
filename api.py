@@ -863,6 +863,7 @@ def satellite_analysis(
             "max": savi_max,
             "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
         }
+        
 
         def get_tile(image, vis):
             try:
@@ -876,6 +877,31 @@ def satellite_analysis(
             "ndvi": get_tile(ndvi_img, ndvi_vis),
             "ndwi": get_tile(ndwi_img, ndwi_vis),
             "savi": get_tile(savi_img, savi_vis),
+        }
+        # ================= PDF HEATMAP THUMBNAILS =================
+
+        def get_heatmap_thumbnail(image, visualization):
+            try:
+                params = {
+                    "region": geom,
+                    "dimensions": "1100x750",
+                    "format": "png",
+                    "min": visualization["min"],
+                    "max": visualization["max"],
+                    "palette": visualization["palette"],
+                }
+
+                return image.getThumbURL(params)
+
+            except Exception as e:
+                print("HEATMAP THUMBNAIL ERROR:", e)
+                return None
+
+
+        heatmaps = {
+            "ndvi": get_heatmap_thumbnail(ndvi_img, ndvi_vis),
+            "ndwi": get_heatmap_thumbnail(ndwi_img, ndwi_vis),
+            "savi": get_heatmap_thumbnail(savi_img, savi_vis),
         }
 
         # ================= STATISTICS =================
@@ -1074,6 +1100,7 @@ def satellite_analysis(
             "history": history[-12:] if history else [],
             "trend": trend,
             "tiles": tiles,
+            "heatmaps": heatmaps,
             "source": "Sentinel-2 (Google Earth Engine)",
             "usage": usage
         }
@@ -1092,6 +1119,8 @@ def satellite_analysis(
             status_code=500,
             detail="Satellite analysis failed.",
         )
+    
+    
 
 
 class NotificationSettingsRequest(BaseModel):
