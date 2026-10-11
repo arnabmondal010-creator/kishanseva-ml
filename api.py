@@ -1448,13 +1448,13 @@ if not firebase_admin._apps:
 
 FEATURE_LIMITS = {
     "irrigation": {
-        "free": 5,
-        "basic": 30,
+        "free": 10,
+        "basic": 40,
         "pro": None,
     },
     "yield_estimation": {
-        "free": 5,
-        "basic": 30,
+        "free": 10,
+        "basic": 40,
         "pro": None,
     },
     "ai_farm_manager": {
@@ -1469,7 +1469,7 @@ FEATURE_LIMITS = {
     },
     "predict_disease": {
         "free": 10,
-        "basic": 30,
+        "basic": 40,
         "pro": None,
     },
 }
