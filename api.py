@@ -51,7 +51,33 @@ from pydantic import BaseModel, Field
 GOOGLE_ROUTES_API_KEY = os.getenv(
     "GOOGLE_ROUTES_API_KEY"
 )
+def verify_firebase_token(
+    authorization: str = Header(...),
+):
+    try:
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authorization header",
+            )
 
+        token = authorization.split(
+            "Bearer ",
+            1,
+        )[1]
+
+        decoded_token = auth.verify_id_token(token)
+
+        return decoded_token
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired authentication token",
+        )
 
 def calculate_road_distance_km(
     seller_lat: float,
@@ -152,19 +178,15 @@ def to_hindi_number(text):
 
 def get_yield_prediction(ndvi, temp, humidity):
     try:
-        url = "https://kishanseva-ai.onrender.com/predict-yield"
-
-        payload = {
-            "ndvi": ndvi or 0.5,
-            "avg_temp": temp or 28,
-            "humidity": humidity or 60,
-            "rainfall": 0
-        }
-
-        res = requests.post(url, json=payload, timeout=3).json()
-
-        return res.get("predicted_yield")
-    except:
+        y, _, _ = calculate_yield_prediction(
+            ndvi=ndvi,
+            temp=temp,
+            humidity=humidity,
+            rainfall=0,
+        )
+        return y
+    except Exception as e:
+        print("INTERNAL YIELD PREDICTION ERROR:", str(e))
         return None
     
 def get_time_period(dt, lang):
@@ -478,80 +500,169 @@ def add_ndvi(image):
         image.normalizedDifference(["B8", "B4"]).rename("NDVI")
     )
 
+
+def calculate_yield_prediction(
+    ndvi,
+    temp,
+    humidity,
+    rainfall=0,
+    soil_type="loamy",
+    fertilizer_type="urea",
+    crop_stage="vegetative",
+    stress_level="low",
+    fertilizer_kg=0,
+    irrigation_count=0,
+    pesticide_sprays=0,
+    wind_speed=2,
+):
+    ndvi = ndvi if ndvi is not None else 0.45
+    humidity = humidity if humidity is not None else 50
+    rainfall = rainfall if rainfall is not None else 0
+    temp = temp if temp is not None else 25
+
+    df = pd.DataFrame([{
+        "soil_type": (soil_type or "loamy").lower(),
+        "fertilizer_type": (fertilizer_type or "urea").lower(),
+        "crop_stage": (crop_stage or "vegetative").lower(),
+        "stress_level": (stress_level or "low").lower(),
+        "fertilizer_kg": fertilizer_kg or 0,
+        "irrigation_count": irrigation_count or 0,
+        "pesticide_sprays": pesticide_sprays or 0,
+        "avg_temp": temp,
+        "rainfall": rainfall,
+        "humidity": humidity,
+        "wind_speed": wind_speed or 2,
+        "ndvi": ndvi,
+    }])
+
+    df = df[[
+        "soil_type",
+        "fertilizer_type",
+        "crop_stage",
+        "stress_level",
+        "fertilizer_kg",
+        "irrigation_count",
+        "pesticide_sprays",
+        "avg_temp",
+        "rainfall",
+        "humidity",
+        "wind_speed",
+        "ndvi",
+    ]]
+
+    y = float(yield_model.predict(df)[0])
+
+    preds = [
+        estimator.predict(df)[0]
+        for estimator in yield_model.estimators_
+    ]
+
+    std = float(pd.Series(preds).std())
+
+    confidence = max(40, min(95, 100 - (std * 50)))
+
+    return y, confidence, std
+
+
 # -----------------------------
 # Yield Prediction
 # -----------------------------
+
 @app.post("/predict-yield")
-def predict_yield(data: YieldInput):
+def predict_yield(
+    data: YieldInput,
+    user=Depends(verify_firebase_token),
+):
+    # Authenticate the user and use the verified Firebase UID.
+    uid = user.get("uid")
 
-    user_id = data.user_id or "guest_user"
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
 
-    # ✅ SAFE VALUES
+    user_id = uid
+
+    # Enforce monthly yield-estimation usage limits.
+    usage = enforce_feature_usage(
+        uid,
+        "yield_estimation",
+    )
+
+    # SAFE VALUES
     ndvi = data.ndvi if data.ndvi is not None else 0.45
     humidity = data.humidity if data.humidity is not None else 50
     rainfall = data.rainfall if data.rainfall is not None else 0
     temp = data.avg_temp if data.avg_temp is not None else 25
 
+    
     try:
-        df = pd.DataFrame([{
-            "soil_type": (data.soil_type or "loamy").lower(),
-            "fertilizer_type": (data.fertilizer_type or "urea").lower(),
-            "crop_stage": (data.crop_stage or "vegetative").lower(),
-            "stress_level": (data.stress_level or "low").lower(),
-            "fertilizer_kg": data.fertilizer_kg or 0,
-            "irrigation_count": data.irrigation_count or 0,
-            "pesticide_sprays": data.pesticide_sprays or 0,
-            "avg_temp": temp,
-            "rainfall": rainfall,
-            "humidity": humidity,
-            "wind_speed": data.wind_speed or 2,
-            "ndvi": ndvi
-        }])
-
-        # 🔥 CRITICAL: FIX COLUMN ORDER
-        df = df[[
-            "soil_type",
-            "fertilizer_type",
-            "crop_stage",
-            "stress_level",
-            "fertilizer_kg",
-            "irrigation_count",
-            "pesticide_sprays",
-            "avg_temp",
-            "rainfall",
-            "humidity",
-            "wind_speed",
-            "ndvi"
-        ]]
-
-        # ✅ PREDICT
-        y = float(yield_model.predict(df)[0])
-
-        # 🔥 REAL CONFIDENCE (Random Forest ONLY)
-        preds = [t.predict(df)[0] for t in yield_model.estimators_]
-        std = float(pd.Series(preds).std())
-
-        confidence = 100 - (std * 50)
-        confidence = max(40, min(95, confidence))
+        y, confidence, std = calculate_yield_prediction(
+            ndvi=data.ndvi,
+            temp=data.avg_temp,
+            humidity=data.humidity,
+            rainfall=data.rainfall,
+            soil_type=data.soil_type,
+            fertilizer_type=data.fertilizer_type,
+            crop_stage=data.crop_stage,
+            stress_level=data.stress_level,
+            fertilizer_kg=data.fertilizer_kg,
+            irrigation_count=data.irrigation_count,
+            pesticide_sprays=data.pesticide_sprays,
+            wind_speed=data.wind_speed,
+        )
 
     except Exception as e:
-        return {"error": str(e)}
+        print("YIELD PREDICTION ERROR:", str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Yield prediction failed.",
+        )
 
-    # ✅ SAVE ONLY VALID
+
+    # Save valid predictions against the authenticated user.
     if y > 0:
-        add_yield_record(user_id, data.field_id, y)
+        add_yield_record(
+            user_id,
+            data.field_id,
+            y,
+        )
 
     return {
         "predicted_yield": round(y, 2),
         "confidence": round(confidence, 1),
         "uncertainty": round(std, 3),
-        "history": get_history(user_id, data.field_id)
+        "history": get_history(
+            user_id,
+            data.field_id,
+        ),
+        "usage": usage,
     }
 
 
 @app.post("/satellite-analysis")
-def satellite_analysis(req: NDVIRequest):
+def satellite_analysis(
+    req: NDVIRequest,
+    user=Depends(verify_firebase_token),
+):
     try:
+        uid = user.get("uid")
+
+        if not uid:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token",
+            )
+
+        # Use the authenticated user's ID.
+        req.user_id = uid
+
+        usage = enforce_feature_usage(
+            uid,
+            "satellite_analysis",
+        )
+
         import ee
         import json
 
@@ -561,6 +672,8 @@ def satellite_analysis(req: NDVIRequest):
         if key in NDVI_CACHE:
             data, ts = NDVI_CACHE[key]
             if time.time() - ts < CACHE_TTL:
+                cached_result = dict(data)
+                cached_result["usage"] = usage
                 return data
 
         boundary = req.boundary
@@ -961,30 +1074,58 @@ def satellite_analysis(req: NDVIRequest):
             "history": history[-12:] if history else [],
             "trend": trend,
             "tiles": tiles,
-            "source": "Sentinel-2 (Google Earth Engine)"
+            "source": "Sentinel-2 (Google Earth Engine)",
+            "usage": usage
         }
 
         NDVI_CACHE[key] = (result, time.time())
 
         return result
 
+    except HTTPException:
+        raise
+
     except Exception as e:
         print("SATELLITE ANALYSIS ERROR:", str(e))
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Satellite analysis failed.",
+        )
+
+
+class NotificationSettingsRequest(BaseModel):
+    enabled: bool
+
+class UpdateOrderStatusRequest(BaseModel):
+    orderId: str
+    status: str
 
 # -----------------------------
 # Irrigation Prediction
 # -----------------------------
 @app.post("/predict-irrigation")
-def predict_irrigation(data: IrrigationInput):
+def predict_irrigation(
+    data: IrrigationInput,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
+
+    usage = enforce_feature_usage(uid, "irrigation")
 
     df = pd.DataFrame([data.dict()])
 
     prediction = irrigation_model.predict(df)[0]
 
     return {
-        "irrigation_mm": round(float(prediction), 2)
+        "irrigation_mm": round(float(prediction), 2),
+        "usage": usage,
     }
 
 
@@ -1290,6 +1431,186 @@ cred = credentials.Certificate(firebase_key)
 # 🔥 SAFE INIT (IMPORTANT FIX)
 if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
+
+
+# ==============================
+# FEATURE USAGE LIMITS
+# ==============================
+
+FEATURE_LIMITS = {
+    "irrigation": {
+        "free": 5,
+        "basic": 30,
+        "pro": None,
+    },
+    "yield_estimation": {
+        "free": 5,
+        "basic": 30,
+        "pro": None,
+    },
+    "ai_farm_manager": {
+        "free": 0,
+        "basic": 50,
+        "pro": None,
+    },
+    "satellite_analysis": {
+        "free": 5,
+        "basic": 30,
+        "pro": None,
+    },
+}
+
+
+# ==============================
+# SUBSCRIPTION PLAN HELPERS
+# ==============================
+
+def get_effective_plan(uid: str) -> str:
+    """Return the user's currently active plan: free, basic, or pro."""
+    try:
+        doc = db.collection("subscriptions").document(uid).get()
+
+        if not doc.exists:
+            return "free"
+
+        subscription = doc.to_dict() or {}
+
+        if not subscription.get("isActive", False):
+            return "free"
+
+        expiry = subscription.get("expiryTime")
+
+        if not expiry:
+            return "free"
+
+        now = datetime.now(timezone.utc)
+
+        # Firestore timestamps are normally returned as datetimes.
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+
+        if expiry <= now:
+            return "free"
+
+        plan = str(subscription.get("plan", "free")).lower()
+
+        if subscription.get("isPro") is True or plan == "pro":
+            return "pro"
+
+        if plan == "basic":
+            return "basic"
+
+        return "free"
+
+    except Exception as exc:
+        print(f"Subscription lookup failed for {uid}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to verify subscription. Please try again."
+        )
+
+
+# ==============================
+# FEATURE USAGE HELPERS
+# ==============================
+
+def enforce_feature_usage(uid: str, feature: str) -> dict:
+    """
+    Check and reserve one monthly feature call.
+    Pro users have unlimited calls.
+    Usage resets by UTC calendar month.
+    """
+    if feature not in FEATURE_LIMITS:
+        raise ValueError(f"Unknown feature: {feature}")
+
+    plan = get_effective_plan(uid)
+    limit = FEATURE_LIMITS[feature][plan]
+
+    if limit is None:
+        return {
+            "feature": feature,
+            "plan": plan,
+            "limit": None,
+            "used": None,
+            "remaining": None,
+            "unlimited": True,
+        }
+
+    now = datetime.now(timezone.utc)
+    period = now.strftime("%Y-%m")
+
+    usage_ref = (
+        db.collection("feature_usage")
+        .document(uid)
+        .collection("features")
+        .document(feature)
+    )
+
+    try:
+        transaction = db.transaction()
+
+        @firestore.transactional
+        def update_usage(transaction):
+            snapshot = usage_ref.get(transaction=transaction)
+            data = snapshot.to_dict() if snapshot.exists else {}
+
+            # Start a fresh counter when the UTC calendar month changes.
+            if data.get("period") != period:
+                used = 0
+            else:
+                used = int(data.get("used", 0))
+
+            if used >= limit:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "code": "FEATURE_LIMIT_REACHED",
+                        "feature": feature,
+                        "plan": plan,
+                        "limit": limit,
+                        "used": used,
+                        "remaining": 0,
+                        "message": (
+                            "Monthly usage limit reached. "
+                            "Upgrade your plan to continue."
+                        ),
+                    },
+                )
+
+            used += 1
+
+            transaction.set(
+                usage_ref,
+                {
+                    "period": period,
+                    "used": used,
+                    "plan": plan,
+                    "limit": limit,
+                    "updatedAt": now,
+                },
+                merge=True,
+            )
+
+            return {
+                "feature": feature,
+                "plan": plan,
+                "limit": limit,
+                "used": used,
+                "remaining": max(0, limit - used),
+                "unlimited": False,
+            }
+
+        return update_usage(transaction)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"Usage tracking failed for {uid}/{feature}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to verify feature usage. Please try again."
+        )
+
 
 
 # ================= SEND SINGLE =================
@@ -4455,39 +4776,7 @@ class CheckoutPreviewRequest(BaseModel):
 
 
 
-def verify_firebase_token(
-    authorization: str = Header(...),
-):
-    try:
-        if not authorization.startswith("Bearer "):
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid authorization header",
-            )
 
-        token = authorization.split(
-            "Bearer ",
-            1,
-        )[1]
-
-        decoded_token = auth.verify_id_token(token)
-
-        return decoded_token
-
-    except HTTPException:
-        raise
-
-    except Exception:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired authentication token",
-        )
-class NotificationSettingsRequest(BaseModel):
-    enabled: bool
-
-class UpdateOrderStatusRequest(BaseModel):
-    orderId: str
-    status: str
 
 
 @app.post("/orders/update-status")
@@ -14959,56 +15248,7 @@ def ai_farm_manager_chat(
             detail="Message cannot be empty",
         )
 
-    # --------------------------------------------------------
-    # 1. VERIFY SERVER-SIDE PRO ENTITLEMENT
-    # --------------------------------------------------------
-    try:
-        subscription_doc = (
-            db.collection("subscriptions")
-            .document(uid)
-            .get()
-        )
-
-        if not subscription_doc.exists:
-            raise HTTPException(
-                status_code=403,
-                detail="An active Pro subscription is required.",
-            )
-
-        subscription = subscription_doc.to_dict() or {}
-
-        expiry = subscription.get("expiryTime")
-        now = datetime.now(timezone.utc)
-
-        if hasattr(expiry, "to_datetime"):
-            expiry = expiry.to_datetime()
-
-        if isinstance(expiry, datetime) and expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-
-        is_active = (
-            subscription.get("isActive") is True
-            and subscription.get("isPro") is True
-            and str(subscription.get("plan", "")).lower() == "pro"
-            and isinstance(expiry, datetime)
-            and expiry > now
-        )
-
-        if not is_active:
-            raise HTTPException(
-                status_code=403,
-                detail="An active Pro subscription is required.",
-            )
-
-    except HTTPException:
-        raise
-    except Exception:
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=503,
-            detail="Unable to verify your subscription right now.",
-        )
-
+   
     # --------------------------------------------------------
     # 2. FETCH THE SELECTED FIELD AND VERIFY OWNERSHIP
     # --------------------------------------------------------
@@ -15033,6 +15273,7 @@ def ai_farm_manager_chat(
             )
 
         field_context = _clean_field_data(field_data)
+        usage = enforce_feature_usage(uid, "ai_farm_manager")
 
         
         
@@ -15431,6 +15672,7 @@ def ai_farm_manager_chat(
             "answer": answer,
             "field_id": req.field_id,
             "field_name": field_context.get("name", "Selected field"),
+            "usage": usage,
         }
 
     except HTTPException:
