@@ -881,6 +881,17 @@ def satellite_analysis(req: NDVIRequest):
 
         # Ensure chronological order before calculating trends.
         history.sort(key=lambda item: item["date"])
+        history = [
+            {"date": date, "ndvi": round(float(value), 3)}
+            for date, value in data
+            if value is not None
+        ] if data else []
+
+        # Ensure chronological order before calculating trends.
+        history.sort(key=lambda item: item["date"])
+
+        # ================= TREND =================
+        trend = None
 
         # ================= TREND =================
         trend = None
