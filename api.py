@@ -14755,6 +14755,7 @@ def _safe_datetime(value):
     return None
 
 
+
 def _clean_field_data(data):
     """Return only useful, non-sensitive field context."""
     allowed = [
@@ -14765,6 +14766,8 @@ def _clean_field_data(data):
         "ndvi",
         "ndwi",
         "savi",
+        "satellite_date",
+        "satellite_updated",
         "soilType",
         "soil_type",
         "planting_date",
@@ -14780,12 +14783,21 @@ def _clean_field_data(data):
         if key in data and data[key] is not None
     }
 
-    for key in ("updated_at", "ndvi_updated", "planting_date",
-                "sowing_date"):
+    date_fields = (
+        "updated_at",
+        "ndvi_updated",
+        "satellite_date",
+        "satellite_updated",
+        "planting_date",
+        "sowing_date",
+    )
+
+    for key in date_fields:
         if key in result:
             result[key] = _safe_datetime(result[key]) or str(result[key])
 
     return result
+
 
 
 @app.post("/ai-farm-manager/chat")
@@ -15113,6 +15125,52 @@ def ai_farm_manager_chat(
                 "observation. Distinguish the satellite acquisition "
                 "date from the last update time. Never invent "
                 "missing values or dates.\n\n"
+
+                
+                # Satellite-based crop health interpretation
+                "SATELLITE CROP HEALTH INTERPRETATION:\n"
+                "When satellite metrics are available, interpret them "
+                "using the selected field's crop, growth stage, "
+                "observation date, weather, and crop diary.\n\n"
+
+                "NDVI: Use as an indicator of vegetation greenness "
+                "and photosynthetic activity. Low values may reflect "
+                "sparse vegetation, early growth, senescence, bare "
+                "soil, or crop stress. Do not automatically diagnose "
+                "disease or nutrient deficiency from NDVI alone.\n\n"
+
+                "NDWI: Explain that interpretation depends on the "
+                "specific index formula used. In this application, "
+                "NDWI is calculated using NIR and SWIR bands. Treat "
+                "it as a moisture-related spectral indicator, not a "
+                "direct soil-moisture measurement.\n\n"
+
+                "SAVI: Use as a vegetation indicator designed to "
+                "reduce soil-background effects. It can be useful "
+                "where vegetation cover is sparse. Do not treat it "
+                "as a direct measurement of crop yield or plant health.\n\n"
+
+                "INTERPRETATION RULES:\n"
+                "1. Use only the actual satellite metrics supplied "
+                "in the field context. Never invent missing values.\n"
+                "2. Do not use universal NDVI thresholds to diagnose "
+                "crop health without considering crop type, growth "
+                "stage, canopy cover, and local conditions.\n"
+                "3. A single observation cannot establish whether "
+                "crop health is improving or declining. Require "
+                "multiple dated observations for trend claims.\n"
+                "4. Consider recent rainfall, forecast conditions, "
+                "and recorded irrigation before suggesting water "
+                "stress, but do not claim these prove soil moisture.\n"
+                "5. Explain uncertainty and recommend a field "
+                "inspection when a satellite signal could have "
+                "multiple causes.\n"
+                "6. Give practical next steps. Prioritize low-risk "
+                "checks before recommending fertilizer, pesticide, "
+                "or irrigation applications.\n"
+                "7. Clearly distinguish satellite observations, "
+                "possible explanations, and recommended actions.\n\n"
+
 
                 "SELECTED FIELD CONTEXT:\n"
                 + json.dumps(context, ensure_ascii=False, default=str)
