@@ -865,6 +865,12 @@ def satellite_analysis(
         }
         # ================= SATELLITE BASEMAP =================
 
+        # ================= SATELLITE DATE RANGE =================
+        today = datetime.now(timezone.utc).date()
+
+        start_date = (today - timedelta(days=90)).isoformat()
+        end_date = (today + timedelta(days=1)).isoformat()
+
         satellite_image = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
             .filterBounds(geom)
