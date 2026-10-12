@@ -863,7 +863,91 @@ def satellite_analysis(
             "max": savi_max,
             "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
         }
-        
+        # ================= SATELLITE BASEMAP =================
+
+        satellite_image = (
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterBounds(geom)
+            .filterDate(start_date, end_date)
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
+            .sort("CLOUDY_PIXEL_PERCENTAGE")
+            .first()
+        )
+
+        satellite_image = ee.Image(satellite_image).clip(geom)
+
+        satellite_vis = {
+            "bands": ["B4", "B3", "B2"],
+            "min": 0,
+            "max": 3000,
+            "gamma": 1.2
+        }
+
+        satellite_basemap_url = satellite_image.getThumbURL({
+            "region": geom,
+            "dimensions": "1100x750",
+            "format": "png",
+            **satellite_vis
+        })
+
+        # ================= HEATMAP IMAGES =================
+
+        def get_heatmap_thumbnail(image, visualization):
+            try:
+                return image.getThumbURL({
+                    "region": geom,
+                    "dimensions": "1100x750",
+                    "format": "png",
+                    "min": visualization["min"],
+                    "max": visualization["max"],
+                    "palette": visualization["palette"],
+                })
+            except Exception as e:
+                print("HEATMAP THUMBNAIL ERROR:", e)
+                return None
+
+
+        heatmaps = {
+            "ndvi": get_heatmap_thumbnail(ndvi_img, ndvi_vis),
+            "ndwi": get_heatmap_thumbnail(ndwi_img, ndwi_vis),
+            "savi": get_heatmap_thumbnail(savi_img, savi_vis),
+        }
+        # ================= COMBINED HEATMAPS =================
+
+        def get_combined_heatmap(index_image, visualization):
+            try:
+        # Apply the index palette.
+                rgb = index_image.visualize(
+                    min=visualization["min"],
+                    max=visualization["max"],
+                    palette=visualization["palette"]
+                )
+
+        # Make the coloured index layer partially transparent.
+                alpha = index_image.gte(0).multiply(160).rename("alpha")
+                rgb = rgb.addBands(alpha)
+
+        # Combine with the true-colour satellite background.
+                base = satellite_image.visualize(**satellite_vis)
+
+                combined = base.blend(rgb)
+
+                return combined.getThumbURL({
+                    "region": geom,
+                    "dimensions": "1100x750",
+                    "format": "png"
+                })
+
+            except Exception as e:
+                print("COMBINED HEATMAP ERROR:", e)
+                return None
+
+
+        combined_heatmaps = {
+            "ndvi": get_combined_heatmap(ndvi_img, ndvi_vis),
+            "ndwi": get_combined_heatmap(ndwi_img, ndwi_vis),
+            "savi": get_combined_heatmap(savi_img, savi_vis),
+        }
 
         def get_tile(image, vis):
             try:
@@ -1102,7 +1186,9 @@ def satellite_analysis(
             "tiles": tiles,
             "heatmaps": heatmaps,
             "source": "Sentinel-2 (Google Earth Engine)",
-            "usage": usage
+            "usage": usage,
+            "satellite_basemap": satellite_basemap_url,
+            "combined_heatmaps": combined_heatmaps,
         }
 
         NDVI_CACHE[key] = (result, time.time())
