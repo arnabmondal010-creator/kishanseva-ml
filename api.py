@@ -929,10 +929,6 @@ def satellite_analysis(
                     palette=visualization["palette"]
                 )
 
-        # Make the coloured index layer partially transparent.
-                alpha = index_image.gte(0).multiply(160).rename("alpha")
-                rgb = rgb.addBands(alpha)
-
         # Combine with the true-colour satellite background.
                 base = satellite_image.visualize(**satellite_vis)
 
