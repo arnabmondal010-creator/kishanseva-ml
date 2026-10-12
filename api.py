@@ -863,38 +863,29 @@ def satellite_analysis(
             "max": savi_max,
             "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
         }
+        
         # ================= SATELLITE BASEMAP =================
-
-        # ================= SATELLITE DATE RANGE =================
-        today = datetime.now(timezone.utc).date()
-
-        start_date = (today - timedelta(days=90)).isoformat()
-        end_date = (today + timedelta(days=1)).isoformat()
-
-        satellite_image = (
-            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-            .filterBounds(geom)
-            .filterDate(start_date, end_date)
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-            .sort("CLOUDY_PIXEL_PERCENTAGE")
-            .first()
-        )
-
-        satellite_image = ee.Image(satellite_image).clip(geom)
+        # Use the same Sentinel-2 image used for the indices.
+        satellite_image = ee.Image(latest_img)
 
         satellite_vis = {
             "bands": ["B4", "B3", "B2"],
             "min": 0,
             "max": 3000,
-            "gamma": 1.2
+            "gamma": 1.2,
         }
 
+        # Use the polygon's bounding rectangle so the satellite
+        # background remains visible outside the field boundary.
+        map_region = geom.bounds()
+
         satellite_basemap_url = satellite_image.getThumbURL({
-            "region": geom,
+            "region": map_region,
             "dimensions": "1100x750",
             "format": "png",
-            **satellite_vis
+            **satellite_vis,
         })
+
 
         # ================= HEATMAP IMAGES =================
 
@@ -920,29 +911,43 @@ def satellite_analysis(
         }
         # ================= COMBINED HEATMAPS =================
 
+        
         def get_combined_heatmap(index_image, visualization):
             try:
-        # Apply the index palette.
-                rgb = index_image.visualize(
-                    min=visualization["min"],
-                    max=visualization["max"],
-                    palette=visualization["palette"]
-                )
-
-        # Combine with the true-colour satellite background.
+                # RGB satellite background.
                 base = satellite_image.visualize(**satellite_vis)
 
+                # Clip the index layer to the selected field.
+                field_index = ee.Image(index_image).clip(geom)
+
+                rgb = field_index.visualize(
+                    min=visualization["min"],
+                    max=visualization["max"],
+                    palette=visualization["palette"],
+                )
+
+                # Preserve valid pixels and make the overlay translucent.
+                valid_mask = (
+                    field_index.mask()
+                    .reduce(ee.Reducer.min())
+                    .unmask(0)
+                )
+
+                rgb = rgb.updateMask(valid_mask.multiply(0.55))
+
+                # Blend the RGB images.
                 combined = base.blend(rgb)
 
                 return combined.getThumbURL({
-                    "region": geom,
+                    "region": map_region,
                     "dimensions": "1100x750",
-                    "format": "png"
+                    "format": "png",
                 })
 
             except Exception as e:
                 print("COMBINED HEATMAP ERROR:", e)
                 return None
+
 
 
         combined_heatmaps = {
@@ -1005,22 +1010,48 @@ def satellite_analysis(
             .format("YYYY-MM-dd")
             .getInfo()
         )
+        
+        ndvi_value = (
+            float(stats["NDVI"])
+            if stats.get("NDVI") is not None else None
+        )
+
+        ndwi_value = (
+            float(stats["NDWI"])
+            if stats.get("NDWI") is not None else None
+        )
+
+        savi_value = (
+            float(stats["SAVI"])
+            if stats.get("SAVI") is not None else None
+        )
+
+        # Provisional indicators, not field-validated measurements.
+        canopy_cover_percent = (
+            round(
+                max(0.0, min(100.0, (ndvi_value - 0.20) / 0.60 * 100.0)),
+                1,
+            )
+            if ndvi_value is not None else None
+        )
+
+        biomass_index = (
+            round(
+                max(0.0, min(1.0, (savi_value - 0.10) / 0.80)),
+                3,
+            )
+            if savi_value is not None else None
+        )
+
 
         # Do not substitute zero for missing satellite statistics.
         latest = {
             "date": acquisition_date,
-            "ndvi": (
-                round(float(stats["NDVI"]), 3)
-                if stats.get("NDVI") is not None else None
-            ),
-            "ndwi": (
-                round(float(stats["NDWI"]), 3)
-                if stats.get("NDWI") is not None else None
-            ),
-            "savi": (
-                round(float(stats["SAVI"]), 3)
-                if stats.get("SAVI") is not None else None
-            ),
+            "ndvi": round(ndvi_value, 3) if ndvi_value is not None else None,
+            "ndwi": round(ndwi_value, 3) if ndwi_value is not None else None,
+            "savi": round(savi_value, 3) if savi_value is not None else None,
+            "canopy_cover_percent": canopy_cover_percent,
+            "biomass_index": biomass_index,
         }
 
         # ================= SAVE ALL SATELLITE METRICS =================
