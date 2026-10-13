@@ -40,7 +40,7 @@ from datetime import datetime, timezone, timedelta
 from google.oauth2 import service_account as google_service_account
 from googleapiclient.discovery import build
 import secrets
-from typing import Optional
+from typing import Optional, Literal
 from datetime import datetime, date
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -15333,6 +15333,12 @@ class AIFarmChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     field_id: str = Field(..., min_length=1, max_length=200)
     history: list[dict] = Field(default_factory=list)
+    response_language: Literal[
+        "en_IN",
+        "bn_IN",
+        "hi_IN",
+    ] = "en_IN"
+
 
 
 def _safe_datetime(value):
@@ -15771,7 +15777,30 @@ def ai_farm_manager_chat(
                 "available, state that there is insufficient "
                 "historical data to determine a trend.\n\n"
 
-
+                
+                "RESPONSE LANGUAGE REQUIREMENT:\n"
+                + {
+                    "en_IN": (
+                        "Respond entirely in clear, natural English. "
+                        "Use Indian agricultural terminology and metric units."
+                    ),
+                    "bn_IN": (
+                        "Respond entirely in natural Bengali (বাংলা), "
+                        "using Bengali script. Use clear, farmer-friendly "
+                        "West Bengal Bengali phrasing. Keep crop names, "
+                        "technical terms, and explanations understandable "
+                        "to local farmers. Do not switch to English or Hindi "
+                        "unless a technical name or term genuinely requires it."
+                    ),
+                    "hi_IN": (
+                        "Respond entirely in natural Hindi (हिन्दी), "
+                        "using Devanagari script. Use clear, farmer-friendly "
+                        "Indian Hindi. Keep agricultural explanations simple "
+                        "and practical. Do not switch to English or Bengali "
+                        "unless a technical name or term genuinely requires it."
+                    ),
+                }[req.response_language]
+                + "\n\n"
 
                 "SELECTED FIELD CONTEXT:\n"
                 + json.dumps(context, ensure_ascii=False, default=str)
