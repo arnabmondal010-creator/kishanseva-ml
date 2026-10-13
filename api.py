@@ -1507,67 +1507,74 @@ def cached_query(crop, district, sort, limit, offset):
 from sqlalchemy import text
 from fastapi import Query
 
+
+from fastapi import Query, HTTPException
+from sqlalchemy import text
+
 @app.get("/market-prices")
 def get_prices(
     crop: str = Query(default=None),
     district: str = Query(default=None),
     sort: str = Query(default="price"),
-    limit: int = Query(default=20),
-    offset: int = Query(default=0),
-    lang: str = Query(default="en")
+    limit: int = Query(default=20, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    lang: str = Query(default="en"),
 ):
+    try:
+        # Translate search inputs before querying.
+        if crop and lang != "en":
+            crop = translate_text(crop, "en")
 
-    # 🔥 TRANSLATE SEARCH INPUT (BEFORE QUERY)
-    if crop and lang != "en":
-        crop = translate_text(crop, "en")
+        if district and lang != "en":
+            district = translate_text(district, "en")
 
-    if district and lang != "en":
-        district = translate_text(district, "en")
+        query = """
+            SELECT commodity, district, market, price, date
+            FROM market_prices
+            WHERE 1=1
+        """
 
-    query = """
-    SELECT commodity, district, market, price, date
-    FROM market_prices
-    WHERE 1=1
-    """
+        params = {
+            "limit": limit,
+            "offset": offset,
+        }
 
-    params = {
-        "limit": limit,
-        "offset": offset
-    }
+        if crop:
+            query += " AND LOWER(commodity) LIKE LOWER(:crop)"
+            params["crop"] = f"%{crop}%"
 
-    if crop:
-        query += " AND LOWER(commodity) LIKE LOWER(:crop)"
-        params["crop"] = f"%{crop}%"
+        if district:
+            query += " AND LOWER(district) LIKE LOWER(:district)"
+            params["district"] = f"%{district}%"
 
-    if district:
-        query += " AND LOWER(district) LIKE LOWER(:district)"
-        params["district"] = f"%{district}%"
+        # Sort with a consistent secondary key.
+        if sort == "date":
+            query += " ORDER BY date DESC, commodity ASC, market ASC"
+        else:
+            query += " ORDER BY price DESC, commodity ASC, market ASC"
 
-    # 🔥 SORT
-    if sort == "date":
-        query += " ORDER BY date DESC"
-    else:
-        query += " ORDER BY price DESC"
+        query += " LIMIT :limit OFFSET :offset"
 
-    # 🔥 PAGINATION
-    query += " LIMIT :limit OFFSET :offset"
+        with engine.connect() as conn:
+            result = conn.execute(text(query), params)
+            rows = [dict(r._mapping) for r in result]
 
-    # 🔥 SINGLE QUERY EXECUTION
-    with engine.connect() as conn:
-        result = conn.execute(text(query), params)
-        rows = [dict(r._mapping) for r in result]
+        # Translate output fields.
+        if lang != "en":
+            for row in rows:
+                for field in ("commodity", "market", "district"):
+                    if row.get(field):
+                        row[field] = translate_text(row[field], lang)
 
-    # 🔥 TRANSLATE OUTPUT
-    if lang != "en":
-        for r in rows:
-            if r.get("commodity"):
-                r["commodity"] = translate_text(r["commodity"], lang)
-            if r.get("market"):
-                r["market"] = translate_text(r["market"], lang)
-            if r.get("district"):
-                r["district"] = translate_text(r["district"], lang)
+        return rows
 
-    return rows
+    except Exception as e:
+        print(f"Market prices endpoint failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve market prices",
+        )
+
 #----------------------------------
 # ================= FIREBASE =================
 
