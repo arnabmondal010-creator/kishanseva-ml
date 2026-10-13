@@ -15338,6 +15338,55 @@ class AIFarmChatRequest(BaseModel):
         "bn_IN",
         "hi_IN",
     ] = "en_IN"
+    conversation_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+
+    
+AI_FARM_CONVERSATIONS = "ai_farm_conversations"
+
+
+def _get_ai_conversation(conversation_id: str, uid: str):
+    ref = db.collection(AI_FARM_CONVERSATIONS).document(
+        conversation_id
+    )
+    snapshot = ref.get()
+
+    if not snapshot.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    data = snapshot.to_dict() or {}
+
+    if data.get("owner_uid") != uid:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this conversation.",
+        )
+
+    return ref, data
+
+
+def _save_ai_message(conversation_ref, role: str, content: str):
+    conversation_ref.collection("messages").document().set({
+        "role": role,
+        "content": content,
+        "created_at": datetime.now(timezone.utc),
+    })
+
+
+def _conversation_timestamp(value):
+    if hasattr(value, "timestamp"):
+        try:
+            return value.timestamp()
+        except Exception:
+            pass
+    return 0
+
 
 
 
@@ -15416,7 +15465,46 @@ def ai_farm_manager_chat(
             detail="Message cannot be empty",
         )
 
-   
+    
+    conversation_ref = None
+    conversation_data = None
+    history_for_model = []
+
+    if req.conversation_id:
+        conversation_ref, conversation_data = _get_ai_conversation(
+            req.conversation_id,
+            uid,
+        )
+
+        if conversation_data.get("field_id") != req.field_id:
+            raise HTTPException(
+                status_code=400,
+                detail="This conversation belongs to a different farm field.",
+            )
+
+        # Load the saved history from this conversation only.
+        saved_docs = list(
+            conversation_ref.collection("messages").stream()
+        )
+
+        saved_docs.sort(
+            key=lambda doc: _conversation_timestamp(
+                (doc.to_dict() or {}).get("created_at")
+            )
+        )
+
+        history_for_model = [
+            {
+                "role": (doc.to_dict() or {}).get("role"),
+                "content": (doc.to_dict() or {}).get("content"),
+            }
+            for doc in saved_docs
+            if (doc.to_dict() or {}).get("role") in ("user", "assistant")
+            and isinstance(
+                (doc.to_dict() or {}).get("content"), str
+            )
+        ][-12:]
+
     # --------------------------------------------------------
     # 2. FETCH THE SELECTED FIELD AND VERIFY OWNERSHIP
     # --------------------------------------------------------
@@ -15854,7 +15942,7 @@ def ai_farm_manager_chat(
 
     # Accept only user/assistant messages and limit both count
     # and text size to control token usage.
-    for item in req.history[-12:]:
+    for item in history_for_model[-12:]:
         if not isinstance(item, dict):
             continue
 
@@ -15903,11 +15991,50 @@ def ai_farm_manager_chat(
                 detail="The AI returned an empty response.",
             )
 
+        
+        now = datetime.now(timezone.utc)
+
+        # Create the conversation only after a successful AI response.
+        if conversation_ref is None:
+            conversation_ref = db.collection(
+                AI_FARM_CONVERSATIONS
+            ).document()
+
+            field_name = field_context.get("name", "Selected field")
+            title = " ".join(message.split())[:80] or "Farm conversation"
+
+            conversation_ref.set({
+                "owner_uid": uid,
+                "field_id": req.field_id,
+                "field_name": field_name,
+                "title": title,
+                "created_at": now,
+                "updated_at": now,
+                "message_count": 0,
+            })
+
+        # Persist both sides of the successful exchange.
+        _save_ai_message(conversation_ref, "user", message)
+        _save_ai_message(conversation_ref, "assistant", answer)
+
+        previous_count = (
+            conversation_data.get("message_count", 0)
+            if conversation_data
+            else 0
+        )
+
+        conversation_ref.update({
+            "updated_at": now,
+            "message_count": previous_count + 2,
+        })
+
+
         return {
             "answer": answer,
             "field_id": req.field_id,
             "field_name": field_context.get("name", "Selected field"),
             "usage": usage,
+            "conversation_id": conversation_ref.id,
         }
 
     except HTTPException:
@@ -15918,6 +16045,95 @@ def ai_farm_manager_chat(
             status_code=502,
             detail="AI Farm Manager is temporarily unavailable.",
         )
+
+
+@app.get("/ai-farm-manager/conversations")
+def list_ai_farm_conversations(
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
+
+    docs = list(
+        db.collection(AI_FARM_CONVERSATIONS)
+        .where("owner_uid", "==", uid)
+        .stream()
+    )
+
+    conversations = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        conversations.append({
+            "conversation_id": doc.id,
+            "field_id": data.get("field_id"),
+            "field_name": data.get("field_name", "Selected field"),
+            "title": data.get("title", "Farm conversation"),
+            "created_at": data.get("created_at"),
+            "updated_at": data.get("updated_at"),
+            "message_count": data.get("message_count", 0),
+        })
+
+    conversations.sort(
+        key=lambda item: _conversation_timestamp(item["updated_at"]),
+        reverse=True,
+    )
+
+    return {"conversations": conversations}
+
+
+@app.get("/ai-farm-manager/conversations/{conversation_id}")
+def get_ai_farm_conversation(
+    conversation_id: str,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
+
+    conversation_ref, data = _get_ai_conversation(
+        conversation_id,
+        uid,
+    )
+
+    docs = list(
+        conversation_ref.collection("messages").stream()
+    )
+
+    docs.sort(
+        key=lambda doc: _conversation_timestamp(
+            (doc.to_dict() or {}).get("created_at")
+        )
+    )
+
+    messages = []
+    for doc in docs:
+        item = doc.to_dict() or {}
+        role = item.get("role")
+        content = item.get("content")
+
+        if role in ("user", "assistant") and isinstance(content, str):
+            messages.append({
+                "role": role,
+                "content": content,
+                "created_at": item.get("created_at"),
+            })
+
+    return {
+        "conversation_id": conversation_id,
+        "field_id": data.get("field_id"),
+        "field_name": data.get("field_name", "Selected field"),
+        "title": data.get("title", "Farm conversation"),
+        "messages": messages,
+    }
+
+
 
 
 def get_forecast_context(lat, lon):
