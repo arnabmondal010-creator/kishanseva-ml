@@ -27,6 +27,7 @@ import razorpay
 import traceback
 import random
 
+
 from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
 from services.yield_history_service import add_yield_record, get_history
@@ -36,17 +37,22 @@ from firebase_admin import auth
 from deep_translator import GoogleTranslator
 from datetime import datetime
 from datetime import timedelta
+
 from datetime import datetime, timezone, timedelta
 from google.oauth2 import service_account as google_service_account
 from googleapiclient.discovery import build
 import secrets
-from typing import Optional, Literal
+from typing import Optional, Literal, Any
 from datetime import datetime, date
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
+from services.satellite_yield_service import (
+    extract_district_yield_features,
+)
 
 
-
+yield_model = joblib.load("models/yield_model.joblib")
+irrigation_model = joblib.load("irrigation_model.pkl")
 
 GOOGLE_ROUTES_API_KEY = os.getenv(
     "GOOGLE_ROUTES_API_KEY"
@@ -427,11 +433,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
-# Load ML Models
-# -----------------------------
-yield_model = joblib.load("models/yield_model.joblib")
-irrigation_model = joblib.load("irrigation_model.pkl")
+
 
 # -----------------------------
 # Earth Engine Init
@@ -452,6 +454,142 @@ ee.Initialize(credentials)
 
 print("Earth Engine initialized")
 
+def get_field_satellite_weather_features(
+    field_polygon: dict,
+    start_date: str,
+    end_date: str,
+) -> dict:
+    """Extract basic satellite features for the existing yield endpoint."""
+
+    import math
+    from datetime import date
+
+    # Validate observation dates.
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="Dates must use YYYY-MM-DD format.",
+        )
+
+    if start >= end:
+        raise HTTPException(
+            status_code=422,
+            detail="observation_end must be later than observation_start.",
+        )
+
+    if (end - start).days > 550:
+        raise HTTPException(
+            status_code=422,
+            detail="Observation period cannot exceed 550 days.",
+        )
+
+    # Accept GeoJSON Polygon or Feature containing a Polygon.
+    geometry_data = field_polygon
+
+    if geometry_data.get("type") == "Feature":
+        geometry_data = geometry_data.get("geometry") or {}
+
+    if geometry_data.get("type") != "Polygon":
+        raise HTTPException(
+            status_code=422,
+            detail="field_polygon must be a GeoJSON Polygon.",
+        )
+
+    try:
+        geom = ee.Geometry(geometry_data)
+        bounds = geom.bounds(maxError=1).coordinates().getInfo()
+
+        if not bounds:
+            raise ValueError("Empty polygon")
+
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="The field polygon is invalid.",
+        )
+
+    try:
+        collection = (
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterBounds(geom)
+            .filterDate(start_date, end_date)
+            .filter(
+                ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30)
+            )
+        )
+
+        image_count = int(collection.size().getInfo())
+
+        if image_count == 0:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "No suitable Sentinel-2 imagery was found "
+                    "for this polygon and observation period."
+                ),
+            )
+
+        def add_indices(image):
+            # Sentinel-2 surface reflectance scaling.
+            nir = image.select("B8").multiply(0.0001)
+            red = image.select("B4").multiply(0.0001)
+
+            ndvi = (
+                nir.subtract(red)
+                .divide(nir.add(red))
+                .rename("NDVI")
+            )
+
+            return image.addBands(ndvi)
+
+        image = add_indices(
+            collection.sort("system:time_start", False).first()
+        )
+
+        stats = image.select("NDVI").reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geom,
+            scale=10,
+            maxPixels=1e8,
+            bestEffort=True,
+        ).getInfo()
+
+        ndvi = stats.get("NDVI")
+
+        if ndvi is None or not math.isfinite(float(ndvi)):
+            raise HTTPException(
+                status_code=422,
+                detail="Could not calculate NDVI for this field.",
+            )
+
+        # These are not extracted by this helper yet.
+        # Do not invent weather measurements.
+        return {
+            "ndvi": float(ndvi),
+            "avg_temp": None,
+            "rainfall": None,
+            "humidity": None,
+            "wind_speed": None,
+            "sentinel2_image_count": image_count,
+            "observation_start": start_date,
+            "observation_end": end_date,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"Earth Engine field feature extraction failed: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Satellite features are temporarily unavailable.",
+        )
+
+
 # -----------------------------
 # Models
 # -----------------------------
@@ -461,16 +599,27 @@ class YieldInput(BaseModel):
     fertilizer_type: str = "urea"
     crop_stage: str = "vegetative"
     stress_level: str = "low"
+
     fertilizer_kg: float = 40
     irrigation_count: int = 2
     pesticide_sprays: int = 1
-    avg_temp: float = 28
-    rainfall: float = 0
-    humidity: float = 60
-    wind_speed: float = 1.5
-    ndvi: float = 0.5
+
+    avg_temp: float | None = 28
+    rainfall: float | None = 0
+    humidity: float | None = 60
+    wind_speed: float | None = 1.5
+    ndvi: float | None = 0.5
+
+    # Keep existing fields
     user_id: str | None = "guest_user"
     field_id: str = "default"
+
+    # New optional fields for field-level prediction
+    field_polygon: dict[str, Any] | None = None
+    crop_name: str | None = None
+    observation_start: str | None = None
+    observation_end: str | None = None
+    use_satellite_data: bool = False
 
 
 class NDVIRequest(BaseModel):
@@ -573,7 +722,6 @@ def predict_yield(
     data: YieldInput,
     user=Depends(verify_firebase_token),
 ):
-    # Authenticate the user and use the verified Firebase UID.
     uid = user.get("uid")
 
     if not uid:
@@ -582,27 +730,78 @@ def predict_yield(
             detail="Invalid authentication token",
         )
 
-    user_id = uid
+    # Keep your existing usage-limit enforcement.
+    usage = enforce_feature_usage(uid, "yield_estimation")
 
-    # Enforce monthly yield-estimation usage limits.
-    usage = enforce_feature_usage(
-        uid,
-        "yield_estimation",
-    )
-
-    # SAFE VALUES
+    # Resolve input defaults first.
     ndvi = data.ndvi if data.ndvi is not None else 0.45
+    temp = data.avg_temp if data.avg_temp is not None else 25
     humidity = data.humidity if data.humidity is not None else 50
     rainfall = data.rainfall if data.rainfall is not None else 0
-    temp = data.avg_temp if data.avg_temp is not None else 25
+    wind_speed = (
+        data.wind_speed if data.wind_speed is not None else 2
+    )
 
-    
+    if data.use_satellite_data:
+        if not data.field_polygon:
+            raise HTTPException(
+                status_code=422,
+                detail="field_polygon is required for satellite prediction.",
+            )
+
+        if not data.crop_name:
+            raise HTTPException(
+                status_code=422,
+                detail="crop_name is required for satellite prediction.",
+            )
+
+        if not data.observation_start or not data.observation_end:
+            raise HTTPException(
+                status_code=422,
+                detail="Observation start and end dates are required.",
+            )
+
+        try:
+            # Implement this helper using your configured EE project.
+            # It should validate the polygon, retrieve/cache features,
+            # and return validated numeric values.
+            features = get_field_satellite_weather_features(
+                field_polygon=data.field_polygon,
+                start_date=data.observation_start,
+                end_date=data.observation_end,
+            )
+
+            if features.get("ndvi") is not None:
+                ndvi = features["ndvi"]
+
+            if features.get("avg_temp") is not None:
+                temp = features["avg_temp"]
+
+            if features.get("rainfall") is not None:
+                rainfall = features["rainfall"]
+
+            if features.get("humidity") is not None:
+                humidity = features["humidity"]
+
+            if features.get("wind_speed") is not None:
+                wind_speed = features["wind_speed"]
+
+        except HTTPException:
+            raise
+        except Exception:
+            # Log technical details privately.
+            print("FIELD SATELLITE FEATURE ERROR")
+            raise HTTPException(
+                status_code=503,
+                detail="Satellite features are temporarily unavailable.",
+            )
+
     try:
         y, confidence, std = calculate_yield_prediction(
-            ndvi=data.ndvi,
-            temp=data.avg_temp,
-            humidity=data.humidity,
-            rainfall=data.rainfall,
+            ndvi=ndvi,
+            temp=temp,
+            humidity=humidity,
+            rainfall=rainfall,
             soil_type=data.soil_type,
             fertilizer_type=data.fertilizer_type,
             crop_stage=data.crop_stage,
@@ -610,36 +809,26 @@ def predict_yield(
             fertilizer_kg=data.fertilizer_kg,
             irrigation_count=data.irrigation_count,
             pesticide_sprays=data.pesticide_sprays,
-            wind_speed=data.wind_speed,
+            wind_speed=wind_speed,
         )
 
-    except Exception as e:
-        print("YIELD PREDICTION ERROR:", str(e))
+    except Exception:
+        print("YIELD PREDICTION ERROR")
         raise HTTPException(
             status_code=500,
             detail="Yield prediction failed.",
         )
 
-
-    # Save valid predictions against the authenticated user.
     if y > 0:
-        add_yield_record(
-            user_id,
-            data.field_id,
-            y,
-        )
+        add_yield_record(uid, data.field_id, y)
 
     return {
         "predicted_yield": round(y, 2),
         "confidence": round(confidence, 1),
         "uncertainty": round(std, 3),
-        "history": get_history(
-            user_id,
-            data.field_id,
-        ),
+        "history": get_history(uid, data.field_id),
         "usage": usage,
     }
-
 
 @app.post("/satellite-analysis")
 def satellite_analysis(
@@ -1509,7 +1698,7 @@ from fastapi import Query
 
 
 from fastapi import Query, HTTPException
-from sqlalchemy import text
+
 
 @app.get("/market-prices")
 def get_prices(
@@ -16357,6 +16546,285 @@ def get_field_diary_context(field_id: str, uid: str):
         "diary_entries": diary_entries,
         "diary_entry_count": len(diary_entries),
     }
+
+class SatelliteYieldRequest(BaseModel):
+    crop: str
+    field_id: str
+    sowing_date: date
+    expected_harvest_date: date
+
+
+# ============================================================
+# RESEARCH ONLY: Satellite-based crop yield prediction
+# Does not replace the existing /predict-yield endpoint.
+# ============================================================
+
+import os as _sat_os
+from functools import lru_cache as _sat_lru_cache
+from pathlib import Path as _sat_Path
+from typing import Optional as _SatOptional
+
+from pydantic import BaseModel as _SatBaseModel, Field as _SatField
+
+
+class SatelliteYieldInput(_SatBaseModel):
+    field_id: str = _SatField(
+        ...,
+        min_length=1,
+        max_length=150,
+    )
+
+_SATELLITE_YIELD_FEATURES = [
+    "ndvi",
+    "ndmi",
+    "ndwi",
+    "savi",
+    "evi",
+    "rainfall_total_mm",
+    "rainy_days_gt1mm",
+    "rainfall_day_count",
+    "temperature_mean_c",
+    "temperature_min_mean_c",
+    "temperature_max_mean_c",
+    "solar_radiation_mean_mj_m2_day",
+    "wind_speed_ms",
+    "vv_db",
+    "vh_db",
+    "vv_minus_vh_db",
+    "sentinel1_image_count",
+    "sentinel2_image_count",
+    "weather_day_count",
+    "crop",
+]
+
+
+@_sat_lru_cache(maxsize=1)
+def _load_satellite_yield_research_model():
+    model_path = _sat_os.getenv(
+        "KISHANSEVA_SATELLITE_YIELD_MODEL",
+        str(
+            _sat_Path(__file__).resolve().parent
+            / "models"
+            / "research"
+            / "india_satellite_yield_multiyear_research.joblib"
+        ),
+    )
+
+    if not _sat_os.path.isfile(model_path):
+        raise FileNotFoundError(
+            "Satellite research model file is missing. "
+            "Configure KISHANSEVA_SATELLITE_YIELD_MODEL."
+        )
+
+    return joblib.load(model_path)
+
+
+# ============================================================
+# Experimental Satellite-Based Yield Prediction
+# Separate from the existing /predict-yield endpoint.
+# ============================================================
+
+@app.post("/predict-yield-satellite")
+def predict_yield_satellite(
+    data: SatelliteYieldInput,
+    user=Depends(verify_firebase_token),
+):
+    import math
+    from datetime import date
+    from services.satellite_yield_service import (
+        extract_district_yield_features,
+    )
+
+    # 1. Verify authenticated user
+    uid = user.get("uid")
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
+
+    try:
+        # 2. Retrieve field from Firestore
+        field_ref = db.collection("farmer_fields").document(
+            data.field_id
+        )
+        field_doc = field_ref.get()
+
+        if not field_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Field not found.",
+            )
+
+        field_data = field_doc.to_dict() or {}
+
+        # 3. Verify field ownership
+        if field_data.get("farmer_id") != uid:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have access to this field.",
+            )
+
+        # 4. Read field information
+        crop = str(field_data.get("crop", "")).strip()
+        area_ha = float(field_data.get("area", 0))
+
+        center = field_data.get("center") or {}
+        latitude = float(center.get("lat"))
+        longitude = float(center.get("lon"))
+
+        district = field_data.get("district", "")
+        gee_district = field_data.get("gee_district", "")
+
+        if not crop:
+            raise HTTPException(
+                status_code=422,
+                detail="Crop is missing from the field document.",
+            )
+
+        if not math.isfinite(area_ha) or area_ha <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid field area.",
+            )
+
+        if not (
+            math.isfinite(latitude)
+            and math.isfinite(longitude)
+            and -90 <= latitude <= 90
+            and -180 <= longitude <= 180
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid field coordinates.",
+            )
+
+        # 5. Validate crop against research model categories
+        supported_crops = [
+            "Arecanut", "Arhar", "Banana", "Black Pepper",
+            "Cardamom", "Cashewnut", "Coriander", "Dry Chillies",
+            "Garlic", "Ginger", "Gram", "Groundnut",
+            "Guar Seed", "Jowar", "Maize", "Onion",
+            "Potato", "Ragi", "Sannhamp", "Sesamum",
+            "Small Millets", "Soyabean", "Sugarcane",
+            "Sunflower", "Sweet Potato", "Tapioca",
+            "Tobacco", "Turmeric", "Wheat",
+        ]
+
+        crop_lookup = {
+            item.lower(): item for item in supported_crops
+        }
+
+        if crop.lower() not in crop_lookup:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Unsupported crop category.",
+                    "received_crop": crop,
+                    "supported_crops": supported_crops,
+                },
+            )
+
+        crop = crop_lookup[crop.lower()]
+
+        # 6. Use the completed annual research window
+        start_date = "2025-06-01"
+        end_date = "2026-06-01"
+
+        # 7. Extract district-level satellite and weather features
+        extracted = extract_district_yield_features(
+            latitude=latitude,
+            longitude=longitude,
+            crop=crop,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        features = extracted.get("features")
+
+        if not isinstance(features, dict) or not features:
+            raise ValueError(
+                "Earth Engine returned no usable research features."
+            )
+
+        # Ensure exact model feature names and order
+        model_features = {
+            name: features.get(name)
+            for name in _SATELLITE_YIELD_FEATURES
+            if name != "crop"
+        }
+        model_features["crop"] = crop
+
+        for name, value in model_features.items():
+            if name != "crop":
+                if value is not None and not math.isfinite(float(value)):
+                    raise ValueError(
+                        f"Invalid satellite feature: {name}"
+                    )
+
+        # 8. Run research model
+        df = pd.DataFrame(
+            [model_features],
+            columns=_SATELLITE_YIELD_FEATURES,
+        )
+
+        satellite_model = _load_satellite_yield_research_model()
+        predicted_yield = float(
+            satellite_model.predict(df)[0]
+        )
+
+        if not math.isfinite(predicted_yield) or predicted_yield < 0:
+            raise ValueError("Model returned an invalid yield prediction.")
+
+        # 9. Calculate estimated production for this field
+        estimated_production = predicted_yield * area_ha
+
+        return {
+            "success": True,
+            "prediction_type": "experimental_district_level_yield",
+            "field_id": data.field_id,
+            "crop": crop,
+            "district": district or extracted.get("district", ""),
+            "gee_district": extracted.get(
+                "district", gee_district
+            ),
+            "area_hectares": area_ha,
+            "predicted_yield_tonnes_per_hectare": round(
+                predicted_yield, 3
+            ),
+            "estimated_field_production_tonnes": round(
+                estimated_production, 3
+            ),
+            "unit": "tonnes",
+            "observation_period": {
+                "start": start_date,
+                "end": end_date,
+            },
+            "satellite_features": features,
+            "model": "india_satellite_yield_multiyear_research",
+            "evaluation_reference": {
+                "mae_tonnes_per_hectare": 6.7078,
+                "r2": 0.7282,
+            },
+            "warning": (
+                "This is a district-level research model estimate "
+                "scaled by the field area. It is not an independently "
+                "validated individual-field yield prediction."
+            ),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print(
+            f"Satellite yield prediction failed: {exc}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Satellite yield prediction failed.",
+        )
+
 
 
 
