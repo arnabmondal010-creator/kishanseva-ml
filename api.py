@@ -1051,6 +1051,7 @@ def satellite_analysis(
         tiles = {}
         heatmaps = {}
         combined_heatmaps = {}
+        index_visualization = {}
 
         latest = {
             "date": None,
@@ -1198,6 +1199,7 @@ def satellite_analysis(
             savi_max = float(savi_stats.get("SAVI_max", 1))
 
             # ================= VISUALIZATION =================
+            # ================= VISUALIZATION =================
             ndvi_vis = {
                 "min": 0,
                 "max": 1,
@@ -1214,6 +1216,26 @@ def satellite_analysis(
                 "min": savi_min,
                 "max": savi_max,
                 "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
+            }
+
+# ================= INDEX VISUALIZATION METADATA =================
+# These values will be sent to Flutter for screen and PDF legends.
+            index_visualization = {
+                "ndvi": {
+                    "min": ndvi_vis["min"],
+                    "max": ndvi_vis["max"],
+                    "palette": ndvi_vis["palette"],
+                },
+                "ndwi": {
+                    "min": ndwi_vis["min"],
+                    "max": ndwi_vis["max"],
+                    "palette": ndwi_vis["palette"],
+                },
+                "savi": {
+                    "min": savi_vis["min"],
+                    "max": savi_vis["max"],
+                    "palette": savi_vis["palette"],
+                },
             }
 
             # ================= SATELLITE BASEMAP =================
@@ -1818,6 +1840,7 @@ def satellite_analysis(
             "satellite_basemap": satellite_basemap_url,
             "combined_heatmaps": combined_heatmaps,
             "sar": sar_result,
+            "index_visualization": index_visualization,
             "soil_moisture": {
                 "available": sar_result["available"],
                 "relative_wetness": sar_result["relative_wetness"],
