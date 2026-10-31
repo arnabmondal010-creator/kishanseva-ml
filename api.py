@@ -16046,22 +16046,12 @@ def _safe_datetime(value):
 def _clean_field_data(data):
     """Return only useful, non-sensitive field context."""
     allowed = [
-        "name",
-        "crop",
-        "area",
-        "center",
-        "ndvi",
-        "ndwi",
-        "savi",
-        "satellite_date",
-        "satellite_updated",
-        "soilType",
-        "soil_type",
-        "planting_date",
-        "sowing_date",
-        "growth_stage",
-        "updated_at",
-        "ndvi_updated",
+        "name", "crop", "area", "center", "boundary",
+        "district", "state", "soil", "soilType", "soil_type",
+        "variety", "planting_date", "sowing_date", "growth_stage",
+        "ndvi", "ndwi", "savi", "ndvi_history",
+        "relative_wetness", "sar", "satellite_date",
+        "satellite_updated", "updated_at", "ndvi_updated",
     ]
 
     result = {
@@ -16175,98 +16165,58 @@ def ai_farm_manager_chat(
 
         
         
-        # --------------------------------------------------------
-        # FETCH SATELLITE METRICS AND NDVI HISTORY
-        # --------------------------------------------------------
+        # Satellite metrics are stored directly in farmer_fields.
+        metrics = {}
+        for key in ("ndvi", "ndwi", "savi"):
+            value = field_data.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                metrics[key] = float(value)
+
+        raw_history = field_data.get("ndvi_history", [])
+        ndvi_history = []
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                if not isinstance(item, dict):
+                    continue
+                observation_date = item.get("date")
+                value = item.get("ndvi")
+                if (
+                    isinstance(observation_date, str)
+                    and observation_date.strip()
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                ):
+                    ndvi_history.append({
+                        "date": observation_date,
+                        "ndvi": float(value),
+                    })
+
+        ndvi_history.sort(key=lambda item: item["date"])
+        ndvi_history = ndvi_history[-12:]
+
+        raw_sar = field_data.get("sar")
+        sar_data = raw_sar if isinstance(raw_sar, dict) else {}
+
         satellite_context = {
-            "available": False,
-            "reason": "Satellite analysis is not available for this field."
+            "available": bool(metrics or sar_data),
+            "metrics": metrics,
+            "ndvi_history": ndvi_history,
+            "history_observation_count": len(ndvi_history),
+            "acquisition_date": field_data.get("satellite_date"),
+            "updated_at": field_data.get("satellite_updated"),
+            "relative_wetness": field_data.get("relative_wetness"),
+            "sar": {
+                "available": sar_data.get("available", False),
+                "acquisition_date": sar_data.get("acquisition_date"),
+                "classification": sar_data.get("classification"),
+                "relative_wetness": sar_data.get("relative_wetness"),
+                "vv_db": sar_data.get("vv_db"),
+                "vh_db": sar_data.get("vh_db"),
+                "method": sar_data.get("method"),
+                "warning": sar_data.get("warning"),
+            },
+            "source": "Sentinel-1 and Sentinel-2",
         }
-
-        try:
-            satellite_ref = (
-                db.collection("fields")
-                .document(uid)
-                .collection("user_fields")
-                .document(req.field_id)
-            )
-
-            satellite_doc = satellite_ref.get()
-
-            if satellite_doc.exists:
-                satellite_data = satellite_doc.to_dict() or {}
-                metrics = {}
-
-                # Read current satellite metrics.
-                for key in ("ndvi", "ndwi", "savi"):
-                    value = satellite_data.get(key)
-
-                    if (
-                        isinstance(value, (int, float))
-                        and not isinstance(value, bool)
-                    ):
-                        metrics[key] = value
-
-                # Read saved NDVI history.
-                raw_history = satellite_data.get(
-                    "ndvi_history", []
-                )
-
-                ndvi_history = []
-
-                if isinstance(raw_history, list):
-                    for item in raw_history:
-                        if not isinstance(item, dict):
-                            continue
-
-                        date = item.get("date")
-                        value = item.get("ndvi")
-
-                        if (
-                            isinstance(date, str)
-                            and date.strip()
-                            and isinstance(value, (int, float))
-                            and not isinstance(value, bool)
-                        ):
-                            ndvi_history.append({
-                                "date": date,
-                                "ndvi": float(value)
-                            })
-
-                # Sort chronologically and retain the latest 12.
-                ndvi_history.sort(
-                    key=lambda item: item["date"]
-                )
-                ndvi_history = ndvi_history[-12:]
-
-                if metrics or ndvi_history:
-                    satellite_context = {
-                        "available": bool(metrics),
-                        "metrics": metrics,
-                        "acquisition_date": satellite_data.get(
-                            "satellite_date"
-                        ),
-                        "updated_at": satellite_data.get(
-                            "satellite_updated"
-                        ),
-                        "ndvi_history": ndvi_history,
-                        "history_observation_count": len(
-                            ndvi_history
-                        ),
-                        "source": (
-                            "Sentinel-2 (Google Earth Engine)"
-                        )
-                    }
-
-        except Exception:
-            traceback.print_exc()
-
-            satellite_context = {
-                "available": False,
-                "reason": "Satellite data could not be loaded."
-            }
-
-
 
     except HTTPException:
         raise
@@ -16322,6 +16272,11 @@ def ai_farm_manager_chat(
                 "irrigationCount",
                 "irrigation_amount",
                 "water",
+                "seedKgPerHa",
+                "waterAppliedMm",
+                "nitrogen",
+                "phosphorus",
+                "potassium",
                 "fertilizer",
                 "fertilizerKg",
                 "fertilizerType",
@@ -16360,27 +16315,127 @@ def ai_farm_manager_chat(
 
     
 
-    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-        weather_context = get_weather_context(lat, lon)
+    coordinates_valid = (
+        isinstance(lat, (int, float))
+        and not isinstance(lat, bool)
+        and isinstance(lon, (int, float))
+        and not isinstance(lon, bool)
+        and -90 <= float(lat) <= 90
+        and -180 <= float(lon) <= 180
+    )
+
+    if coordinates_valid:
+        weather_context = get_weather_context(float(lat), float(lon))
+        forecast_context = get_forecast_context(float(lat), float(lon))
     else:
+        unavailable_reason = "The selected field has no valid coordinates."
         weather_context = {
             "available": False,
-            "reason": "The selected field has no valid coordinates.",
+            "reason": unavailable_reason,
         }
-
-    
-    if (
-        isinstance(lat, (int, float))
-        and isinstance(lon, (int, float))
-        and -90 <= lat <= 90
-        and -180 <= lon <= 180
-    ):
-        forecast_context = get_forecast_context(lat, lon)
-    else:
         forecast_context = {
             "available": False,
-            "reason": "The selected field has no valid coordinates."
+            "reason": unavailable_reason,
         }
+
+    # Market prices from the same PostgreSQL table used by /market-prices.
+    market_context = {
+        "available": False,
+        "prices": [],
+        "reason": "Market prices are not available for this crop.",
+    }
+
+    try:
+        crop_name = str(field_data.get("crop") or "").strip()
+        district_name = str(field_data.get("district") or "").strip()
+
+        if crop_name:
+            market_sql = """
+                SELECT commodity, district, market, price, date
+                FROM market_prices
+                WHERE LOWER(commodity) LIKE LOWER(:crop)
+            """
+            market_params = {"crop": f"%{crop_name}%"}
+
+            if district_name:
+                market_sql += """
+                    AND LOWER(district) LIKE LOWER(:district)
+                """
+                market_params["district"] = f"%{district_name}%"
+
+            market_sql += " ORDER BY date DESC LIMIT 10"
+
+            with engine.connect() as conn:
+                rows = conn.execute(text(market_sql), market_params)
+                prices = [_json_safe(dict(row._mapping)) for row in rows]
+
+            market_context = {
+                "available": bool(prices),
+                "crop": crop_name,
+                "district": district_name or None,
+                "prices": prices,
+                "reason": None if prices else "No matching market-price records were found.",
+            }
+
+    except Exception:
+        traceback.print_exc()
+        market_context = {
+            "available": False,
+            "prices": [],
+            "reason": "Market prices could not be loaded.",
+        }
+
+    # Government schemes use the SchemeModel field names supplied by the app.
+    schemes_context = []
+    try:
+        for doc in db.collection("schemes").limit(50).stream():
+            item = doc.to_dict() or {}
+            schemes_context.append({
+                "id": doc.id,
+                "title": item.get("title", ""),
+                "category": item.get("category", ""),
+                "shortDescription": item.get("shortDescription", ""),
+                "benefits": item.get("benefits", []),
+                "eligibility": item.get("eligibility", []),
+                "documents": item.get("documents", []),
+                "applySteps": item.get("applySteps", []),
+                "officialLink": item.get("officialLink", ""),
+            })
+        schemes_context = _json_safe(schemes_context)
+    except Exception:
+        traceback.print_exc()
+        schemes_context = None
+
+    # Run the existing satellite yield calculation only for yield questions.
+    yield_context = {
+        "available": False,
+        "reason": "Yield prediction was not requested.",
+    }
+    yield_terms = (
+        "yield", "harvest estimate", "expected production",
+        "production estimate", "how much harvest",
+        "ফলন", "উৎপাদন", "पैदावार", "उत्पादन",
+    )
+
+    if any(term in message.casefold() for term in yield_terms):
+        try:
+            yield_context = predict_yield_satellite(
+                SatelliteYieldInput(field_id=req.field_id),
+                user,
+            )
+            yield_context = _json_safe(yield_context)
+        except HTTPException as exc:
+            yield_context = {
+                "available": False,
+                "reason": str(exc.detail),
+                "status_code": exc.status_code,
+            }
+        except Exception:
+            traceback.print_exc()
+            yield_context = {
+                "available": False,
+                "reason": "Satellite yield prediction is unavailable.",
+            }
 
     # --------------------------------------------------------
     # 4. BUILD A LIMITED, FIELD-SPECIFIC CONTEXT
@@ -16391,17 +16446,27 @@ def ai_farm_manager_chat(
         "weather": weather_context,
         "forecast": forecast_context,
         "satellite": satellite_context,
+        "market_prices": market_context,
+        "government_schemes": schemes_context,
+        "yield_prediction": yield_context,
         "satellite_data_note": (
-            "Use the satellite metrics in the satellite context "
-            "when available. Explain that these are satellite-derived "
-            "indicators, not definitive diagnoses. Do not infer "
-            "historical trends from a single observation. If satellite "
-            "metrics or the acquisition date are missing, say so. "
-            "Never invent satellite values, dates, or trends."
+            "Satellite metrics are indicators, not definitive diagnoses. "
+            "Use only supplied values and dates. Do not infer trends from "
+            "one observation."
         ),
         "irrigation_note": (
-            "A diary entry may document completed irrigation. "
-            "A recommendation is not proof that irrigation occurred."
+            "Use crop, growth stage, diary irrigation records, waterAppliedMm, "
+            "weather, forecast rainfall and SAR relative wetness when available. "
+            "SAR relative wetness is not calibrated volumetric soil moisture. "
+            "Do not invent irrigation quantities."
+        ),
+        "market_price_note": (
+            "Market prices are recorded observations, not guaranteed farm-gate "
+            "selling prices. State the record date and market when available."
+        ),
+        "scheme_note": (
+            "Explain only scheme details present in the supplied records. "
+            "Do not assume eligibility. Include officialLink when present."
         ),
     }
 
@@ -16552,6 +16617,36 @@ def ai_farm_manager_chat(
 
 
                 
+                "MARKET PRICE RULES:\\n"
+                "- Use market_prices for crop price and selling questions.\\n"
+                "- State the market and record date with each relevant price.\\n"
+                "- Do not present an old observation as today's live price.\\n"
+                "- Never invent prices, market names, or dates.\\n\\n"
+
+                "GOVERNMENT SCHEME RULES:\\n"
+                "- Use government_schemes for subsidy and scheme questions.\\n"
+                "- Explain only recorded benefits, eligibility, documents, "
+                "application steps, and official links.\\n"
+                "- Do not claim the farmer qualifies unless their details "
+                "and the scheme criteria establish it.\\n"
+                "- If scheme records are unavailable, say so.\\n\\n"
+
+                "YIELD ESTIMATION RULES:\\n"
+                "- Use yield_prediction only when available and relevant.\\n"
+                "- Clearly disclose that this is an experimental district-level "
+                "estimate scaled by field area, not a validated individual-field "
+                "yield prediction.\\n"
+                "- Do not present estimated production as guaranteed harvest.\\n\\n"
+
+                "IRRIGATION RULES:\\n"
+                "- Reason from crop, growth stage, diary irrigation records, "
+                "waterAppliedMm, weather, forecast rainfall, and SAR relative "
+                "wetness when available.\\n"
+                "- SAR relative wetness is not calibrated volumetric soil moisture.\\n"
+                "- Do not claim irrigation is required from NDVI or SAR alone.\\n"
+                "- Do not prescribe exact water quantities without sufficient "
+                "field-specific information.\\n\\n"
+
                 "RESPONSE LANGUAGE REQUIREMENT:\n"
                 + {
                     "en_IN": (
@@ -16950,6 +17045,8 @@ def get_field_diary_context(field_id: str, uid: str):
         "cropStage", "growth_stage", "growthStage",
         "soil", "soilType", "stress", "symptoms",
         "irrigation", "irrigationCount", "water",
+        "seedKgPerHa", "waterAppliedMm",
+        "nitrogen", "phosphorus", "potassium",
         "fertilizerKg", "fertilizerType",
         "pesticideCount", "pesticideSprays",
         "created_at"
@@ -16982,6 +17079,7 @@ def get_field_diary_context(field_id: str, uid: str):
         for key in (
             "name", "crop", "area", "soil", "soilType",
             "soil_type", "ndvi", "ndwi", "savi",
+            "relative_wetness", "sar", "ndvi_history",
             "growth_stage", "planting_date", "sowing_date"
         )
         if key in field_data and field_data[key] is not None
