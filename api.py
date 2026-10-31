@@ -828,57 +828,6 @@ def predict_yield(
         "usage": usage,
     }
 
-@app.get("/get-ndvi")
-def get_ndvi_value(
-    field_id: str,
-    user=Depends(verify_firebase_token),
-):
-    """
-    Return the latest NDVI for a field owned by the authenticated user.
-    Reads from the same canonical document updated by /satellite-analysis.
-    """
-    try:
-        uid = user.get("uid")
-
-        if not uid:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid authentication token",
-            )
-
-        doc = (
-            db.collection("farmer_fields")
-            .document(field_id)
-            .get()
-        )
-
-        if not doc.exists:
-            return {"ndvi": None, "updated": None}
-
-        data = doc.to_dict() or {}
-
-        if data.get("farmer_id") != uid:
-            raise HTTPException(
-                status_code=403,
-                detail="You do not have access to this farm field.",
-            )
-
-        return {
-            "ndvi": data.get("ndvi"),
-            "updated": data.get("ndvi_updated"),
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        print("NDVI fetch error:", e)
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to fetch NDVI.",
-        )
-
-
 @app.post("/satellite-analysis")
 def satellite_analysis(
     req: NDVIRequest,
@@ -937,84 +886,107 @@ def satellite_analysis(
         )
 
         import ee
-
-        # ================= FETCH FIELD BOUNDARY =================
-        boundary = req.boundary
-
-        if isinstance(boundary, str):
-            try:
-                boundary = json.loads(boundary)
-            except (json.JSONDecodeError, TypeError):
-                boundary = None
-
-        if not isinstance(boundary, list) or len(boundary) < 3:
-            boundary = field_data.get("boundary")
-
-        if isinstance(boundary, str):
-            try:
-                boundary = json.loads(boundary)
-            except (json.JSONDecodeError, TypeError):
-                boundary = None
-
-        if not isinstance(boundary, list) or len(boundary) < 3:
-            raise HTTPException(
-                status_code=400,
-                detail="Valid field boundary is missing. At least 3 points are required.",
-            )
-
-        # ================= GEOMETRY =================
-        coords = []
-
-        for point in boundary:
-            if not isinstance(point, dict):
-                continue
-
-            lat_value = point.get("lat")
-            lon_value = point.get("lon")
-
-            if not isinstance(lat_value, (int, float)):
-                continue
-            if not isinstance(lon_value, (int, float)):
-                continue
-
-            if not (-90 <= lat_value <= 90):
-                continue
-            if not (-180 <= lon_value <= 180):
-                continue
-
-            coords.append([
-                float(lon_value),
-                float(lat_value),
-            ])
-
-        if len(coords) < 3:
-            raise HTTPException(
-                status_code=400,
-                detail="Boundary has fewer than 3 valid points.",
-            )
-
-        # Close polygon if necessary.
-        if coords[0] != coords[-1]:
-            coords.append(coords[0])
-
-        geom = ee.Geometry.Polygon([coords])
-
-        print("BOUNDARY USED:", boundary)
+        import json
 
         # ================= CACHE =================
-        boundary_signature = hashlib.sha256(
-            json.dumps(coords, sort_keys=True).encode("utf-8")
-        ).hexdigest()[:16]
-
-        key = f"satellite_v3_{uid}_{field_id}_{boundary_signature}"
+        key = f"satellite_v2_{req.user_id}_{req.field_id or 'default'}"
 
         if key in NDVI_CACHE:
-            cached_data, cached_ts = NDVI_CACHE[key]
-
-            if time.time() - cached_ts < CACHE_TTL:
-                cached_result = dict(cached_data)
+            data, ts = NDVI_CACHE[key]
+            if time.time() - ts < CACHE_TTL:
+                cached_result = dict(data)
                 cached_result["usage"] = usage
                 return cached_result
+
+        boundary = req.boundary
+
+        # ================= FETCH BOUNDARY FROM FIRESTORE =================
+        if (not boundary or len(boundary) < 3) and req.user_id:
+            try:
+                field_id = req.field_id or "default"
+
+                doc = (
+                    db.collection("fields")
+                    .document(req.user_id)
+                    .collection("user_fields")
+                    .document(field_id)
+                    .get()
+                )
+
+                if doc.exists:
+                    boundary = (doc.to_dict() or {}).get("boundary")
+
+                print("BOUNDARY FROM DB:", boundary)
+
+            except Exception as e:
+                print("Boundary fetch error:", e)
+                boundary = None
+
+        if isinstance(boundary, str):
+            try:
+                boundary = json.loads(boundary)
+            except (json.JSONDecodeError, TypeError):
+                boundary = None
+
+        # ================= GEOMETRY =================
+        if isinstance(boundary, list) and len(boundary) >= 3:
+            coords = []
+
+            for point in boundary:
+                if not isinstance(point, dict):
+                    continue
+
+                lat_value = point.get("lat")
+                lon_value = point.get("lon")
+
+                if not isinstance(lat_value, (int, float)):
+                    continue
+                if not isinstance(lon_value, (int, float)):
+                    continue
+
+                if not (-90 <= lat_value <= 90):
+                    continue
+                if not (-180 <= lon_value <= 180):
+                    continue
+
+                coords.append([
+                    float(lon_value),
+                    float(lat_value)
+                ])
+
+            if len(coords) < 3:
+                return {
+                    "error": "Boundary has fewer than 3 valid points."
+                }
+
+            # Close polygon if necessary.
+            if coords[0] != coords[-1]:
+                coords.append(coords[0])
+
+            geom = ee.Geometry.Polygon([coords])
+
+            # Preserve the existing boundary in Firestore.
+            if req.user_id:
+                try:
+                    field_id = req.field_id or "default"
+
+                    db.collection("fields") \
+                        .document(req.user_id) \
+                        .collection("user_fields") \
+                        .document(field_id) \
+                        .set({
+                            "boundary": boundary
+                        }, merge=True)
+
+                except Exception as e:
+                    print("Boundary save error:", e)
+
+        else:
+            return {
+                "error": "Boundary missing. Cannot generate polygon heatmap."
+            }
+
+        print("BOUNDARY RECEIVED:", req.boundary)
 
         # ================= SENTINEL-2 COLLECTION =================
         collection = (
@@ -1577,42 +1549,52 @@ def satellite_analysis(
 
 
         # ================= SAVE ALL SATELLITE METRICS =================
-        try:
-            satellite_updated = datetime.now(
-                timezone.utc
-            ).isoformat()
+        if req.user_id:
+            try:
+                field_id = req.field_id or "default"
+                satellite_updated = datetime.now(
+                    timezone.utc
+                ).isoformat()
 
-            satellite_payload = {
-                "satellite_date": latest["date"],
-                "satellite_updated": satellite_updated,
-                "sar": sar_result,
-                "relative_wetness": sar_result["relative_wetness"],
-            }
+                satellite_ref = (
+                    db.collection("fields")
+                    .document(req.user_id)
+                    .collection("user_fields")
+                    .document(field_id)
+                )
 
-            for metric in ("ndvi", "ndwi", "savi"):
-                value = latest.get(metric)
+                satellite_payload = {
+                    "satellite_date": latest["date"],
+                    "satellite_updated": satellite_updated,
+                    "sar": sar_result,
+                    "relative_wetness": sar_result["relative_wetness"],
+                }
 
-                if value is not None:
-                    satellite_payload[metric] = value
+                for metric in ("ndvi", "ndwi", "savi"):
+                    value = latest[metric]
 
-            if latest.get("ndvi") is not None:
-                satellite_payload["ndvi_updated"] = satellite_updated
+                    if value is not None:
+                        satellite_payload[metric] = value
 
-            field_ref.set(
-                satellite_payload,
-                merge=True,
-            )
+                if latest["ndvi"] is not None:
+                    satellite_payload["ndvi_updated"] = satellite_updated
 
-            print(
-                "SATELLITE METRICS SAVED:",
-                uid,
-                field_id,
-                latest,
-            )
+                satellite_ref.set(
+                    satellite_payload,
+                    merge=True
+                )
 
-        except Exception as e:
-            # Keep the analysis response available if persistence fails.
-            print("Satellite metrics save error:", e)
+                print(
+                    "SATELLITE METRICS SAVED:",
+                    req.user_id,
+                    field_id,
+                    latest
+                )
+
+            except Exception as e:
+                # Keep satellite analysis available if Firestore
+                # persistence fails, while logging the failure.
+                print("Satellite metrics save error:", e)
 
         # ================= NDVI HISTORY =================
         if s2_available:
@@ -1651,9 +1633,10 @@ def satellite_analysis(
             ] if data else []
 
         # Ensure chronological order before calculating trends.
-            history.sort(key=lambda item: item["date"])
+        history.sort(key=lambda item: item["date"])
 
                 # ================= 14-DAY NDVI FORECAST =================
+        from datetime import timedelta
 
         ndvi_forecast = {
             "available": False,
@@ -1751,22 +1734,31 @@ def satellite_analysis(
                 print("NDVI FORECAST ERROR:", forecast_error)
 
         # ================= SAVE NDVI HISTORY FOR AI =================
-        try:
-            field_ref.set(
-                {"ndvi_history": history[-12:]},
-                merge=True,
-            )
+        if req.user_id:
+            try:
+                field_id = req.field_id or "default"
 
-            print(
-                "NDVI HISTORY SAVED:",
-                uid,
-                field_id,
-                len(history[-12:]),
-                "observations",
-            )
+                satellite_ref = (
+                    db.collection("fields")
+                    .document(req.user_id)
+                    .collection("user_fields")
+                    .document(field_id)
+                )
 
-        except Exception as e:
-            print("NDVI history save error:", e)
+                satellite_ref.set({
+                    "ndvi_history": history[-12:]
+                }, merge=True)
+
+                print(
+                    "NDVI HISTORY SAVED:",
+                    req.user_id,
+                    field_id,
+                    len(history[-12:]),
+                    "observations"
+                )
+
+            except Exception as e:
+                print("NDVI history save error:", e)
 
         # ================= TREND =================
         trend = None
@@ -1815,7 +1807,7 @@ def satellite_analysis(
             "usage": usage,
             "satellite_basemap": satellite_basemap_url,
             "combined_heatmaps": combined_heatmaps,
-            "sar": sar_result,
+                        "sar": sar_result,
             "soil_moisture": {
                 "available": sar_result["available"],
                 "relative_wetness": sar_result["relative_wetness"],
@@ -1823,7 +1815,7 @@ def satellite_analysis(
                 "unit": "relative_index_0_to_100",
                 "source": "Sentinel-1 SAR VV",
             },
-            "ndvi_forecast": ndvi_forecast,
+                        "ndvi_forecast": ndvi_forecast,
             "crop_context": {
                 "crop": crop_name,
                 "sowing_date": str(sowing_date) if sowing_date else None,
