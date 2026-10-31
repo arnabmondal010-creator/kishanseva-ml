@@ -33,7 +33,7 @@ from ai_service import analyze_image
 from services.yield_history_service import add_yield_record, get_history
 from functools import lru_cache
 import time
-from firebase_admin import auth
+from firebase_admin import auth, credentials, messaging, app_check
 from deep_translator import GoogleTranslator
 from datetime import datetime
 from datetime import timedelta
@@ -319,8 +319,6 @@ def get_alert_index():
 
 # 🔥 GLOBAL CACHE
 translation_cache = {}
-
-from deep_translator import GoogleTranslator
 
 # def translate_text(text, lang="bn"):
   #  if not text:
@@ -830,6 +828,57 @@ def predict_yield(
         "usage": usage,
     }
 
+@app.get("/get-ndvi")
+def get_ndvi_value(
+    field_id: str,
+    user=Depends(verify_firebase_token),
+):
+    """
+    Return the latest NDVI for a field owned by the authenticated user.
+    Reads from the same canonical document updated by /satellite-analysis.
+    """
+    try:
+        uid = user.get("uid")
+
+        if not uid:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token",
+            )
+
+        doc = (
+            db.collection("farmer_fields")
+            .document(field_id)
+            .get()
+        )
+
+        if not doc.exists:
+            return {"ndvi": None, "updated": None}
+
+        data = doc.to_dict() or {}
+
+        if data.get("farmer_id") != uid:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have access to this farm field.",
+            )
+
+        return {
+            "ndvi": data.get("ndvi"),
+            "updated": data.get("ndvi_updated"),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print("NDVI fetch error:", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to fetch NDVI.",
+        )
+
+
 @app.post("/satellite-analysis")
 def satellite_analysis(
     req: NDVIRequest,
@@ -847,47 +896,50 @@ def satellite_analysis(
         # Use the authenticated user's ID.
         req.user_id = uid
 
+        
+
         usage = enforce_feature_usage(
             uid,
             "satellite_analysis",
         )
+        # ================= FETCH FARMER FIELD DETAILS =================
+        field_id = req.field_id or "default"
+
+        field_ref = db.collection("farmer_fields").document(field_id)
+        field_doc = field_ref.get()
+
+        if not field_doc.exists:
+            raise HTTPException(
+                status_code=404,
+                detail="Farm field not found."
+            )
+
+        field_data = field_doc.to_dict() or {}
+
+        if field_data.get("farmer_id") != uid:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have access to this farm field."
+            )
+
+        crop_name = (
+            field_data.get("crop")
+            or field_data.get("crop_name")
+        )
+
+        sowing_date = (
+            field_data.get("sowing_date")
+           or field_data.get("planting_date")
+        )
+
+        expected_harvest_date = field_data.get(
+            "expected_harvest_date"
+        )
 
         import ee
-        import json
 
-        # ================= CACHE =================
-        key = f"{req.user_id or 'guest'}_{req.field_id or 'default'}"
-
-        if key in NDVI_CACHE:
-            data, ts = NDVI_CACHE[key]
-            if time.time() - ts < CACHE_TTL:
-                cached_result = dict(data)
-                cached_result["usage"] = usage
-                return cached_result
-
+        # ================= FETCH FIELD BOUNDARY =================
         boundary = req.boundary
-
-        # ================= FETCH BOUNDARY FROM FIRESTORE =================
-        if (not boundary or len(boundary) < 3) and req.user_id:
-            try:
-                field_id = req.field_id or "default"
-
-                doc = (
-                    db.collection("fields")
-                    .document(req.user_id)
-                    .collection("user_fields")
-                    .document(field_id)
-                    .get()
-                )
-
-                if doc.exists:
-                    boundary = (doc.to_dict() or {}).get("boundary")
-
-                print("BOUNDARY FROM DB:", boundary)
-
-            except Exception as e:
-                print("Boundary fetch error:", e)
-                boundary = None
 
         if isinstance(boundary, str):
             try:
@@ -895,65 +947,74 @@ def satellite_analysis(
             except (json.JSONDecodeError, TypeError):
                 boundary = None
 
+        if not isinstance(boundary, list) or len(boundary) < 3:
+            boundary = field_data.get("boundary")
+
+        if isinstance(boundary, str):
+            try:
+                boundary = json.loads(boundary)
+            except (json.JSONDecodeError, TypeError):
+                boundary = None
+
+        if not isinstance(boundary, list) or len(boundary) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Valid field boundary is missing. At least 3 points are required.",
+            )
+
         # ================= GEOMETRY =================
-        if isinstance(boundary, list) and len(boundary) >= 3:
-            coords = []
+        coords = []
 
-            for point in boundary:
-                if not isinstance(point, dict):
-                    continue
+        for point in boundary:
+            if not isinstance(point, dict):
+                continue
 
-                lat_value = point.get("lat")
-                lon_value = point.get("lon")
+            lat_value = point.get("lat")
+            lon_value = point.get("lon")
 
-                if not isinstance(lat_value, (int, float)):
-                    continue
-                if not isinstance(lon_value, (int, float)):
-                    continue
+            if not isinstance(lat_value, (int, float)):
+                continue
+            if not isinstance(lon_value, (int, float)):
+                continue
 
-                if not (-90 <= lat_value <= 90):
-                    continue
-                if not (-180 <= lon_value <= 180):
-                    continue
+            if not (-90 <= lat_value <= 90):
+                continue
+            if not (-180 <= lon_value <= 180):
+                continue
 
-                coords.append([
-                    float(lon_value),
-                    float(lat_value)
-                ])
+            coords.append([
+                float(lon_value),
+                float(lat_value),
+            ])
 
-            if len(coords) < 3:
-                return {
-                    "error": "Boundary has fewer than 3 valid points."
-                }
+        if len(coords) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Boundary has fewer than 3 valid points.",
+            )
 
-            # Close polygon if necessary.
-            if coords[0] != coords[-1]:
-                coords.append(coords[0])
+        # Close polygon if necessary.
+        if coords[0] != coords[-1]:
+            coords.append(coords[0])
 
-            geom = ee.Geometry.Polygon([coords])
+        geom = ee.Geometry.Polygon([coords])
 
-            # Preserve the existing boundary in Firestore.
-            if req.user_id:
-                try:
-                    field_id = req.field_id or "default"
+        print("BOUNDARY USED:", boundary)
 
-                    db.collection("fields") \
-                        .document(req.user_id) \
-                        .collection("user_fields") \
-                        .document(field_id) \
-                        .set({
-                            "boundary": boundary
-                        }, merge=True)
+        # ================= CACHE =================
+        boundary_signature = hashlib.sha256(
+            json.dumps(coords, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
 
-                except Exception as e:
-                    print("Boundary save error:", e)
+        key = f"satellite_v3_{uid}_{field_id}_{boundary_signature}"
 
-        else:
-            return {
-                "error": "Boundary missing. Cannot generate polygon heatmap."
-            }
+        if key in NDVI_CACHE:
+            cached_data, cached_ts = NDVI_CACHE[key]
 
-        print("BOUNDARY RECEIVED:", req.boundary)
+            if time.time() - cached_ts < CACHE_TTL:
+                cached_result = dict(cached_data)
+                cached_result["usage"] = usage
+                return cached_result
 
         # ================= SENTINEL-2 COLLECTION =================
         collection = (
@@ -965,118 +1026,53 @@ def satellite_analysis(
             )
         )
 
-        if collection.size().getInfo() == 0:
-            return {
-                "status": "No satellite data",
-                "latest": None,
-                "history": [],
-                "trend": None
-            }
+        s2_available = collection.size().getInfo() > 0
 
-        # ================= CALCULATE INDICES =================
-        def add_indices(img):
-            nir = img.select("B8")
-            red = img.select("B4")
-            swir = img.select("B11")
+        print("SENTINEL-2 AVAILABLE:", s2_available)
 
-            ndvi = (
-                nir.subtract(red)
-                .divide(nir.add(red))
-                .rename("NDVI")
-            )
+        # ================= SENTINEL-2 DEFAULT VALUES =================
 
-            # NIR-SWIR moisture-related index.
-            ndwi = (
-                nir.subtract(swir)
-                .divide(nir.add(swir))
-                .rename("NDWI")
-            )
+        latest_img = None
 
-            savi = (
-                nir.subtract(red)
-                .divide(nir.add(red).add(0.5))
-                .multiply(1.5)
-                .rename("SAVI")
-            )
+        ndvi_img = None
+        ndwi_img = None
+        savi_img = None
 
-            return img.addBands([ndvi, ndwi, savi])
+        ndvi_vis = None
+        ndwi_vis = None
+        savi_vis = None
 
-        # ================= LATEST IMAGE =================
-        latest_img = add_indices(
-            collection.sort("system:time_start", False).first()
-        )
-
-        # ================= MASK =================
-        mask = ee.Image.constant(1).clip(geom)
-
-        ndvi_img = latest_img.select("NDVI").updateMask(mask)
-        ndwi_img = latest_img.select("NDWI").updateMask(mask)
-        savi_img = latest_img.select("SAVI").updateMask(mask)
-
-        # ================= DYNAMIC VISUALIZATION STRETCH =================
-        ndwi_stats = ndwi_img.reduceRegion(
-            reducer=ee.Reducer.minMax(),
-            geometry=geom,
-            scale=10,
-            maxPixels=1e9,
-        ).getInfo()
-
-        savi_stats = savi_img.reduceRegion(
-            reducer=ee.Reducer.minMax(),
-            geometry=geom,
-            scale=10,
-            maxPixels=1e9,
-        ).getInfo()
-
-        ndwi_min = float(ndwi_stats.get("NDWI_min", -0.2))
-        ndwi_max = float(ndwi_stats.get("NDWI_max", 0.2))
-
-        savi_min = float(savi_stats.get("SAVI_min", 0))
-        savi_max = float(savi_stats.get("SAVI_max", 1))
-
-        # ================= VISUALIZATION =================
-        ndvi_vis = {
-            "min": 0,
-            "max": 1,
-            "palette": ["#8b0000", "#ffcc00", "#006400"]
-        }
-
-        ndwi_vis = {
-            "min": ndwi_min,
-            "max": ndwi_max,
-            "palette": ["#7f3b08", "#f7f7f7", "#2b83ba"]
-        }
-
-        savi_vis = {
-            "min": savi_min,
-            "max": savi_max,
-            "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
-        }
-        
-        # ================= SATELLITE BASEMAP =================
-        # Use the same Sentinel-2 image used for the indices.
-        satellite_image = ee.Image(latest_img)
-
-        satellite_vis = {
-            "bands": ["B4", "B3", "B2"],
-            "min": 0,
-            "max": 3000,
-            "gamma": 1.2,
-        }
-
-        # Use the polygon's bounding rectangle so the satellite
-        # background remains visible outside the field boundary.
+        satellite_image = None
+        satellite_basemap_url = None
         map_region = geom.bounds()
 
-        satellite_basemap_url = satellite_image.getThumbURL({
-            "region": map_region,
-            "dimensions": "1100x750",
-            "format": "png",
-            **satellite_vis,
-        })
+        tiles = {}
+        heatmaps = {}
+        combined_heatmaps = {}
 
+        latest = {
+            "date": None,
+            "ndvi": None,
+            "ndwi": None,
+            "savi": None,
+            "canopy_cover_percent": None,
+            "biomass_index": None,
+        }
 
-        # ================= HEATMAP IMAGES =================
+        history = []
+        trend = None
+
+        ndvi_forecast = {
+            "available": False,
+            "model": "linear_trend_extrapolation",
+            "forecast_days": 14,
+            "predictions": [],
+            "warning": (
+        "Insufficient Sentinel-2 observations for forecasting."
+            ),
+        }
+
+        # ================= SHARED SATELLITE HELPERS =================
 
         def get_heatmap_thumbnail(image, visualization):
             try:
@@ -1092,21 +1088,21 @@ def satellite_analysis(
                 print("HEATMAP THUMBNAIL ERROR:", e)
                 return None
 
+        def get_tile(image, vis):
+            try:
+                map_data = ee.Image(image).getMapId(vis)
+                return map_data["tile_fetcher"].url_format
+            except Exception as e:
+                print("TILE ERROR:", e)
+                return None
 
-        heatmaps = {
-            "ndvi": get_heatmap_thumbnail(ndvi_img, ndvi_vis),
-            "ndwi": get_heatmap_thumbnail(ndwi_img, ndwi_vis),
-            "savi": get_heatmap_thumbnail(savi_img, savi_vis),
-        }
-        # ================= COMBINED HEATMAPS =================
-
-        
         def get_combined_heatmap(index_image, visualization):
             try:
-                # RGB satellite background.
+                if satellite_image is None:
+                    return None
+
                 base = satellite_image.visualize(**satellite_vis)
 
-                # Clip the index layer to the selected field.
                 field_index = ee.Image(index_image).clip(geom)
 
                 rgb = field_index.visualize(
@@ -1115,7 +1111,6 @@ def satellite_analysis(
                     palette=visualization["palette"],
                 )
 
-                # Preserve valid pixels and make the overlay translucent.
                 valid_mask = (
                     field_index.mask()
                     .reduce(ee.Reducer.min())
@@ -1124,7 +1119,6 @@ def satellite_analysis(
 
                 rgb = rgb.updateMask(valid_mask.multiply(0.55))
 
-                # Blend the RGB images.
                 combined = base.blend(rgb)
 
                 return combined.getThumbURL({
@@ -1138,231 +1132,641 @@ def satellite_analysis(
                 return None
 
 
+        if s2_available:
 
-        combined_heatmaps = {
-            "ndvi": get_combined_heatmap(ndvi_img, ndvi_vis),
-            "ndwi": get_combined_heatmap(ndwi_img, ndwi_vis),
-            "savi": get_combined_heatmap(savi_img, savi_vis),
-        }
+            # ================= CALCULATE INDICES =================
+            def add_indices(img):
+                nir = img.select("B8")
+                red = img.select("B4")
+                swir = img.select("B11")
 
-        def get_tile(image, vis):
-            try:
-                map_data = ee.Image(image).getMapId(vis)
-                return map_data["tile_fetcher"].url_format
-            except Exception as e:
-                print("TILE ERROR:", e)
-                return None
+                ndvi = (
+                    nir.subtract(red)
+                    .divide(nir.add(red))
+                    .rename("NDVI")
+                )
 
-        tiles = {
-            "ndvi": get_tile(ndvi_img, ndvi_vis),
-            "ndwi": get_tile(ndwi_img, ndwi_vis),
-            "savi": get_tile(savi_img, savi_vis),
-        }
-        # ================= PDF HEATMAP THUMBNAILS =================
+                # NIR-SWIR moisture-related index.
+                ndwi = (
+                    nir.subtract(swir)
+                    .divide(nir.add(swir))
+                    .rename("NDWI")
+                )
 
-        def get_heatmap_thumbnail(image, visualization):
-            try:
-                params = {
-                    "region": geom,
-                    "dimensions": "1100x750",
-                    "format": "png",
-                    "min": visualization["min"],
-                    "max": visualization["max"],
-                    "palette": visualization["palette"],
-                }
+                savi = (
+                    nir.subtract(red)
+                    .divide(nir.add(red).add(0.5))
+                    .multiply(1.5)
+                    .rename("SAVI")
+                )
 
-                return image.getThumbURL(params)
+                return img.addBands([ndvi, ndwi, savi])
 
-            except Exception as e:
-                print("HEATMAP THUMBNAIL ERROR:", e)
-                return None
-
-
-        heatmaps = {
-            "ndvi": get_heatmap_thumbnail(ndvi_img, ndvi_vis),
-            "ndwi": get_heatmap_thumbnail(ndwi_img, ndwi_vis),
-            "savi": get_heatmap_thumbnail(savi_img, savi_vis),
-        }
-
-        # ================= STATISTICS =================
-        stats = latest_img.reduceRegion(
-            reducer=ee.Reducer.mean(),
-            geometry=geom,
-            scale=10,
-            maxPixels=1e9,
-        ).getInfo()
-
-        acquisition_date = (
-            ee.Date(
-                latest_img.get("system:time_start")
+            # ================= LATEST IMAGE =================
+            latest_img = add_indices(
+                collection.sort("system:time_start", False).first()
             )
-            .format("YYYY-MM-dd")
-            .getInfo()
-        )
+
+            # ================= MASK =================
+            mask = ee.Image.constant(1).clip(geom)
+
+            ndvi_img = latest_img.select("NDVI").updateMask(mask)
+            ndwi_img = latest_img.select("NDWI").updateMask(mask)
+            savi_img = latest_img.select("SAVI").updateMask(mask)
+
+            # ================= DYNAMIC VISUALIZATION STRETCH =================
+            ndwi_stats = ndwi_img.reduceRegion(
+                reducer=ee.Reducer.minMax(),
+                geometry=geom,
+                scale=10,
+                maxPixels=1e9,
+            ).getInfo()
+
+            savi_stats = savi_img.reduceRegion(
+                reducer=ee.Reducer.minMax(),
+                geometry=geom,
+                scale=10,
+                maxPixels=1e9,
+            ).getInfo()
+
+            ndwi_min = float(ndwi_stats.get("NDWI_min", -0.2))
+            ndwi_max = float(ndwi_stats.get("NDWI_max", 0.2))
+
+            savi_min = float(savi_stats.get("SAVI_min", 0))
+            savi_max = float(savi_stats.get("SAVI_max", 1))
+
+            # ================= VISUALIZATION =================
+            ndvi_vis = {
+                "min": 0,
+                "max": 1,
+                "palette": ["#8b0000", "#ffcc00", "#006400"]
+            }
+
+            ndwi_vis = {
+                "min": ndwi_min,
+                "max": ndwi_max,
+                "palette": ["#7f3b08", "#f7f7f7", "#2b83ba"]
+            }
+
+            savi_vis = {
+                "min": savi_min,
+                "max": savi_max,
+                "palette": ["#5e4fa2", "#fdae61", "#1a9850"]
+            }
+
+            # ================= SATELLITE BASEMAP =================
+            satellite_image = ee.Image(latest_img)
+
+            satellite_vis = {
+                "bands": ["B4", "B3", "B2"],
+                "min": 0,
+                "max": 3000,
+                "gamma": 1.2,
+            }
+
+            map_region = geom.bounds()
+
+            satellite_basemap_url = satellite_image.getThumbURL({
+                "region": map_region,
+                "dimensions": "1100x750",
+                "format": "png",
+                **satellite_vis,
+            })
+
+            # # ================= HEATMAP IMAGES =================
+            # def get_heatmap_thumbnail(image, visualization):
+            #     try:
+            #         return image.getThumbURL({
+            #             "region": geom,
+            #             "dimensions": "1100x750",
+            #             "format": "png",
+            #             "min": visualization["min"],
+            #             "max": visualization["max"],
+            #             "palette": visualization["palette"],
+            #         })
+            #     except Exception as e:
+            #         print("HEATMAP THUMBNAIL ERROR:", e)
+            #         return None
+
+            # heatmaps = {
+            #     "ndvi": get_heatmap_thumbnail(ndvi_img, ndvi_vis),
+            #     "ndwi": get_heatmap_thumbnail(ndwi_img, ndwi_vis),
+            #     "savi": get_heatmap_thumbnail(savi_img, savi_vis),
+            # }
+
+            # # ================= COMBINED HEATMAPS =================
+            # def get_combined_heatmap(index_image, visualization):
+            #     try:
+            #         base = satellite_image.visualize(**satellite_vis)
+
+            #         field_index = ee.Image(index_image).clip(geom)
+
+            #         rgb = field_index.visualize(
+            #             min=visualization["min"],
+            #             max=visualization["max"],
+            #             palette=visualization["palette"],
+            #         )
+
+            #         valid_mask = (
+            #             field_index.mask()
+            #             .reduce(ee.Reducer.min())
+            #             .unmask(0)
+            #         )
+
+            #         rgb = rgb.updateMask(valid_mask.multiply(0.55))
+
+            #         combined = base.blend(rgb)
+
+            #         return combined.getThumbURL({
+            #             "region": map_region,
+            #             "dimensions": "1100x750",
+            #             "format": "png",
+            #         })
+
+            #     except Exception as e:
+            #         print("COMBINED HEATMAP ERROR:", e)
+            #         return None
+
+            # combined_heatmaps = {
+            #     "ndvi": get_combined_heatmap(ndvi_img, ndvi_vis),
+            #     "ndwi": get_combined_heatmap(ndwi_img, ndwi_vis),
+            #     "savi": get_combined_heatmap(savi_img, savi_vis),
+            # }
+
+            # # ================= MAP TILES =================
+            # def get_tile(image, vis):
+            #     try:
+            #         map_data = ee.Image(image).getMapId(vis)
+            #         return map_data["tile_fetcher"].url_format
+            #     except Exception as e:
+            #         print("TILE ERROR:", e)
+            #         return None
+
+            # tiles = {
+            #     "ndvi": get_tile(ndvi_img, ndvi_vis),
+            #     "ndwi": get_tile(ndwi_img, ndwi_vis),
+            #     "savi": get_tile(savi_img, savi_vis),
+            # }
+
         
-        ndvi_value = (
-            float(stats["NDVI"])
-            if stats.get("NDVI") is not None else None
-        )
-
-        ndwi_value = (
-            float(stats["NDWI"])
-            if stats.get("NDWI") is not None else None
-        )
-
-        savi_value = (
-            float(stats["SAVI"])
-            if stats.get("SAVI") is not None else None
-        )
-
-        # Provisional indicators, not field-validated measurements.
-        canopy_cover_percent = (
-            round(
-                max(0.0, min(100.0, (ndvi_value - 0.20) / 0.60 * 100.0)),
-                1,
-            )
-            if ndvi_value is not None else None
-        )
-
-        biomass_index = (
-            round(
-                max(0.0, min(1.0, (savi_value - 0.10) / 0.80)),
-                3,
-            )
-            if savi_value is not None else None
-        )
-
-
-        # Do not substitute zero for missing satellite statistics.
-        latest = {
-            "date": acquisition_date,
-            "ndvi": round(ndvi_value, 3) if ndvi_value is not None else None,
-            "ndwi": round(ndwi_value, 3) if ndwi_value is not None else None,
-            "savi": round(savi_value, 3) if savi_value is not None else None,
-            "canopy_cover_percent": canopy_cover_percent,
-            "biomass_index": biomass_index,
+                # ================= SENTINEL-1 SAR =================
+        sar_result = {
+            "available": False,
+            "vv_db": None,
+            "vh_db": None,
+            "relative_wetness": None,
+            "classification": None,
+            "acquisition_date": None,
+            "method": "Sentinel-1 VV backscatter relative to field baseline",
+            "warning": (
+                "Relative radar wetness indicator only. "
+                "Not a calibrated volumetric soil-moisture measurement."
+            ),
         }
 
-        # ================= SAVE ALL SATELLITE METRICS =================
-        if req.user_id:
-            try:
-                field_id = req.field_id or "default"
-                satellite_updated = datetime.now(
-                    timezone.utc
-                ).isoformat()
+        sar_img = None
+        sar_vis = None
 
-                satellite_ref = (
-                    db.collection("fields")
-                    .document(req.user_id)
-                    .collection("user_fields")
-                    .document(field_id)
+        try:
+            now = ee.Date(
+                datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            )
+
+            sar_collection = (
+                ee.ImageCollection("COPERNICUS/S1_GRD")
+                .filterBounds(geom)
+                .filterDate(now.advance(-30, "day"), now)
+                .filter(ee.Filter.eq("instrumentMode", "IW"))
+                .filter(ee.Filter.eq("resolution_meters", 10))
+                .filter(
+                    ee.Filter.listContains(
+                        "transmitterReceiverPolarisation", "VV"
+                    )
+                )
+                .filter(
+                    ee.Filter.listContains(
+                        "transmitterReceiverPolarisation", "VH"
+                    )
+                )
+                .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
+                .select(["VV", "VH"])
+            )
+
+            sar_count = sar_collection.size().getInfo()
+
+            if sar_count > 0:
+                sar_img = ee.Image(
+                    sar_collection.sort("system:time_start", False).first()
                 )
 
-                satellite_payload = {
-                    "satellite_date": latest["date"],
-                    "satellite_updated": satellite_updated,
+                # Use a one-year, same-orbit reference for this field.
+                sar_reference = (
+                    ee.ImageCollection("COPERNICUS/S1_GRD")
+                    .filterBounds(geom)
+                    .filterDate(now.advance(-365, "day"), now)
+                    .filter(ee.Filter.eq("instrumentMode", "IW"))
+                    .filter(ee.Filter.eq("resolution_meters", 10))
+                    .filter(
+                        ee.Filter.listContains(
+                            "transmitterReceiverPolarisation", "VV"
+                        )
+                    )
+                    .filter(
+                        ee.Filter.listContains(
+                            "transmitterReceiverPolarisation", "VH"
+                        )
+                    )
+                    .filter(
+                        ee.Filter.eq("orbitProperties_pass", "DESCENDING")
+                    )
+                    .select("VV")
+                )
+
+                # Calculate historical field-level VV means.
+                def get_field_vv_mean(img):
+                    mean_value = img.select("VV").reduceRegion(
+                        reducer=ee.Reducer.mean(),
+                        geometry=geom,
+                        scale=20,
+                        maxPixels=1e9,
+                    ).get("VV")
+
+                    return ee.Feature(
+                        None,
+                        {"vv_mean": mean_value}
+                    )
+
+
+                reference_values = (
+                    sar_reference
+                    .map(get_field_vv_mean)
+                    .filter(ee.Filter.notNull(["vv_mean"]))
+                )
+
+                reference_stats = reference_values.reduceColumns(
+                    reducer=ee.Reducer.percentile([10, 90]),
+                    selectors=["vv_mean"],
+                ).getInfo()
+
+                vv_p10 = reference_stats.get("p10")
+                vv_p90 = reference_stats.get("p90")
+
+                sar_stats = sar_img.reduceRegion(
+                    reducer=ee.Reducer.mean(),
+                    geometry=geom,
+                    scale=20,
+                    maxPixels=1e9,
+                ).getInfo()
+
+                vv_value = sar_stats.get("VV")
+                vh_value = sar_stats.get("VH")
+
+                # Get acquisition date whenever a SAR image exists.
+                sar_date = ee.Date(
+                    sar_img.get("system:time_start")
+                ).format("YYYY-MM-dd").getInfo()
+
+# Display the VV backscatter layer independently
+# of the relative-wetness calculation.
+                sar_vis = {
+                    "min": -25,
+                    "max": 0,
+                    "palette": [
+                        "#313695",
+                        "#74add1",
+                        "#ffffbf",
+                        "#fdae61",
+                        "#a50026",
+                    ],
                 }
 
-                for metric in ("ndvi", "ndwi", "savi"):
-                    value = latest[metric]
+                sar_layer = sar_img.select("VV").clip(geom)
 
-                    if value is not None:
-                        satellite_payload[metric] = value
+                tiles["sar"] = get_tile(sar_layer, sar_vis)
 
-                if latest["ndvi"] is not None:
-                    satellite_payload["ndvi_updated"] = satellite_updated
-
-                satellite_ref.set(
-                    satellite_payload,
-                    merge=True
+                heatmaps["sar"] = get_heatmap_thumbnail(
+                    sar_layer, sar_vis
                 )
 
-                print(
-                    "SATELLITE METRICS SAVED:",
-                    req.user_id,
-                    field_id,
-                    latest
+                combined_heatmaps["sar"] = get_combined_heatmap(
+                    sar_layer, sar_vis
                 )
 
-            except Exception as e:
-                # Keep satellite analysis available if Firestore
-                # persistence fails, while logging the failure.
-                print("Satellite metrics save error:", e)
+# Store SAR metrics whenever available.
+                sar_result.update({
+                    "available": True,
+                    "vv_db": round(float(vv_value), 2)
+                        if vv_value is not None else None,
+                    "vh_db": round(float(vh_value), 2)
+                        if vh_value is not None else None,
+                    "acquisition_date": sar_date,
+                })
 
-        # ================= NDVI HISTORY =================
-        def to_feature(img):
-            img = add_indices(img)
+# Calculate relative wetness only when the
+# historical reference is valid.
+                if (
+                    vv_value is not None
+                    and vv_p10 is not None
+                    and vv_p90 is not None
+                    and float(vv_p90) > float(vv_p10)
+                ):
+                    wetness = (
+                        (float(vv_value) - float(vv_p10))
+                        / (float(vv_p90) - float(vv_p10))
+                    ) * 100.0
 
-            mean = img.select("NDVI").reduceRegion(
+                    wetness = round(
+                        max(0.0, min(100.0, wetness)), 1
+                    )
+
+                    if wetness < 33:
+                        classification = "lower_relative_wetness"
+                    elif wetness < 66:
+                        classification = "moderate_relative_wetness"
+                    else:
+                        classification = "higher_relative_wetness"
+
+                    sar_result.update({
+                        "relative_wetness": wetness,
+                        "classification": classification,
+                    })
+
+            print("SAR RESULT:", sar_result)
+
+        except Exception as sar_error:
+            # SAR failure must not break Sentinel-2 analysis.
+            print("SENTINEL-1 SAR ERROR:", sar_error)
+
+        
+        # ================= SENTINEL-2 STATISTICS =================
+        if s2_available and latest_img is not None:
+
+            stats = latest_img.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=geom,
                 scale=10,
                 maxPixels=1e9,
-            ).get("NDVI")
+            ).getInfo()
 
-            return ee.Feature(
-                None,
-                {
-                    "date": ee.Date(
-                        img.get("system:time_start")
-                    ).format("YYYY-MM-dd"),
-                    "ndvi": mean,
-                },
+            acquisition_date = (
+                ee.Date(
+                    latest_img.get("system:time_start")
+                )
+                .format("YYYY-MM-dd")
+                .getInfo()
             )
 
-        fc = collection.map(to_feature).filter(
-            ee.Filter.notNull(["ndvi"])
-        )
+            ndvi_value = (
+                float(stats["NDVI"])
+                if stats.get("NDVI") is not None else None
+            )
 
-        data = fc.aggregate_array("date").zip(
-            fc.aggregate_array("ndvi")
-        ).getInfo()
+            ndwi_value = (
+                float(stats["NDWI"])
+                if stats.get("NDWI") is not None else None
+            )
 
-        history = [
-            {"date": date, "ndvi": round(float(value), 3)}
-            for date, value in data
-            if value is not None
-        ] if data else []
+            savi_value = (
+                float(stats["SAVI"])
+                if stats.get("SAVI") is not None else None
+            )
+
+            # Provisional indicators, not field-validated measurements.
+            canopy_cover_percent = (
+                round(
+                    max(
+                        0.0,
+                        min(
+                            100.0,
+                            (ndvi_value - 0.20) / 0.60 * 100.0
+                        )
+                    ),
+                    1,
+                )
+                if ndvi_value is not None else None
+            )
+
+            biomass_index = (
+                round(
+                    max(
+                        0.0,
+                        min(1.0, (savi_value - 0.10) / 0.80)
+                    ),
+                    3,
+                )
+                if savi_value is not None else None
+            )
+
+            latest = {
+                "date": acquisition_date,
+                "ndvi": (
+                    round(ndvi_value, 3)
+                    if ndvi_value is not None else None
+                ),
+                "ndwi": (
+                    round(ndwi_value, 3)
+                    if ndwi_value is not None else None
+                ),
+                "savi": (
+                    round(savi_value, 3)
+                    if savi_value is not None else None
+                ),
+                "canopy_cover_percent": canopy_cover_percent,
+                "biomass_index": biomass_index,
+            }
+
+
+        # ================= SAVE ALL SATELLITE METRICS =================
+        try:
+            satellite_updated = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            satellite_payload = {
+                "satellite_date": latest["date"],
+                "satellite_updated": satellite_updated,
+                "sar": sar_result,
+                "relative_wetness": sar_result["relative_wetness"],
+            }
+
+            for metric in ("ndvi", "ndwi", "savi"):
+                value = latest.get(metric)
+
+                if value is not None:
+                    satellite_payload[metric] = value
+
+            if latest.get("ndvi") is not None:
+                satellite_payload["ndvi_updated"] = satellite_updated
+
+            field_ref.set(
+                satellite_payload,
+                merge=True,
+            )
+
+            print(
+                "SATELLITE METRICS SAVED:",
+                uid,
+                field_id,
+                latest,
+            )
+
+        except Exception as e:
+            # Keep the analysis response available if persistence fails.
+            print("Satellite metrics save error:", e)
+
+        # ================= NDVI HISTORY =================
+        if s2_available:
+            def to_feature(img):
+                img = add_indices(img)
+
+                mean = img.select("NDVI").reduceRegion(
+                    reducer=ee.Reducer.mean(),
+                    geometry=geom,
+                    scale=10,
+                    maxPixels=1e9,
+                ).get("NDVI")
+
+                return ee.Feature(
+                    None,
+                    {
+                        "date": ee.Date(
+                            img.get("system:time_start")
+                        ).format("YYYY-MM-dd"),
+                        "ndvi": mean,
+                    },
+                )
+
+            fc = collection.map(to_feature).filter(
+                ee.Filter.notNull(["ndvi"])
+            )
+
+            data = fc.aggregate_array("date").zip(
+                fc.aggregate_array("ndvi")
+            ).getInfo()
+
+            history = [
+                {"date": date, "ndvi": round(float(value), 3)}
+                for date, value in data
+                if value is not None
+            ] if data else []
 
         # Ensure chronological order before calculating trends.
-        history.sort(key=lambda item: item["date"])
-        
-        # ================= BUILD NDVI HISTORY =================
-        history = [
-            {"date": date, "ndvi": round(float(value), 3)}
-            for date, value in data
-            if value is not None
-        ] if data else []
+            history.sort(key=lambda item: item["date"])
 
-        # Sort observations chronologically.
-        history.sort(key=lambda item: item["date"])
+                # ================= 14-DAY NDVI FORECAST =================
+
+        ndvi_forecast = {
+            "available": False,
+            "model": "linear_trend_extrapolation",
+            "forecast_days": 14,
+            "predictions": [],
+            "warning": (
+                "Experimental trend projection based on historical "
+                "Sentinel-2 observations. Not a validated crop-growth "
+                "prediction and not future satellite imagery."
+            ),
+        }
+
+        valid_history = [
+            item for item in history
+            if isinstance(item.get("ndvi"), (int, float))
+            and item.get("date")
+        ]
+
+        # Require at least three observations to reduce instability.
+        if len(valid_history) >= 3:
+            try:
+                recent = valid_history[-6:]
+                base_date = datetime.strptime(
+                    recent[-1]["date"], "%Y-%m-%d"
+                ).date()
+
+                x_values = [
+                    (
+                        datetime.strptime(item["date"], "%Y-%m-%d").date()
+                        - base_date
+                    ).days
+                    for item in recent
+                ]
+                y_values = [
+                    float(item["ndvi"]) for item in recent
+                ]
+
+                x_mean = sum(x_values) / len(x_values)
+                y_mean = sum(y_values) / len(y_values)
+
+                denominator = sum(
+                    (x - x_mean) ** 2 for x in x_values
+                )
+
+                if denominator > 0:
+                    slope = sum(
+                        (x - x_mean) * (y - y_mean)
+                        for x, y in zip(x_values, y_values)
+                    ) / denominator
+                else:
+                    slope = 0.0
+
+                # Prevent extreme extrapolation from sparse/noisy data.
+                slope = max(-0.002, min(0.002, slope))
+
+                last_ndvi = y_values[-1]
+
+                predictions = []
+
+                for day in range(1, 15):
+                    predicted = max(
+                        0.0,
+                        min(1.0, last_ndvi + slope * day)
+                    )
+
+                    # A widening uncertainty band, not a statistical CI.
+                    uncertainty = min(0.15, 0.02 + day * 0.004)
+
+                    predictions.append({
+                        "date": (
+                            base_date + timedelta(days=day)
+                        ).isoformat(),
+                        "ndvi": round(predicted, 3),
+                        "lower": round(
+                            max(0.0, predicted - uncertainty), 3
+                        ),
+                        "upper": round(
+                            min(1.0, predicted + uncertainty), 3
+                        ),
+                    })
+
+                ndvi_forecast.update({
+                    "available": True,
+                    "predictions": predictions,
+                    "observations_used": len(recent),
+                    "crop": crop_name,
+                    "sowing_date": str(sowing_date)
+                        if sowing_date else None,
+                    "expected_harvest_date": str(expected_harvest_date)
+                        if expected_harvest_date else None,
+                })
+
+            except Exception as forecast_error:
+                print("NDVI FORECAST ERROR:", forecast_error)
 
         # ================= SAVE NDVI HISTORY FOR AI =================
-        if req.user_id:
-            try:
-                field_id = req.field_id or "default"
+        try:
+            field_ref.set(
+                {"ndvi_history": history[-12:]},
+                merge=True,
+            )
 
-                satellite_ref = (
-                    db.collection("fields")
-                    .document(req.user_id)
-                    .collection("user_fields")
-                    .document(field_id)
-                )
+            print(
+                "NDVI HISTORY SAVED:",
+                uid,
+                field_id,
+                len(history[-12:]),
+                "observations",
+            )
 
-                satellite_ref.set({
-                    "ndvi_history": history[-12:]
-                }, merge=True)
-
-                print(
-                    "NDVI HISTORY SAVED:",
-                    req.user_id,
-                    field_id,
-                    len(history[-12:]),
-                    "observations"
-                )
-
-            except Exception as e:
-                print("NDVI history save error:", e)
+        except Exception as e:
+            print("NDVI history save error:", e)
 
         # ================= TREND =================
         trend = None
@@ -1411,6 +1815,23 @@ def satellite_analysis(
             "usage": usage,
             "satellite_basemap": satellite_basemap_url,
             "combined_heatmaps": combined_heatmaps,
+            "sar": sar_result,
+            "soil_moisture": {
+                "available": sar_result["available"],
+                "relative_wetness": sar_result["relative_wetness"],
+                "classification": sar_result["classification"],
+                "unit": "relative_index_0_to_100",
+                "source": "Sentinel-1 SAR VV",
+            },
+            "ndvi_forecast": ndvi_forecast,
+            "crop_context": {
+                "crop": crop_name,
+                "sowing_date": str(sowing_date) if sowing_date else None,
+                "expected_harvest_date": (
+                    str(expected_harvest_date)
+                    if expected_harvest_date else None
+                ),
+            },
         }
 
         NDVI_CACHE[key] = (result, time.time())
@@ -1770,7 +2191,7 @@ def get_prices(
 import os
 import json
 import firebase_admin
-from firebase_admin import credentials, messaging, app_check
+
 
 # 🔥 LOAD KEY
 firebase_env = os.getenv("FIREBASE_KEY")
