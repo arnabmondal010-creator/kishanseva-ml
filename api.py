@@ -17076,7 +17076,6 @@ def predict_yield_satellite(
     user=Depends(verify_firebase_token),
 ):
     import math
-    from datetime import date
     from services.satellite_yield_service import (
         extract_district_yield_features,
     )
@@ -17104,7 +17103,7 @@ def predict_yield_satellite(
 
         field_data = field_doc.to_dict() or {}
 
-        # 3. Verify field ownership
+        # 3. Verify field ownership before consuming quota
         if field_data.get("farmer_id") != uid:
             raise HTTPException(
                 status_code=403,
@@ -17173,11 +17172,19 @@ def predict_yield_satellite(
 
         crop = crop_lookup[crop.lower()]
 
-        # 6. Use the completed annual research window
+        # 6. ENFORCE MONTHLY YIELD ESTIMATION LIMIT
+        # Returns HTTP 429 with FEATURE_LIMIT_REACHED when quota is exhausted.
+        # Pro users are handled as unlimited by the existing helper.
+        usage = enforce_feature_usage(
+            uid,
+            "yield_estimation",
+        )
+
+        # 7. Use the completed annual research window
         start_date = "2025-06-01"
         end_date = "2026-06-01"
 
-        # 7. Extract district-level satellite and weather features
+        # 8. Extract district-level satellite and weather features
         extracted = extract_district_yield_features(
             latitude=latitude,
             longitude=longitude,
@@ -17193,7 +17200,7 @@ def predict_yield_satellite(
                 "Earth Engine returned no usable research features."
             )
 
-        # Ensure exact model feature names and order
+        # 9. Ensure exact model feature names and order
         model_features = {
             name: features.get(name)
             for name in _SATELLITE_YIELD_FEATURES
@@ -17208,21 +17215,24 @@ def predict_yield_satellite(
                         f"Invalid satellite feature: {name}"
                     )
 
-        # 8. Run research model
+        # 10. Run research model
         df = pd.DataFrame(
             [model_features],
             columns=_SATELLITE_YIELD_FEATURES,
         )
 
         satellite_model = _load_satellite_yield_research_model()
+
         predicted_yield = float(
             satellite_model.predict(df)[0]
         )
 
         if not math.isfinite(predicted_yield) or predicted_yield < 0:
-            raise ValueError("Model returned an invalid yield prediction.")
+            raise ValueError(
+                "Model returned an invalid yield prediction."
+            )
 
-        # 9. Calculate estimated production for this field
+        # 11. Calculate estimated production for this field
         estimated_production = predicted_yield * area_ha
 
         return {
@@ -17252,6 +17262,7 @@ def predict_yield_satellite(
                 "mae_tonnes_per_hectare": 6.7078,
                 "r2": 0.7282,
             },
+            "usage": usage,
             "warning": (
                 "This is a district-level research model estimate "
                 "scaled by the field area. It is not an independently "
@@ -17260,6 +17271,7 @@ def predict_yield_satellite(
         }
 
     except HTTPException:
+        # Preserve 401, 403, 404, 422 and quota-related 429 responses.
         raise
 
     except Exception as exc:
