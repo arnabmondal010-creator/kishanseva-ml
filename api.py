@@ -1235,80 +1235,80 @@ def satellite_analysis(
                 **satellite_vis,
             })
 
-            # # ================= HEATMAP IMAGES =================
-            # def get_heatmap_thumbnail(image, visualization):
-            #     try:
-            #         return image.getThumbURL({
-            #             "region": geom,
-            #             "dimensions": "1100x750",
-            #             "format": "png",
-            #             "min": visualization["min"],
-            #             "max": visualization["max"],
-            #             "palette": visualization["palette"],
-            #         })
-            #     except Exception as e:
-            #         print("HEATMAP THUMBNAIL ERROR:", e)
-            #         return None
+            # ================= HEATMAP IMAGES =================
+            def get_heatmap_thumbnail(image, visualization):
+                try:
+                    return image.getThumbURL({
+                        "region": geom,
+                        "dimensions": "1100x750",
+                        "format": "png",
+                        "min": visualization["min"],
+                        "max": visualization["max"],
+                        "palette": visualization["palette"],
+                    })
+                except Exception as e:
+                    print("HEATMAP THUMBNAIL ERROR:", e)
+                    return None
 
-            # heatmaps = {
-            #     "ndvi": get_heatmap_thumbnail(ndvi_img, ndvi_vis),
-            #     "ndwi": get_heatmap_thumbnail(ndwi_img, ndwi_vis),
-            #     "savi": get_heatmap_thumbnail(savi_img, savi_vis),
-            # }
+            heatmaps = {
+                "ndvi": get_heatmap_thumbnail(ndvi_img, ndvi_vis),
+                "ndwi": get_heatmap_thumbnail(ndwi_img, ndwi_vis),
+                "savi": get_heatmap_thumbnail(savi_img, savi_vis),
+            }
 
-            # # ================= COMBINED HEATMAPS =================
-            # def get_combined_heatmap(index_image, visualization):
-            #     try:
-            #         base = satellite_image.visualize(**satellite_vis)
+            # ================= COMBINED HEATMAPS =================
+            def get_combined_heatmap(index_image, visualization):
+                try:
+                    base = satellite_image.visualize(**satellite_vis)
 
-            #         field_index = ee.Image(index_image).clip(geom)
+                    field_index = ee.Image(index_image).clip(geom)
 
-            #         rgb = field_index.visualize(
-            #             min=visualization["min"],
-            #             max=visualization["max"],
-            #             palette=visualization["palette"],
-            #         )
+                    rgb = field_index.visualize(
+                        min=visualization["min"],
+                        max=visualization["max"],
+                        palette=visualization["palette"],
+                    )
 
-            #         valid_mask = (
-            #             field_index.mask()
-            #             .reduce(ee.Reducer.min())
-            #             .unmask(0)
-            #         )
+                    valid_mask = (
+                        field_index.mask()
+                        .reduce(ee.Reducer.min())
+                        .unmask(0)
+                    )
 
-            #         rgb = rgb.updateMask(valid_mask.multiply(0.55))
+                    rgb = rgb.updateMask(valid_mask.multiply(0.55))
 
-            #         combined = base.blend(rgb)
+                    combined = base.blend(rgb)
 
-            #         return combined.getThumbURL({
-            #             "region": map_region,
-            #             "dimensions": "1100x750",
-            #             "format": "png",
-            #         })
+                    return combined.getThumbURL({
+                        "region": map_region,
+                        "dimensions": "1100x750",
+                        "format": "png",
+                    })
 
-            #     except Exception as e:
-            #         print("COMBINED HEATMAP ERROR:", e)
-            #         return None
+                except Exception as e:
+                    print("COMBINED HEATMAP ERROR:", e)
+                    return None
 
-            # combined_heatmaps = {
-            #     "ndvi": get_combined_heatmap(ndvi_img, ndvi_vis),
-            #     "ndwi": get_combined_heatmap(ndwi_img, ndwi_vis),
-            #     "savi": get_combined_heatmap(savi_img, savi_vis),
-            # }
+            combined_heatmaps = {
+                "ndvi": get_combined_heatmap(ndvi_img, ndvi_vis),
+                "ndwi": get_combined_heatmap(ndwi_img, ndwi_vis),
+                "savi": get_combined_heatmap(savi_img, savi_vis),
+            }
 
-            # # ================= MAP TILES =================
-            # def get_tile(image, vis):
-            #     try:
-            #         map_data = ee.Image(image).getMapId(vis)
-            #         return map_data["tile_fetcher"].url_format
-            #     except Exception as e:
-            #         print("TILE ERROR:", e)
-            #         return None
+            # ================= MAP TILES =================
+            def get_tile(image, vis):
+                try:
+                    map_data = ee.Image(image).getMapId(vis)
+                    return map_data["tile_fetcher"].url_format
+                except Exception as e:
+                    print("TILE ERROR:", e)
+                    return None
 
-            # tiles = {
-            #     "ndvi": get_tile(ndvi_img, ndvi_vis),
-            #     "ndwi": get_tile(ndwi_img, ndwi_vis),
-            #     "savi": get_tile(savi_img, savi_vis),
-            # }
+            tiles = {
+                "ndvi": get_tile(ndvi_img, ndvi_vis),
+                "ndwi": get_tile(ndwi_img, ndwi_vis),
+                "savi": get_tile(savi_img, savi_vis),
+            }
 
         
                 # ================= SENTINEL-1 SAR =================
