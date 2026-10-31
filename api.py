@@ -50,7 +50,6 @@ from services.satellite_yield_service import (
     extract_district_yield_features,
 )
 
-
 yield_model = joblib.load("models/yield_model.joblib")
 irrigation_model = joblib.load("irrigation_model.pkl")
 
