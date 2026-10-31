@@ -33,7 +33,12 @@ from ai_service import analyze_image
 from services.yield_history_service import add_yield_record, get_history
 from functools import lru_cache
 import time
-from firebase_admin import auth, credentials, messaging, app_check
+from firebase_admin import (
+    auth,
+    credentials as firebase_credentials,
+    messaging,
+    app_check,
+)
 from deep_translator import GoogleTranslator
 from datetime import datetime
 from datetime import timedelta
@@ -430,8 +435,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-
 # -----------------------------
 # Earth Engine Init
 # -----------------------------
@@ -442,12 +445,12 @@ key_json = os.getenv("GEE_KEY_JSON")
 if not service_account or not key_json:
     raise Exception("GEE credentials not configured")
 
-credentials = ee.ServiceAccountCredentials(
+gee_credentials = ee.ServiceAccountCredentials(
     service_account,
     key_data=key_json,
 )
 
-ee.Initialize(credentials)
+ee.Initialize(gee_credentials)
 
 print("Earth Engine initialized")
 
@@ -2184,26 +2187,26 @@ def get_prices(
             detail="Failed to retrieve market prices",
         )
 
-#----------------------------------
 # ================= FIREBASE =================
 
-import os
-import json
 import firebase_admin
 
-
-# 🔥 LOAD KEY
 firebase_env = os.getenv("FIREBASE_KEY")
 
 if not firebase_env:
     raise Exception("FIREBASE_KEY not set")
 
-firebase_key = json.loads(firebase_env)
-cred = credentials.Certificate(firebase_key)
+try:
+    firebase_key = json.loads(firebase_env)
+except json.JSONDecodeError as e:
+    raise Exception(f"Invalid FIREBASE_KEY JSON: {e}")
 
-# 🔥 SAFE INIT (IMPORTANT FIX)
+firebase_cred = firebase_credentials.Certificate(firebase_key)
+
 if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred)
+    firebase_admin.initialize_app(firebase_cred)
+
+print("Firebase initialized successfully")
 
 
 # ==============================
