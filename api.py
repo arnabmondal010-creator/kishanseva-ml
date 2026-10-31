@@ -529,7 +529,7 @@ def get_field_satellite_weather_features(
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "No suitable Sentinel-2 imagery was found "
+                    "No suitable imagery was found "
                     "for this polygon and observation period."
                 ),
             )
@@ -1071,7 +1071,7 @@ def satellite_analysis(
             "forecast_days": 14,
             "predictions": [],
             "warning": (
-        "Insufficient Sentinel-2 observations for forecasting."
+        "Insufficient observations for forecasting."
             ),
         }
 
@@ -1519,7 +1519,7 @@ def satellite_analysis(
 
         except Exception as sar_error:
             # SAR failure must not break Sentinel-2 analysis.
-            print("SENTINEL-1 SAR ERROR:", sar_error)
+            print("SAR ERROR:", sar_error)
 
         
         # ================= SENTINEL-2 STATISTICS =================
@@ -1686,7 +1686,7 @@ def satellite_analysis(
             "predictions": [],
             "warning": (
                 "Experimental trend projection based on historical "
-                "Sentinel-2 observations. Not a validated crop-growth "
+                "Earth Data observations. Not a validated crop-growth "
                 "prediction and not future satellite imagery."
             ),
         }
