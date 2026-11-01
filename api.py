@@ -40,6 +40,7 @@ from firebase_admin import (
     messaging,
     app_check,
 )
+from fastapi import Header
 from zoneinfo import ZoneInfo
 from deep_translator import GoogleTranslator
 from datetime import datetime
@@ -4608,20 +4609,29 @@ class VerifyOTPRequest(BaseModel):
 
 
 def normalize_phone(phone: str) -> str:
-    phone = (
-        phone
-        .strip()
-        .replace(" ", "")
-        .replace("-", "")
-    )
+    """
+    Normalize valid Indian mobile numbers to +91XXXXXXXXXX.
+    Return an empty string for invalid numbers.
+    """
 
-    if phone.startswith("+91"):
-        return phone
+    if not phone:
+        return ""
 
-    if phone.startswith("91") and len(phone) == 12:
-        return f"+{phone}"
+    digits = re.sub(r"\D", "", str(phone))
 
-    return f"+91{phone}"
+    # Remove Indian country code if supplied.
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+
+    # Accept only valid 10-digit Indian mobile numbers.
+    if (
+        len(digits) != 10
+        or not digits.isdigit()
+        or digits[0] not in "6789"
+    ):
+        return ""
+
+    return f"+91{digits}"
 
 
 def otp_document_id(phone: str, purpose: str) -> str:
@@ -5182,6 +5192,21 @@ def send_otp(
     phone = normalize_phone(data.phone)
     purpose = data.purpose.strip().lower()
 
+    # -----------------------------------------------------
+    # PREVENT DUPLICATE FARMER SIGNUP
+    # -----------------------------------------------------
+
+    if purpose == "signup":
+
+        if farmer_phone_already_registered(phone):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This mobile number is already registered. "
+                    "Please login instead."
+                ),
+            )
+
     if not phone:
         raise HTTPException(
             status_code=400,
@@ -5193,6 +5218,7 @@ def send_otp(
             status_code=400,
             detail="Invalid OTP purpose",
         )
+    
 
     # -----------------------------------------------------
     # OTP ABUSE PROTECTION
@@ -5302,6 +5328,289 @@ def send_otp(
         "purpose": purpose,
         "twofactor_status": result.get("Status"),
         "twofactor_details": result.get("Details"),
+    }
+
+@app.post("/auth/register-phone")
+def register_farmer_phone(
+    data: SendOTPRequest,
+    authorization: str = Header(...),
+):
+    # -----------------------------------------------------
+    # VERIFY FIREBASE USER
+    # -----------------------------------------------------
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization token",
+        )
+
+    token = authorization.split(" ", 1)[1].strip()
+
+    try:
+        decoded_token = auth.verify_id_token(token)
+        uid = decoded_token["uid"]
+
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Firebase authentication",
+        )
+
+    phone = normalize_phone(data.phone)
+
+    if not phone:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number",
+        )
+
+    # -----------------------------------------------------
+    # VERIFY OTP WAS SUCCESSFULLY VERIFIED
+    # -----------------------------------------------------
+
+    doc_id = otp_document_id(phone, "signup")
+
+    otp_ref = (
+        db.collection("otp_verifications")
+        .document(doc_id)
+    )
+
+    otp_doc = otp_ref.get()
+
+    if not otp_doc.exists:
+        raise HTTPException(
+            status_code=400,
+            detail="Phone verification required",
+        )
+
+    otp_data = otp_doc.to_dict() or {}
+
+    if otp_data.get("verified") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="Phone verification required",
+        )
+    expires_at = otp_data.get("expiresAt")
+
+    if not expires_at:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expiry information missing. Verify your phone again.",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if now > expires_at:
+        otp_ref.delete()
+
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expired. Please request a new OTP.",
+        )
+
+    # -----------------------------------------------------
+    # ATOMIC PHONE RESERVATION
+    # -----------------------------------------------------
+        # -----------------------------------------------------
+    # CHECK EXISTING FARMER PROFILES (LEGACY ACCOUNTS)
+    # -----------------------------------------------------
+
+    digits = phone.replace("+91", "")
+
+    phone_variants = list(set([
+        phone,
+        digits,
+        "91" + digits,
+        "+91" + digits,
+    ]))
+
+    for field in ["phone", "personal.phone"]:
+        for value in phone_variants:
+
+            existing = (
+                db.collection("farmers")
+                .where(field, "==", value)
+                .limit(1)
+                .stream()
+            )
+
+            if next(existing, None) is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This mobile number is already registered. Please login instead.",
+                )
+    phone_key = phone.replace("+", "")
+
+    phone_ref = (
+        db.collection("registered_farmer_phones")
+        .document(phone_key)
+    )
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def reserve_phone(transaction):
+
+        phone_doc = phone_ref.get(
+            transaction=transaction
+        )
+
+        if phone_doc.exists:
+
+            existing_uid = (
+                phone_doc.to_dict() or {}
+            ).get("uid")
+
+            if existing_uid != uid:
+                return False
+
+        else:
+            transaction.create(
+                phone_ref,
+                {
+                    "uid": uid,
+                    "phone": phone,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                },
+            )
+
+        return True
+
+    reserved = reserve_phone(transaction)
+
+    if not reserved:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This mobile number is already registered. "
+                "Please login instead."
+            ),
+        )
+
+    return {
+        "success": True,
+        "message": "Phone number reserved successfully",
+        "phone": phone,
+    }
+
+# =========================================================
+# CLEANUP INCOMPLETE FARMER SIGNUP
+# =========================================================
+
+class FailedSignupCleanupRequest(BaseModel):
+    phone: str
+    displayName: str
+
+
+@app.post("/auth/cleanup-failed-signup")
+def cleanup_failed_farmer_signup(
+    data: FailedSignupCleanupRequest,
+    authorization: str = Header(...),
+):
+    # -----------------------------------------------------
+    # VERIFY FIREBASE USER
+    # -----------------------------------------------------
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization token",
+        )
+
+    token = authorization.split(" ", 1)[1].strip()
+
+    try:
+        decoded_token = auth.verify_id_token(token)
+        uid = decoded_token["uid"]
+
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Firebase authentication",
+        )
+
+    phone = normalize_phone(data.phone)
+
+    if not phone:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number",
+        )
+
+    display_name = data.displayName.strip().lower()
+
+    # -----------------------------------------------------
+    # DELETE PHONE RESERVATION ONLY IF OWNED BY THIS UID
+    # -----------------------------------------------------
+
+    phone_key = phone.replace("+", "")
+
+    phone_ref = (
+        db.collection("registered_farmer_phones")
+        .document(phone_key)
+    )
+
+    phone_doc = phone_ref.get()
+
+    if phone_doc.exists:
+        phone_owner = (
+            phone_doc.to_dict() or {}
+        ).get("uid")
+
+        if phone_owner == uid:
+            phone_ref.delete()
+
+    # -----------------------------------------------------
+    # DELETE DISPLAY NAME RESERVATION ONLY IF OWNED BY UID
+    # -----------------------------------------------------
+
+    if display_name:
+        alias_ref = (
+            db.collection("quiz_display_names")
+            .document(display_name)
+        )
+
+        alias_doc = alias_ref.get()
+
+        if alias_doc.exists:
+            alias_owner = (
+                alias_doc.to_dict() or {}
+            ).get("userId")
+
+            if alias_owner == uid:
+                alias_ref.delete()
+
+    # -----------------------------------------------------
+    # DELETE PARTIAL FARMER PROFILE
+    # -----------------------------------------------------
+
+    db.collection("farmers").document(uid).delete()
+
+    # -----------------------------------------------------
+    # DELETE QUIZ LEADERBOARD ENTRY
+    # -----------------------------------------------------
+
+    db.collection(
+        "farmer_quiz_leaderboard"
+    ).document(uid).delete()
+
+    # -----------------------------------------------------
+    # DELETE SIGNUP OTP RECORD
+    # -----------------------------------------------------
+
+    otp_ref = (
+        db.collection("otp_verifications")
+        .document(
+            otp_document_id(phone, "signup")
+        )
+    )
+
+    otp_ref.delete()
+
+    return {
+        "success": True,
+        "message": "Incomplete signup data cleaned successfully.",
     }
 
 def merchant_auth_email(phone: str) -> str:
@@ -5865,6 +6174,20 @@ def verify_otp(
     phone = normalize_phone(data.phone)
     purpose = data.purpose.strip().lower()
     submitted_otp = data.otp.strip()
+    # -----------------------------------------------------
+    # PREVENT DUPLICATE FARMER SIGNUP
+    # -----------------------------------------------------
+
+    if purpose == "signup":
+
+        if farmer_phone_already_registered(phone):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This mobile number is already registered. "
+                    "Please login instead."
+                ),
+            )
 
     if len(submitted_otp) != 6 or not submitted_otp.isdigit():
         raise HTTPException(
@@ -6282,6 +6605,53 @@ def verify_otp(
         "message": "OTP verified successfully",
         "phone": phone,
     }
+
+def farmer_phone_already_registered(phone: str) -> bool:
+    """
+    Check whether a normalized Indian mobile number
+    already belongs to a farmer.
+    """
+
+    normalized = normalize_phone(phone)
+
+    if not normalized:
+        return False
+
+    digits = normalized.replace("+91", "")
+
+    phone_variants = list(set([
+        normalized,
+        digits,
+        "91" + digits,
+        "+91" + digits,
+    ]))
+
+    for field in ["phone", "personal.phone"]:
+        for value in phone_variants:
+
+            query = (
+                db.collection("farmers")
+                .where(field, "==", value)
+                .limit(1)
+                .stream()
+            )
+
+            if next(query, None) is not None:
+                return True
+
+        # Check the atomic phone reservation index
+    phone_key = normalized.replace("+", "")
+
+    reserved_phone = (
+        db.collection("registered_farmer_phones")
+        .document(phone_key)
+        .get()
+    )
+
+    if reserved_phone.exists:
+        return True
+
+    return False
 
 class ResetPasswordRequest(BaseModel):
     phone: str
