@@ -2482,13 +2482,14 @@ def get_or_create_quiz_display_name(uid: str) -> str:
             profile.get("quizDisplayName") or ""
         ).strip()
 
+        # Use the farmer's already-reserved custom name.
         if existing_name:
             return existing_name
 
         # Generate and reserve a unique fallback name.
-        for _ in range(10):
+        for _ in range(20):
             generated_name = (
-                f"Farmer {secrets.choice(adjectives)}"
+                f"Farmer_{secrets.choice(adjectives)}"
                 f"{secrets.randbelow(900000) + 100000}"
             )
 
@@ -2523,7 +2524,6 @@ def get_or_create_quiz_display_name(uid: str) -> str:
         )
 
     return save_alias(transaction)
-
 
 # ============================================================
 # DAILY FARMER QUIZ CONFIGURATION
