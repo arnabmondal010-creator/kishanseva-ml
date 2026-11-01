@@ -95,7 +95,7 @@ def verify_migration_admin(
     user=Depends(verify_firebase_token),
 ):
     allowed_admin_uids = {
-        "mwAI3WvoISMNsv8XyZZtDaxKq8j1",
+        "oGyAlAyU1eV0C0kGAYmc3JqUixg1",
     }
 
     if user.get("uid") not in allowed_admin_uids:
