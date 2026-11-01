@@ -2525,6 +2525,15 @@ def get_or_create_quiz_display_name(uid: str) -> str:
 
     return save_alias(transaction)
 
+def sync_quiz_leaderboard_name(uid: str, display_name: str):
+    db.collection(
+        "farmer_quiz_leaderboard"
+    ).document(uid).set({
+        "userId": uid,
+        "farmerName": display_name,
+        "updatedAt": get_quiz_current_time().isoformat(),
+    }, merge=True)
+
 # ============================================================
 # DAILY FARMER QUIZ CONFIGURATION
 # ============================================================
@@ -3852,6 +3861,7 @@ def submit_daily_quiz_answer(
     ).document(uid)
 
     farmer_name = get_or_create_quiz_display_name(uid)
+    sync_quiz_leaderboard_name(uid, farmer_name)
 
     transaction = db.transaction()
 
