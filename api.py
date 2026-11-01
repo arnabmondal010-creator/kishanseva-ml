@@ -2463,18 +2463,18 @@ def get_or_create_quiz_display_name(uid: str) -> str:
         "Field",
     ]
 
-    generated_name = (
-        f"Farmer {secrets.choice(adjectives)} "
-        f"{secrets.randbelow(900000) + 100000}"
-    )
-
     transaction = db.transaction()
 
     @firestore.transactional
     def save_alias(transaction):
-        snapshot = profile_ref.get(transaction=transaction)
+        profile_snapshot = profile_ref.get(
+            transaction=transaction
+        )
 
-        profile = snapshot.to_dict() if snapshot.exists else {}
+        profile = (
+            profile_snapshot.to_dict()
+            if profile_snapshot.exists else {}
+        )
 
         existing_name = str(
             profile.get("quizDisplayName") or ""
@@ -2483,18 +2483,159 @@ def get_or_create_quiz_display_name(uid: str) -> str:
         if existing_name:
             return existing_name
 
-        transaction.set(
-            profile_ref,
-            {
-                "quizDisplayName": generated_name,
-                "quizDisplayNameUpdatedAt": firestore.SERVER_TIMESTAMP,
-            },
-            merge=True,
+        # Generate and reserve a unique fallback name.
+        for _ in range(10):
+            generated_name = (
+                f"Farmer {secrets.choice(adjectives)}"
+                f"{secrets.randbelow(900000) + 100000}"
+            )
+
+            normalized = generated_name.lower()
+
+            alias_ref = db.collection(
+                "quiz_display_names"
+            ).document(normalized)
+
+            alias_snapshot = alias_ref.get(
+                transaction=transaction
+            )
+
+            if not alias_snapshot.exists:
+                transaction.set(alias_ref, {
+                    "userId": uid,
+                    "displayName": generated_name,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                })
+
+                transaction.set(profile_ref, {
+                    "quizDisplayName": generated_name,
+                    "quizDisplayNameUpdatedAt":
+                        firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+
+                return generated_name
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate a unique quiz display name.",
         )
 
-        return generated_name
-
     return save_alias(transaction)
+
+def migrate_existing_quiz_display_names():
+    farmers_ref = db.collection("farmers")
+    aliases_ref = db.collection("quiz_display_names")
+
+    migrated = 0
+    conflicts = 0
+    skipped = 0
+
+    adjectives = [
+        "Green", "Golden", "Harvest", "Monsoon",
+        "Mango", "Bamboo", "River", "Field",
+    ]
+
+    for farmer_snapshot in farmers_ref.stream():
+        uid = farmer_snapshot.id
+        profile = farmer_snapshot.to_dict() or {}
+
+        display_name = str(
+            profile.get("quizDisplayName") or ""
+        ).strip()
+
+        if not display_name:
+            skipped += 1
+            continue
+
+        transaction = db.transaction()
+
+        @firestore.transactional
+        def migrate_one(transaction):
+            profile_ref = farmers_ref.document(uid)
+            profile_snapshot = profile_ref.get(
+                transaction=transaction
+            )
+
+            current_profile = (
+                profile_snapshot.to_dict()
+                if profile_snapshot.exists else {}
+            )
+
+            current_name = str(
+                current_profile.get("quizDisplayName") or ""
+            ).strip()
+
+            if not current_name:
+                return "skipped"
+
+            normalized = current_name.lower()
+            alias_ref = aliases_ref.document(normalized)
+
+            alias_snapshot = alias_ref.get(
+                transaction=transaction
+            )
+
+            if alias_snapshot.exists:
+                owner = alias_snapshot.to_dict().get("userId")
+
+                if owner == uid:
+                    return "skipped"
+
+                # Existing alias belongs to another user.
+                for _ in range(20):
+                    new_name = (
+                        f"Farmer{secrets.choice(adjectives)}"
+                        f"{secrets.randbelow(900000) + 100000}"
+                    )
+
+                    new_ref = aliases_ref.document(
+                        new_name.lower()
+                    )
+
+                    new_snapshot = new_ref.get(
+                        transaction=transaction
+                    )
+
+                    if not new_snapshot.exists:
+                        transaction.set(new_ref, {
+                            "userId": uid,
+                            "displayName": new_name,
+                            "createdAt": firestore.SERVER_TIMESTAMP,
+                        })
+
+                        transaction.set(profile_ref, {
+                            "quizDisplayName": new_name,
+                            "quizDisplayNameUpdatedAt":
+                                firestore.SERVER_TIMESTAMP,
+                        }, merge=True)
+
+                        return "conflict"
+
+                raise RuntimeError(
+                    f"Could not generate alias for farmer {uid}"
+                )
+
+            transaction.set(alias_ref, {
+                "userId": uid,
+                "displayName": current_name,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            })
+
+            return "migrated"
+
+        result = migrate_one(transaction)
+
+        if result == "migrated":
+            migrated += 1
+        elif result == "conflict":
+            conflicts += 1
+        else:
+            skipped += 1
+
+    print("Quiz display-name migration completed")
+    print(f"Migrated: {migrated}")
+    print(f"Conflicts resolved: {conflicts}")
+    print(f"Skipped: {skipped}")
 
 # ============================================================
 # DAILY FARMER QUIZ CONFIGURATION
@@ -2585,10 +2726,157 @@ class PracticeQuizStartRequest(BaseModel):
     language: Literal["en", "bn", "hi"] = "en"
     topic: Optional[str] = Field(None, max_length=100)
 
+class QuizDisplayNameRequest(BaseModel):
+    displayName: str = Field(..., min_length=3, max_length=20)
+
 class PracticeQuizAnswerRequest(BaseModel):
     attemptId: str = Field(..., min_length=1)
     questionIndex: int = Field(..., ge=0)
     selectedOptionId: Literal["A", "B", "C", "D"]
+
+@app.get("/quiz/display-name/check")
+def check_quiz_display_name(displayName: str):
+    name = displayName.strip()
+    normalized = name.lower()
+
+    if not (3 <= len(name) <= 20):
+        return {"success": True, "available": False}
+
+    if not all(c.isalnum() or c == "_" for c in name):
+        return {"success": True, "available": False}
+
+    ref = db.collection("quiz_display_names").document(normalized)
+    snapshot = ref.get()
+
+    available = not snapshot.exists
+
+    return {
+        "success": True,
+        "available": available,
+    }
+
+
+@app.post("/quiz/display-name/reserve")
+def reserve_quiz_display_name(
+    request: QuizDisplayNameRequest,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    name = request.displayName.strip()
+    normalized = name.lower()
+
+    if not (3 <= len(name) <= 20):
+        raise HTTPException(
+            status_code=400,
+            detail="Display name must contain 3–20 characters.",
+        )
+
+    if not all(c.isalnum() or c == "_" for c in name):
+        raise HTTPException(
+            status_code=400,
+            detail="Use only letters, numbers and underscores.",
+        )
+
+    alias_ref = db.collection(
+        "quiz_display_names"
+    ).document(normalized)
+
+    profile_ref = db.collection(
+        "farmers"
+    ).document(uid)
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def reserve(transaction):
+        # READ 1: requested alias
+        alias_snapshot = alias_ref.get(
+            transaction=transaction
+        )
+
+        # READ 2: farmer profile
+        profile_snapshot = profile_ref.get(
+            transaction=transaction
+        )
+
+        profile = (
+            profile_snapshot.to_dict()
+            if profile_snapshot.exists else {}
+        )
+
+        old_name = str(
+            profile.get("quizDisplayName") or ""
+        ).strip()
+
+        old_normalized = old_name.lower()
+
+        # READ 3: previous alias, if different
+        old_ref = None
+        old_snapshot = None
+
+        if old_normalized and old_normalized != normalized:
+            old_ref = db.collection(
+                "quiz_display_names"
+            ).document(old_normalized)
+
+            old_snapshot = old_ref.get(
+                transaction=transaction
+            )
+
+        # VALIDATE ownership before writing
+        if alias_snapshot.exists:
+            owner = (
+                alias_snapshot.to_dict() or {}
+            ).get("userId")
+
+            if owner != uid:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This display name is already taken.",
+                )
+
+        # WRITES START HERE
+
+        if not alias_snapshot.exists:
+            transaction.set(alias_ref, {
+                "userId": uid,
+                "displayName": name,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            })
+
+        transaction.set(
+            profile_ref,
+            {
+                "quizDisplayName": name,
+                "quizDisplayNameUpdatedAt":
+                    firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        # Delete previous alias only if this user owns it
+        if (
+            old_ref is not None
+            and old_snapshot is not None
+            and old_snapshot.exists
+            and (
+                old_snapshot.to_dict() or {}
+            ).get("userId") == uid
+        ):
+            transaction.delete(old_ref)
+
+        return name
+
+    reserved_name = reserve(transaction)
+
+    return {
+        "success": True,
+        "displayName": reserved_name,
+    }
 
 def generate_practice_questions(
     category_id: str,
