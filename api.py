@@ -2590,7 +2590,7 @@ def format_daily_quiz_question(question, question_number):
 
     return {
         "questionNumber": question_number,
-        "question": question.get("question", ""),
+        "text": question.get("question", ""),
         "options": formatted_options,
     }
 
@@ -2617,6 +2617,7 @@ def get_today_quiz(
             "date": quiz_date.isoformat(),
             "startAt": quiz_start.isoformat(),
             "nextStartAt": quiz_start.isoformat(),
+            "serverTime": current_time.isoformat(),
         }
 
     # Quiz has ended
@@ -2628,6 +2629,7 @@ def get_today_quiz(
             "status": "completed",
             "date": quiz_date.isoformat(),
             "nextStartAt": next_start.isoformat(),
+            "serverTime": current_time.isoformat(),
         }
 
     # Retrieve today's published quiz
@@ -2638,6 +2640,7 @@ def get_today_quiz(
             "status": "not_published",
             "date": quiz_date.isoformat(),
             "message": "Today's quiz is not available yet.",
+            "serverTime": current_time.isoformat(),
         }
 
     validate_daily_quiz(quiz_data)
@@ -2665,19 +2668,43 @@ def get_today_quiz(
     )
 
     question = quiz_data["questions"][question_number - 1]
+    response_id = (
+        f"{quiz_date.isoformat()}_{user.get('uid')}_q{question_number}"
+    )
+
+    existing_response = db.collection(
+        "daily_quiz_responses"
+    ).document(response_id).get()
+
+    already_answered = existing_response.exists
+
+    my_answer = None
+
+    if already_answered:
+        response_data = existing_response.to_dict() or {}
+
+        my_answer = {
+            "optionId": response_data.get("selectedOptionId"),
+            "isCorrect": response_data.get("isCorrect", False),
+            "pointsAwarded": response_data.get("points", 0),
+        }
 
     return {
-        "status": "active",
+        "status": "live",
         "date": quiz_date.isoformat(),
         "questionNumber": question_number,
+        "questionIndex": question_number - 1,
         "totalQuestions": QUIZ_TOTAL_QUESTIONS,
         "question": format_daily_quiz_question(
             question,
             question_number,
         ),
         "questionStartedAt": question_start.isoformat(),
-        "deadlineAt": question_deadline.isoformat(),
+        "questionEndsAt": question_deadline.isoformat(),
+        "serverTime": current_time.isoformat(),
         "remainingSeconds": remaining_seconds,
+        "alreadyAnswered": already_answered,
+        "myAnswer": my_answer,
     }
 # ============================================================
 # DAILY QUIZ ANSWER SUBMISSION
