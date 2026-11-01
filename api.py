@@ -2449,6 +2449,53 @@ db = firestore.Client(
     project=firebase_key["project_id"],
 )
 
+def get_or_create_quiz_display_name(uid: str) -> str:
+    profile_ref = db.collection("farmers").document(uid)
+
+    adjectives = [
+        "Green",
+        "Golden",
+        "Harvest",
+        "Monsoon",
+        "Mango",
+        "Bamboo",
+        "River",
+        "Field",
+    ]
+
+    generated_name = (
+        f"Farmer {secrets.choice(adjectives)} "
+        f"{secrets.randbelow(900000) + 100000}"
+    )
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def save_alias(transaction):
+        snapshot = profile_ref.get(transaction=transaction)
+
+        profile = snapshot.to_dict() if snapshot.exists else {}
+
+        existing_name = str(
+            profile.get("quizDisplayName") or ""
+        ).strip()
+
+        if existing_name:
+            return existing_name
+
+        transaction.set(
+            profile_ref,
+            {
+                "quizDisplayName": generated_name,
+                "quizDisplayNameUpdatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+        return generated_name
+
+    return save_alias(transaction)
+
 # ============================================================
 # DAILY FARMER QUIZ CONFIGURATION
 # ============================================================
@@ -2703,6 +2750,8 @@ def start_practice_quiz(
     if not uid:
         raise HTTPException(status_code=401, detail="Invalid user")
 
+    farmer_name = get_or_create_quiz_display_name(uid)
+
     if request.categoryId not in {
         category["id"] for category in QUIZ_CATEGORIES
     }:
@@ -2731,6 +2780,7 @@ def start_practice_quiz(
         "score": 0,
         "answeredCount": 0,
         "answers": [],
+        "farmerName": farmer_name,
         "status": "in_progress",
         "startedAt": firestore.SERVER_TIMESTAMP,
     })
@@ -2776,6 +2826,7 @@ def submit_practice_quiz_answer(
             raise HTTPException(status_code=404, detail="Quiz attempt not found")
 
         attempt = attempt_snapshot.to_dict() or {}
+        farmer_name = attempt.get("farmerName") or "Farmer"
 
         if attempt.get("userId") != uid:
             raise HTTPException(status_code=403, detail="Access denied")
@@ -2957,6 +3008,7 @@ def submit_practice_quiz_answer(
             leaderboard_data = {
                 "userId": uid,
                 "points": firestore.Increment(new_score),
+                "farmerName": farmer_name,
                 "completedQuizzes": firestore.Increment(1),
                 "updatedAt": firestore.SERVER_TIMESTAMP,
             }
@@ -3119,6 +3171,7 @@ def get_practice_daily_leaderboard(
         for rank, data in enumerate(rows[:50], start=1):
             leaderboard.append({
                 "rank": rank,
+                "farmerName": data.get("farmerName") or "Farmer",
                 "userId": data.get("userId"),
                 "points": data.get("points", 0),
                 "completedQuizzes": data.get("completedQuizzes", 0),
@@ -3164,6 +3217,7 @@ def get_practice_monthly_leaderboard(
         for rank, data in enumerate(rows[:50], start=1):
             leaderboard.append({
                 "rank": rank,
+                "farmerName": data.get("farmerName") or "Farmer",
                 "userId": data.get("userId"),
                 "points": data.get("points", 0),
                 "completedQuizzes": data.get("completedQuizzes", 0),
@@ -3202,6 +3256,7 @@ def get_practice_quiz_result(
         )
 
     attempt = attempt_snapshot.to_dict() or {}
+
 
     if attempt.get("userId") != uid:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -3620,11 +3675,7 @@ def submit_daily_quiz_answer(
         "farmer_quiz_leaderboard"
     ).document(uid)
 
-    farmer_name = (
-        user.get("name")
-        or user.get("phone_number")
-        or "Farmer"
-    )
+    farmer_name = get_or_create_quiz_display_name(uid)
 
     transaction = db.transaction()
 
