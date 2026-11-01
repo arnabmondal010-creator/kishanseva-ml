@@ -12,6 +12,7 @@ import hmac
 import hashlib
 import asyncio
 import re
+import uuid
 
 from fastapi import (
     FastAPI,
@@ -2464,6 +2465,64 @@ QUIZ_POINTS_PER_CORRECT_ANSWER = 2
 QUIZ_TOTAL_DURATION = (
     QUIZ_TOTAL_QUESTIONS * QUIZ_QUESTION_DURATION
 )
+
+# ============================================================
+# FARMER QUIZ CATEGORIES
+# ============================================================
+
+QUIZ_CATEGORIES = [
+    {
+        "id": "crop_knowledge",
+        "title": "Crop Knowledge",
+        "description": "Crops, cultivation, soil and farming practices",
+        "icon": "agriculture",
+    },
+    {
+        "id": "plant_diseases",
+        "title": "Plant Diseases",
+        "description": "Disease identification, symptoms and management",
+        "icon": "healing",
+    },
+    {
+        "id": "weather_climate",
+        "title": "Weather & Climate",
+        "description": "Monsoon, rainfall, forecasting and climate",
+        "icon": "cloud",
+    },
+    {
+        "id": "smart_agriculture",
+        "title": "Smart Agriculture",
+        "description": "GIS, remote sensing, NDVI, irrigation and technology",
+        "icon": "satellite",
+    },
+]
+PRACTICE_ACHIEVEMENTS = [
+    {
+        "id": "first_practice",
+        "title": "First Steps",
+        "description": "Completed your first Practice Mode day",
+        "days": 1,
+    },
+    {
+        "id": "streak_3",
+        "title": "Consistent Farmer",
+        "description": "Practiced for 3 consecutive days",
+        "days": 3,
+    },
+    {
+        "id": "streak_7",
+        "title": "Weekly Champion",
+        "description": "Practiced for 7 consecutive days",
+        "days": 7,
+    },
+    {
+        "id": "streak_30",
+        "title": "Farming Expert",
+        "description": "Practiced for 30 consecutive days",
+        "days": 30,
+    },
+]
+
 # ============================================================
 # DAILY FARMER QUIZ REQUEST MODEL
 # ============================================================
@@ -2471,6 +2530,718 @@ QUIZ_TOTAL_DURATION = (
 class DailyQuizAnswerRequest(BaseModel):
     questionNumber: int = Field(..., ge=1, le=10)
     selectedOptionId: str = Field(..., min_length=1, max_length=10)
+
+class PracticeQuizStartRequest(BaseModel):
+    categoryId: str = Field(..., min_length=1, max_length=50)
+    questionCount: int = Field(10, ge=5, le=20)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    language: Literal["en", "bn", "hi"] = "en"
+    topic: Optional[str] = Field(None, max_length=100)
+
+class PracticeQuizAnswerRequest(BaseModel):
+    attemptId: str = Field(..., min_length=1)
+    questionIndex: int = Field(..., ge=0)
+    selectedOptionId: Literal["A", "B", "C", "D"]
+
+def generate_practice_questions(
+    category_id: str,
+    question_count: int,
+    difficulty: str,
+    language: str,
+    topic: Optional[str] = None,
+):
+    category = next(
+        (item for item in QUIZ_CATEGORIES if item["id"] == category_id),
+        None,
+    )
+
+    if not category:
+        raise HTTPException(status_code=400, detail="Invalid quiz category")
+
+    prompt = f"""
+Generate exactly {question_count} multiple-choice quiz questions.
+
+Category: {category['title']}
+Difficulty: {difficulty}
+Language: {language}
+Topic: {topic or "General topics within this category"}
+
+Requirements:
+- Each question must have exactly four options.
+- Option IDs must be A, B, C and D.
+- Exactly one option must be correct.
+- Questions must be factually accurate and relevant to Indian agriculture.
+- Avoid duplicate or ambiguous questions.
+- Write the question, options and explanation in the requested language.
+- Do not include markdown or text outside the JSON.
+
+Return this JSON structure:
+{{
+  "questions": [
+    {{
+      "text": "Question text",
+      "options": [
+        {{"id": "A", "text": "Option A"}},
+        {{"id": "B", "text": "Option B"}},
+        {{"id": "C", "text": "Option C"}},
+        {{"id": "D", "text": "Option D"}}
+      ],
+      "correctOptionId": "A",
+      "explanation": "Explanation of the correct answer"
+    }}
+  ]
+}}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert agricultural education quiz generator.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        result = json.loads(response.choices[0].message.content)
+        questions = result.get("questions", [])
+
+        if len(questions) != question_count:
+            raise ValueError("Incorrect number of generated questions")
+
+        for question in questions:
+            if not question.get("text"):
+                raise ValueError("Question text is missing")
+
+            options = question.get("options", [])
+            if len(options) != 4:
+                raise ValueError("Each question must have four options")
+
+            option_ids = {option.get("id") for option in options}
+            if option_ids != {"A", "B", "C", "D"}:
+                raise ValueError("Invalid option IDs")
+
+            if question.get("correctOptionId") not in option_ids:
+                raise ValueError("Invalid correct answer")
+
+            if not question.get("explanation"):
+                raise ValueError("Question explanation is missing")
+
+        return questions
+
+    except Exception as e:
+        print(f"Practice quiz generation error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate a valid quiz. Please try again.",
+        )
+
+def get_or_generate_question_bank(
+    category_id: str,
+    question_count: int,
+    difficulty: str,
+    language: str,
+    topic: Optional[str] = None,
+):
+    topic_key = (topic or "general").strip().lower()
+
+    cache_key = (
+        f"{category_id}_{difficulty}_{language}_"
+        f"{question_count}_{topic_key}"
+    )
+
+    bank_id = hashlib.sha256(
+        cache_key.encode("utf-8")
+    ).hexdigest()
+
+    bank_ref = db.collection("quiz_question_bank").document(bank_id)
+    bank_doc = bank_ref.get()
+
+    # Reuse an existing question set
+    if bank_doc.exists:
+        bank_data = bank_doc.to_dict() or {}
+
+        if bank_data.get("status") == "published":
+            questions = bank_data.get("questions", [])
+
+            if len(questions) == question_count:
+                return bank_id, questions
+
+    # Generate questions only when no valid cached set exists
+    questions = generate_practice_questions(
+        category_id=category_id,
+        question_count=question_count,
+        difficulty=difficulty,
+        language=language,
+        topic=topic,
+    )
+
+    bank_ref.set({
+        "categoryId": category_id,
+        "difficulty": difficulty,
+        "language": language,
+        "topic": topic_key,
+        "questionCount": question_count,
+        "questions": questions,
+        "status": "published",
+        "generatedBy": "gpt-4o-mini",
+        "createdAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    return bank_id, questions
+
+@app.post("/quiz/practice/start")
+def start_practice_quiz(
+    request: PracticeQuizStartRequest,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    if request.categoryId not in {
+        category["id"] for category in QUIZ_CATEGORIES
+    }:
+        raise HTTPException(status_code=400, detail="Invalid quiz category")
+
+    bank_id, questions = get_or_generate_question_bank(
+        category_id=request.categoryId,
+        question_count=request.questionCount,
+        difficulty=request.difficulty,
+        language=request.language,
+        topic=request.topic,
+    )
+
+    attempt_id = str(uuid.uuid4())
+
+    attempt_ref = db.collection("quiz_attempts").document(attempt_id)
+
+    attempt_ref.set({
+        "userId": uid,
+        "bankId": bank_id,
+        "categoryId": request.categoryId,
+        "difficulty": request.difficulty,
+        "language": request.language,
+        "totalQuestions": len(questions),
+        "currentQuestion": 0,
+        "score": 0,
+        "answeredCount": 0,
+        "answers": [],
+        "status": "in_progress",
+        "startedAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    public_questions = []
+
+    for index, question in enumerate(questions):
+        public_questions.append({
+            "questionIndex": index,
+            "text": question["text"],
+            "options": question["options"],
+        })
+
+    return {
+        "success": True,
+        "attemptId": attempt_id,
+        "categoryId": request.categoryId,
+        "difficulty": request.difficulty,
+        "totalQuestions": len(public_questions),
+        "questions": public_questions,
+    }
+@app.post("/quiz/practice/answer")
+def submit_practice_quiz_answer(
+    request: PracticeQuizAnswerRequest,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    attempt_ref = db.collection("quiz_attempts").document(
+        request.attemptId
+    )
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def process_answer(transaction):
+        attempt_snapshot = attempt_ref.get(transaction=transaction)
+
+        if not attempt_snapshot.exists:
+            raise HTTPException(status_code=404, detail="Quiz attempt not found")
+
+        attempt = attempt_snapshot.to_dict() or {}
+
+        if attempt.get("userId") != uid:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        if attempt.get("status") != "in_progress":
+            raise HTTPException(status_code=400, detail="Quiz already completed")
+
+        expected_index = attempt.get("answeredCount", 0)
+
+        if request.questionIndex != expected_index:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid question sequence or question already answered",
+            )
+
+        bank_ref = db.collection("quiz_question_bank").document(
+            attempt["bankId"]
+        )
+        bank_snapshot = bank_ref.get(transaction=transaction)
+
+        if not bank_snapshot.exists:
+            raise HTTPException(status_code=404, detail="Question bank not found")
+
+        bank = bank_snapshot.to_dict() or {}
+        questions = bank.get("questions", [])
+
+        if request.questionIndex >= len(questions):
+            raise HTTPException(status_code=400, detail="Invalid question index")
+
+        question = questions[request.questionIndex]
+        correct_option = question["correctOptionId"]
+
+        is_correct = request.selectedOptionId == correct_option
+        points = 1 if is_correct else 0
+
+        answers = attempt.get("answers", [])
+        answers.append({
+            "questionIndex": request.questionIndex,
+            "selectedOptionId": request.selectedOptionId,
+            "correctOptionId": correct_option,
+            "isCorrect": is_correct,
+            "pointsAwarded": points,
+        })
+
+        new_score = attempt.get("score", 0) + points
+        answered_count = expected_index + 1
+        total_questions = attempt.get("totalQuestions", len(questions))
+        completed = answered_count >= total_questions
+        streak_ref = None
+        streak_snapshot = None
+        streak_data = {}
+
+        if completed:
+            streak_ref = db.collection("farmer_quiz_streaks").document(uid)
+            streak_snapshot = streak_ref.get(transaction=transaction)
+            streak_data = (
+                streak_snapshot.to_dict() if streak_snapshot.exists else {}
+            )
+            today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+            day_id = today.strftime("%Y-%m-%d")
+
+            last_date_str = streak_data.get("lastPracticeDate")
+            current_streak = streak_data.get("currentStreak", 0)
+            total_days = streak_data.get("totalPracticeDays", 0)
+
+            if last_date_str != day_id:
+                if last_date_str:
+                    try:
+                        last_date = datetime.strptime(
+                            last_date_str, "%Y-%m-%d"
+                        ).date()
+
+                        current_streak = (
+                            current_streak + 1
+                            if (today - last_date).days == 1
+                            else 1
+                        )
+                    except ValueError:
+                        current_streak = 1
+                else:
+                    current_streak = 1
+
+                total_days += 1
+
+            achievement_refs = {}
+            existing_achievements = {}
+
+            for achievement in PRACTICE_ACHIEVEMENTS:
+                achievement_id = achievement["id"]
+                achievement_ref = db.collection(
+                    "farmer_quiz_achievements"
+                ).document(f"{uid}_{achievement_id}")
+
+                achievement_refs[achievement_id] = achievement_ref
+                snapshot = achievement_ref.get(transaction=transaction)
+                existing_achievements[achievement_id] = snapshot.exists
+
+        update_data = {
+            "answers": answers,
+            "score": new_score,
+            "answeredCount": answered_count,
+            "currentQuestion": answered_count,
+            "status": "completed" if completed else "in_progress",
+        }
+
+        if completed:
+            update_data["completedAt"] = firestore.SERVER_TIMESTAMP
+
+    # Practice leaderboard date and month in Indian Standard Time
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+            day_id = now_ist.strftime("%Y-%m-%d")
+            month_id = now_ist.strftime("%Y-%m")
+
+            today = now_ist.date()
+            last_date_str = streak_data.get("lastPracticeDate")
+
+            current_streak = streak_data.get("currentStreak", 0)
+            longest_streak = streak_data.get("longestStreak", 0)
+            total_days = streak_data.get("totalPracticeDays", 0)
+
+            if last_date_str == day_id:
+        # Already completed a quiz today; do not increase the streak.
+                pass
+            else:
+                if last_date_str:
+                    try:
+                        last_date = datetime.strptime(
+                            last_date_str, "%Y-%m-%d"
+                        ).date()
+                        if (today - last_date).days == 1:
+                            current_streak += 1
+                        else:
+                            current_streak = 1
+                    except ValueError:
+                        current_streak = 1
+                else:
+                    current_streak = 1
+
+                total_days += 1
+                longest_streak = max(longest_streak, current_streak)
+
+                transaction.set(streak_ref, {
+                    "userId": uid,
+                    "currentStreak": current_streak,
+                    "longestStreak": longest_streak,
+                    "totalPracticeDays": total_days,
+                    "lastPracticeDate": day_id,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                    }, merge=True)
+
+
+            for achievement in PRACTICE_ACHIEVEMENTS:
+                achievement_id = achievement["id"]
+
+                if (
+                    total_days >= achievement["days"]
+                    and current_streak >= achievement["days"]
+                    and not existing_achievements[achievement_id]
+                ):
+                    transaction.set(
+                        achievement_refs[achievement_id],
+                        {
+                            "userId": uid,
+                            "achievementId": achievement_id,
+                            "title": achievement["title"],
+                            "description": achievement["description"],
+                            "earnedAt": firestore.SERVER_TIMESTAMP,
+                        },
+                    )
+
+            daily_ref = db.collection(
+                "quiz_practice_leaderboard_daily"
+            ).document(f"{day_id}_{uid}")
+
+            monthly_ref = db.collection(
+                "quiz_practice_leaderboard_monthly"
+            ).document(f"{month_id}_{uid}")
+
+            leaderboard_data = {
+                "userId": uid,
+                "points": firestore.Increment(new_score),
+                "completedQuizzes": firestore.Increment(1),
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }
+
+            transaction.set(daily_ref, {
+                **leaderboard_data,
+                "date": day_id,
+            }, merge=True)
+
+            transaction.set(monthly_ref, {
+                **leaderboard_data,
+                "month": month_id,
+            }, merge=True)
+
+        transaction.update(attempt_ref, update_data)
+
+        return {
+            "success": True,
+            "isCorrect": is_correct,
+            "correctOptionId": correct_option,
+            "explanation": question.get("explanation", ""),
+            "pointsAwarded": points,
+            "score": new_score,
+            "answeredCount": answered_count,
+            "totalQuestions": total_questions,
+            "completed": completed,
+            "nextQuestionIndex": (
+                answered_count if not completed else None
+            ),
+        }
+
+    try:
+        return process_answer(transaction)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Practice quiz answer error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not submit quiz answer",
+        )
+
+@app.get("/quiz/practice/streak")
+def get_practice_streak(
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    streak_ref = db.collection("farmer_quiz_streaks").document(uid)
+    snapshot = streak_ref.get()
+
+    if not snapshot.exists:
+        return {
+            "success": True,
+            "currentStreak": 0,
+            "longestStreak": 0,
+            "totalPracticeDays": 0,
+            "lastPracticeDate": None,
+        }
+
+    data = snapshot.to_dict() or {}
+
+    current_streak = data.get("currentStreak", 0)
+    last_date_str = data.get("lastPracticeDate")
+
+    # A missed calendar day resets the displayed current streak.
+    if last_date_str:
+        today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+        try:
+            last_date = datetime.strptime(
+                last_date_str, "%Y-%m-%d"
+            ).date()
+
+            if (today - last_date).days > 1:
+                current_streak = 0
+        except ValueError:
+            current_streak = 0
+
+    return {
+        "success": True,
+        "currentStreak": current_streak,
+        "longestStreak": data.get("longestStreak", 0),
+        "totalPracticeDays": data.get("totalPracticeDays", 0),
+        "lastPracticeDate": last_date_str,
+    }
+@app.get("/quiz/practice/achievements")
+def get_practice_achievements(
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    docs = (
+        db.collection("farmer_quiz_achievements")
+        .where("userId", "==", uid)
+        .stream()
+    )
+
+    earned = []
+
+    for doc in docs:
+        data = doc.to_dict() or {}
+
+        earned.append({
+            "achievementId": data.get("achievementId"),
+            "title": data.get("title"),
+            "description": data.get("description"),
+            "earnedAt": (
+                data["earnedAt"].isoformat()
+                if data.get("earnedAt") else None
+            ),
+        })
+
+    earned_ids = {item["achievementId"] for item in earned}
+
+    all_achievements = []
+
+    for achievement in PRACTICE_ACHIEVEMENTS:
+        all_achievements.append({
+            **achievement,
+            "unlocked": achievement["id"] in earned_ids,
+        })
+
+    return {
+        "success": True,
+        "earnedCount": len(earned),
+        "totalAchievements": len(PRACTICE_ACHIEVEMENTS),
+        "achievements": all_achievements,
+    }
+
+@app.get("/quiz/practice/leaderboard/daily")
+def get_practice_daily_leaderboard(
+    user=Depends(verify_firebase_token),
+):
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    day_id = now_ist.strftime("%Y-%m-%d")
+
+    docs = (
+        db.collection("quiz_practice_leaderboard_daily")
+        .where("date", "==", day_id)
+        .order_by("points", direction=firestore.Query.DESCENDING)
+        .limit(50)
+        .stream()
+    )
+
+    leaderboard = []
+
+    for rank, doc in enumerate(docs, start=1):
+        data = doc.to_dict() or {}
+
+        leaderboard.append({
+            "rank": rank,
+            "userId": data.get("userId"),
+            "points": data.get("points", 0),
+            "completedQuizzes": data.get("completedQuizzes", 0),
+        })
+
+    return {
+        "success": True,
+        "period": day_id,
+        "leaderboard": leaderboard,
+    }
+@app.get("/quiz/practice/leaderboard/monthly")
+def get_practice_monthly_leaderboard(
+    user=Depends(verify_firebase_token),
+):
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    month_id = now_ist.strftime("%Y-%m")
+
+    docs = (
+        db.collection("quiz_practice_leaderboard_monthly")
+        .where("month", "==", month_id)
+        .order_by("points", direction=firestore.Query.DESCENDING)
+        .limit(50)
+        .stream()
+    )
+
+    leaderboard = []
+
+    for rank, doc in enumerate(docs, start=1):
+        data = doc.to_dict() or {}
+
+        leaderboard.append({
+            "rank": rank,
+            "userId": data.get("userId"),
+            "points": data.get("points", 0),
+            "completedQuizzes": data.get("completedQuizzes", 0),
+        })
+
+    return {
+        "success": True,
+        "period": month_id,
+        "leaderboard": leaderboard,
+    }
+
+@app.get("/quiz/practice/result/{attempt_id}")
+def get_practice_quiz_result(
+    attempt_id: str,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    attempt_ref = db.collection("quiz_attempts").document(attempt_id)
+    attempt_snapshot = attempt_ref.get()
+
+    if not attempt_snapshot.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Quiz attempt not found",
+        )
+
+    attempt = attempt_snapshot.to_dict() or {}
+
+    if attempt.get("userId") != uid:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if attempt.get("status") != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="Quiz is not completed yet",
+        )
+
+    bank_ref = db.collection("quiz_question_bank").document(
+        attempt["bankId"]
+    )
+    bank_snapshot = bank_ref.get()
+
+    if not bank_snapshot.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Question bank not found",
+        )
+
+    bank = bank_snapshot.to_dict() or {}
+    questions = bank.get("questions", [])
+    answers = attempt.get("answers", [])
+
+    review = []
+
+    for answer in answers:
+        index = answer["questionIndex"]
+
+        if index >= len(questions):
+            continue
+
+        question = questions[index]
+
+        review.append({
+            "questionIndex": index,
+            "text": question["text"],
+            "options": question["options"],
+            "selectedOptionId": answer["selectedOptionId"],
+            "correctOptionId": answer["correctOptionId"],
+            "isCorrect": answer["isCorrect"],
+            "pointsAwarded": answer["pointsAwarded"],
+            "explanation": question.get("explanation", ""),
+        })
+
+    total_questions = attempt.get("totalQuestions", len(questions))
+    score = attempt.get("score", 0)
+
+    return {
+        "success": True,
+        "attemptId": attempt_id,
+        "categoryId": attempt.get("categoryId"),
+        "difficulty": attempt.get("difficulty"),
+        "status": "completed",
+        "score": score,
+        "totalQuestions": total_questions,
+        "correctAnswers": score,
+        "wrongAnswers": total_questions - score,
+        "percentage": round(
+            (score / total_questions) * 100, 2
+        ) if total_questions else 0,
+        "answers": review,
+    }
 
 # ============================================================
 # DAILY QUIZ TIME HELPERS
@@ -2706,6 +3477,20 @@ def get_today_quiz(
         "alreadyAnswered": already_answered,
         "myAnswer": my_answer,
     }
+
+# ============================================================
+# QUIZ CATEGORIES API
+# ============================================================
+
+@app.get("/quiz/categories")
+def get_quiz_categories(
+    user=Depends(verify_firebase_token),
+):
+    return {
+        "success": True,
+        "categories": QUIZ_CATEGORIES,
+    }
+
 # ============================================================
 # DAILY QUIZ ANSWER SUBMISSION
 # ============================================================
