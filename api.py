@@ -91,6 +91,23 @@ def verify_firebase_token(
             detail="Invalid or expired authentication token",
         )
 
+def verify_migration_admin(
+    user=Depends(verify_firebase_token),
+):
+    allowed_admin_uids = {
+        "mwAI3WvoISMNsv8XyZZtDaxKq8j1",
+    }
+
+    if user.get("uid") not in allowed_admin_uids:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access required",
+        )
+
+    return user
+
+
+
 def calculate_road_distance_km(
     seller_lat: float,
     seller_lng: float,
@@ -2522,6 +2539,7 @@ def get_or_create_quiz_display_name(uid: str) -> str:
 
     return save_alias(transaction)
 
+
 def migrate_existing_quiz_display_names():
     farmers_ref = db.collection("farmers")
     aliases_ref = db.collection("quiz_display_names")
@@ -2537,32 +2555,23 @@ def migrate_existing_quiz_display_names():
 
     for farmer_snapshot in farmers_ref.stream():
         uid = farmer_snapshot.id
-        profile = farmer_snapshot.to_dict() or {}
-
-        display_name = str(
-            profile.get("quizDisplayName") or ""
-        ).strip()
-
-        if not display_name:
-            skipped += 1
-            continue
-
         transaction = db.transaction()
 
         @firestore.transactional
         def migrate_one(transaction):
             profile_ref = farmers_ref.document(uid)
+
             profile_snapshot = profile_ref.get(
                 transaction=transaction
             )
 
-            current_profile = (
+            profile = (
                 profile_snapshot.to_dict()
                 if profile_snapshot.exists else {}
             )
 
             current_name = str(
-                current_profile.get("quizDisplayName") or ""
+                profile.get("quizDisplayName") or ""
             ).strip()
 
             if not current_name:
@@ -2581,7 +2590,7 @@ def migrate_existing_quiz_display_names():
                 if owner == uid:
                     return "skipped"
 
-                # Existing alias belongs to another user.
+                # Resolve an alias already owned by another user.
                 for _ in range(20):
                     new_name = (
                         f"Farmer{secrets.choice(adjectives)}"
@@ -2632,11 +2641,83 @@ def migrate_existing_quiz_display_names():
         else:
             skipped += 1
 
-    print("Quiz display-name migration completed")
-    print(f"Migrated: {migrated}")
-    print(f"Conflicts resolved: {conflicts}")
-    print(f"Skipped: {skipped}")
+    result = {
+        "migrated": migrated,
+        "conflicts_resolved": conflicts,
+        "skipped": skipped,
+    }
 
+    print("Quiz display-name migration completed")
+    print(result)
+
+    return result
+
+
+@app.post("/admin/migrate-quiz-display-names")
+def run_quiz_display_name_migration(
+    user=Depends(verify_migration_admin),
+):
+    migration_ref = db.collection(
+        "system_config"
+    ).document("quiz_display_name_migration_v1")
+
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def claim_migration(transaction):
+        snapshot = migration_ref.get(transaction=transaction)
+
+        if snapshot.exists:
+            status = snapshot.to_dict().get("status")
+
+            if status == "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Migration has already completed.",
+                )
+
+            if status == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Migration is already running.",
+                )
+
+        transaction.set(migration_ref, {
+            "status": "running",
+            "startedBy": user.get("uid"),
+            "startedAt": firestore.SERVER_TIMESTAMP,
+        })
+
+    claim_migration(transaction)
+
+    try:
+        result = migrate_existing_quiz_display_names()
+
+        migration_ref.set({
+            "status": "completed",
+            "completedAt": firestore.SERVER_TIMESTAMP,
+            "result": result,
+        }, merge=True)
+
+        return {
+            "success": True,
+            "message": "Migration completed.",
+            "result": result,
+        }
+
+    except Exception as exc:
+        migration_ref.set({
+            "status": "failed",
+            "error": str(exc)[:500],
+            "failedAt": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+
+        print(f"Quiz display-name migration failed: {exc}")
+
+        raise HTTPException(
+            status_code=500,
+            detail="Migration failed. Check backend logs.",
+        )
 # ============================================================
 # DAILY FARMER QUIZ CONFIGURATION
 # ============================================================
