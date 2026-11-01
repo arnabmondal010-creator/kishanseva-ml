@@ -4600,6 +4600,7 @@ if not TWOFACTOR_API_KEY:
 class SendOTPRequest(BaseModel):
     phone: str
     purpose: str = "signup"
+    email: Optional[str] = None
 
 
 class VerifyOTPRequest(BaseModel):
@@ -5198,14 +5199,48 @@ def send_otp(
 
     if purpose == "signup":
 
-        if farmer_phone_already_registered(phone):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "This mobile number is already registered. "
-                    "Please login instead."
-                ),
-            )
+    # Check duplicate mobile number.
+    if not phone:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid phone number",
+        )
+
+    if farmer_phone_already_registered(phone):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This mobile number is already registered. "
+                "Please login instead."
+            ),
+        )
+
+    # Email is mandatory for farmer signup.
+    email = (data.email or "").strip().lower()
+
+    if not email or not re.fullmatch(
+        r"[^@\s]+@[^@\s]+\.[^@\s]+",
+        email,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a valid email address.",
+        )
+
+    # Check Firebase Authentication for an existing email.
+    try:
+        auth.get_user_by_email(email)
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This email address is already registered. "
+                "Please login instead."
+            ),
+        )
+
+    except auth.UserNotFoundError:
+        pass
 
     if not phone:
         raise HTTPException(
