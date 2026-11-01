@@ -3100,31 +3100,44 @@ def get_practice_daily_leaderboard(
     now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
     day_id = now_ist.strftime("%Y-%m-%d")
 
-    docs = (
-        db.collection("quiz_practice_leaderboard_daily")
-        .where("date", "==", day_id)
-        .order_by("points", direction=firestore.Query.DESCENDING)
-        .limit(50)
-        .stream()
-    )
+    try:
+        docs = (
+            db.collection("quiz_practice_leaderboard_daily")
+            .where("date", "==", day_id)
+            .stream()
+        )
 
-    leaderboard = []
+        rows = [doc.to_dict() or {} for doc in docs]
 
-    for rank, doc in enumerate(docs, start=1):
-        data = doc.to_dict() or {}
+        rows.sort(
+            key=lambda item: float(item.get("points", 0) or 0),
+            reverse=True,
+        )
 
-        leaderboard.append({
-            "rank": rank,
-            "userId": data.get("userId"),
-            "points": data.get("points", 0),
-            "completedQuizzes": data.get("completedQuizzes", 0),
-        })
+        leaderboard = []
 
-    return {
-        "success": True,
-        "period": day_id,
-        "leaderboard": leaderboard,
-    }
+        for rank, data in enumerate(rows[:50], start=1):
+            leaderboard.append({
+                "rank": rank,
+                "userId": data.get("userId"),
+                "points": data.get("points", 0),
+                "completedQuizzes": data.get("completedQuizzes", 0),
+            })
+
+        return {
+            "success": True,
+            "period": day_id,
+            "leaderboard": leaderboard,
+        }
+
+    except Exception as e:
+        print("DAILY PRACTICE LEADERBOARD ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to load daily practice leaderboard.",
+        )
+
+
 @app.get("/quiz/practice/leaderboard/monthly")
 def get_practice_monthly_leaderboard(
     user=Depends(verify_firebase_token),
@@ -3132,31 +3145,42 @@ def get_practice_monthly_leaderboard(
     now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
     month_id = now_ist.strftime("%Y-%m")
 
-    docs = (
-        db.collection("quiz_practice_leaderboard_monthly")
-        .where("month", "==", month_id)
-        .order_by("points", direction=firestore.Query.DESCENDING)
-        .limit(50)
-        .stream()
-    )
+    try:
+        docs = (
+            db.collection("quiz_practice_leaderboard_monthly")
+            .where("month", "==", month_id)
+            .stream()
+        )
 
-    leaderboard = []
+        rows = [doc.to_dict() or {} for doc in docs]
 
-    for rank, doc in enumerate(docs, start=1):
-        data = doc.to_dict() or {}
+        rows.sort(
+            key=lambda item: float(item.get("points", 0) or 0),
+            reverse=True,
+        )
 
-        leaderboard.append({
-            "rank": rank,
-            "userId": data.get("userId"),
-            "points": data.get("points", 0),
-            "completedQuizzes": data.get("completedQuizzes", 0),
-        })
+        leaderboard = []
 
-    return {
-        "success": True,
-        "period": month_id,
-        "leaderboard": leaderboard,
-    }
+        for rank, data in enumerate(rows[:50], start=1):
+            leaderboard.append({
+                "rank": rank,
+                "userId": data.get("userId"),
+                "points": data.get("points", 0),
+                "completedQuizzes": data.get("completedQuizzes", 0),
+            })
+
+        return {
+            "success": True,
+            "period": month_id,
+            "leaderboard": leaderboard,
+        }
+
+    except Exception as e:
+        print("MONTHLY PRACTICE LEADERBOARD ERROR:", repr(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to load monthly practice leaderboard.",
+        )
 
 @app.get("/quiz/practice/result/{attempt_id}")
 def get_practice_quiz_result(
