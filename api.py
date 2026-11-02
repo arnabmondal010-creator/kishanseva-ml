@@ -2550,6 +2550,13 @@ QUIZ_TOTAL_QUESTIONS = 10
 QUIZ_QUESTION_DURATION = 15
 QUIZ_POINTS_PER_CORRECT_ANSWER = 2
 
+# ============================================================
+# DAILY QUIZ TERMS & CONDITIONS
+# ============================================================
+
+CURRENT_QUIZ_TERMS_VERSION = "1.0"
+QUIZ_TERMS_COLLECTION = "quiz_terms_acceptances"
+
 QUIZ_TOTAL_DURATION = (
     QUIZ_TOTAL_QUESTIONS * QUIZ_QUESTION_DURATION
 )
@@ -2618,6 +2625,9 @@ PRACTICE_ACHIEVEMENTS = [
 class DailyQuizAnswerRequest(BaseModel):
     questionNumber: int = Field(..., ge=1, le=10)
     selectedOptionId: str = Field(..., min_length=1, max_length=10)
+
+class QuizTermsAcceptanceRequest(BaseModel):
+    termsVersion: str = Field(..., min_length=1, max_length=20)
 
 class PracticeQuizStartRequest(BaseModel):
     categoryId: str = Field(..., min_length=1, max_length=50)
@@ -2990,6 +3000,139 @@ def start_practice_quiz(
         "totalQuestions": len(public_questions),
         "questions": public_questions,
     }
+
+# ============================================================
+# QUIZ TERMS ACCEPTANCE
+# ============================================================
+
+@app.get("/quiz/terms/status")
+def get_quiz_terms_status(
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token.",
+        )
+
+    doc_id = f"{uid}_{CURRENT_QUIZ_TERMS_VERSION}"
+
+    try:
+        doc = (
+            db.collection(QUIZ_TERMS_COLLECTION)
+            .document(doc_id)
+            .get()
+        )
+
+        if not doc.exists:
+            return {
+                "success": True,
+                "accepted": False,
+                "currentTermsVersion": CURRENT_QUIZ_TERMS_VERSION,
+                "acceptedAt": None,
+            }
+
+        data = doc.to_dict() or {}
+        accepted_at = data.get("acceptedAt")
+
+        return {
+            "success": True,
+            "accepted": (
+                data.get("accepted") is True
+                and data.get("termsVersion")
+                == CURRENT_QUIZ_TERMS_VERSION
+            ),
+            "currentTermsVersion": CURRENT_QUIZ_TERMS_VERSION,
+            "acceptedAt": (
+                accepted_at.isoformat()
+                if hasattr(accepted_at, "isoformat")
+                else None
+            ),
+        }
+
+    except Exception as exc:
+        print("QUIZ TERMS STATUS ERROR:", repr(exc))
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to verify quiz terms acceptance.",
+        )
+
+
+@app.post("/quiz/terms/accept")
+def accept_quiz_terms(
+    request: QuizTermsAcceptanceRequest,
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token.",
+        )
+
+    if request.termsVersion != CURRENT_QUIZ_TERMS_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail="These terms are outdated. Please reload the current terms.",
+        )
+
+    doc_id = f"{uid}_{CURRENT_QUIZ_TERMS_VERSION}"
+
+    try:
+        terms_ref = (
+            db.collection(QUIZ_TERMS_COLLECTION)
+            .document(doc_id)
+        )
+
+        existing = terms_ref.get()
+
+        if existing.exists:
+            data = existing.to_dict() or {}
+
+            if (
+                data.get("accepted") is True
+                and data.get("termsVersion")
+                == CURRENT_QUIZ_TERMS_VERSION
+            ):
+                return {
+                    "success": True,
+                    "accepted": True,
+                    "alreadyAccepted": True,
+                    "termsVersion": CURRENT_QUIZ_TERMS_VERSION,
+                }
+
+        now = get_quiz_current_time()
+
+        terms_ref.set({
+            "userId": uid,
+            "accepted": True,
+            "termsVersion": CURRENT_QUIZ_TERMS_VERSION,
+            "acceptedAt": firestore.SERVER_TIMESTAMP,
+            "competitionMonth": now.strftime("%Y-%m"),
+            "platform": "KishanSeva Mobile App",
+            "organiser": "KishanSeva Enterprise",
+        })
+
+        return {
+            "success": True,
+            "accepted": True,
+            "alreadyAccepted": False,
+            "termsVersion": CURRENT_QUIZ_TERMS_VERSION,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("QUIZ TERMS ACCEPTANCE ERROR:", repr(exc))
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to save terms acceptance. Please try again.",
+        )
+    
 @app.post("/quiz/practice/answer")
 def submit_practice_quiz_answer(
     request: PracticeQuizAnswerRequest,
