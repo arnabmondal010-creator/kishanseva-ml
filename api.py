@@ -2270,9 +2270,9 @@ FEATURE_LIMITS = {
         "pro": None,
     },
     "practice_quiz": {
-    "free": 0,
-    "basic": 60,
-    "pro": None,
+        "free": 0,
+        "basic": 60,
+        "pro": None,
     },
 }
 
@@ -2951,17 +2951,25 @@ def start_practice_quiz(
     uid = user.get("uid")
 
     if not uid:
-        raise HTTPException(status_code=401, detail="Invalid user")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid user",
+        )
 
-    farmer_name = get_or_create_quiz_display_name(uid)
-
-        # Enforce monthly practice quiz subscription limits.
-    usage = enforce_feature_usage(uid, "practice_quiz")
-
+    # Validate category before consuming quota.
     if request.categoryId not in {
         category["id"] for category in QUIZ_CATEGORIES
     }:
-        raise HTTPException(status_code=400, detail="Invalid quiz category")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid quiz category",
+        )
+
+    # Enforce monthly practice quiz subscription limits.
+    # Free: 0 | Basic: 60 | Pro: unlimited
+    usage = enforce_feature_usage(uid, "practice_quiz")
+
+    farmer_name = get_or_create_quiz_display_name(uid)
 
     bank_id, questions = get_or_generate_question_bank(
         category_id=request.categoryId,
@@ -2970,6 +2978,12 @@ def start_practice_quiz(
         language=request.language,
         topic=request.topic,
     )
+
+    if not questions:
+        raise HTTPException(
+            status_code=503,
+            detail="No practice questions are currently available.",
+        )
 
     attempt_id = str(uuid.uuid4())
 
