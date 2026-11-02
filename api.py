@@ -27,6 +27,8 @@ from pydantic import BaseModel
 import razorpay
 import traceback
 import random
+from datetime import datetime, timezone
+from fastapi import HTTPException, Depends
 
 
 from limits import can_use, get_user_plan, set_user_plan, mark_used
@@ -5181,82 +5183,135 @@ def require_firebase_app_check(
             detail="Invalid app verification",
         )
 
+
 @app.post("/auth/send-otp")
 def send_otp(
     data: SendOTPRequest,
     request: Request,
-    app_check_claims: dict = Depends(
-        require_firebase_app_check
-    ),
+    app_check_claims: dict = Depends(require_firebase_app_check),
 ):
+    # -----------------------------------------------------
+    # 1. NORMALIZE INPUT
+    # -----------------------------------------------------
 
     phone = normalize_phone(data.phone)
-    purpose = data.purpose.strip().lower()
-
-    # -----------------------------------------------------
-    # PREVENT DUPLICATE FARMER SIGNUP
-    # -----------------------------------------------------
-
-    if purpose == "signup":
-
-    # Check duplicate mobile number.
-    if not phone:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid phone number",
-        )
-
-    if farmer_phone_already_registered(phone):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This mobile number is already registered. "
-                "Please login instead."
-            ),
-        )
-
-    # Email is mandatory for farmer signup.
-    email = (data.email or "").strip().lower()
-
-    if not email or not re.fullmatch(
-        r"[^@\s]+@[^@\s]+\.[^@\s]+",
-        email,
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Enter a valid email address.",
-        )
-
-    # Check Firebase Authentication for an existing email.
-    try:
-        auth.get_user_by_email(email)
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This email address is already registered. "
-                "Please login instead."
-            ),
-        )
-
-    except auth.UserNotFoundError:
-        pass
+    purpose = (data.purpose or "").strip().lower()
 
     if not phone:
         raise HTTPException(
             status_code=400,
-            detail="Invalid phone number",
+            detail="Invalid phone number.",
         )
 
     if not purpose:
         raise HTTPException(
             status_code=400,
-            detail="Invalid OTP purpose",
+            detail="Invalid OTP purpose.",
         )
-    
+
+    # Only allow supported OTP purposes
+    allowed_purposes = {
+        "signup",
+        "reset_password",
+        "login",
+        "buyer_login",
+        "merchant_login",
+        "buyer_password_reset",
+        "merchant_password_reset",
+    }
+
+    if purpose not in allowed_purposes:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported OTP purpose.",
+        )
+
+    clean_phone = phone.replace("+91", "")
 
     # -----------------------------------------------------
-    # OTP ABUSE PROTECTION
+    # 2. SIGNUP VALIDATION
+    # -----------------------------------------------------
+
+    if purpose == "signup":
+
+        if farmer_phone_already_registered(phone):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This mobile number is already registered. "
+                    "Please login instead."
+                ),
+            )
+
+        email = (data.email or "").strip().lower()
+
+        if not email or not re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+",
+            email,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Enter a valid email address.",
+            )
+
+        # Check whether email already exists in Firebase Auth
+        try:
+            auth.get_user_by_email(email)
+
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This email address is already registered. "
+                    "Please login instead."
+                ),
+            )
+
+        except auth.UserNotFoundError:
+            pass
+
+    # -----------------------------------------------------
+    # 3. PASSWORD RESET ACCOUNT VALIDATION
+    # -----------------------------------------------------
+
+    if purpose == "reset_password":
+
+        farmer_query = (
+            db.collection("farmers")
+            .where(
+                "personal.phone",
+                "==",
+                clean_phone,
+            )
+            .limit(1)
+            .stream()
+        )
+
+        farmer_doc = next(farmer_query, None)
+
+        if farmer_doc is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No account found with this mobile number. "
+                    "Please check your number."
+                ),
+            )
+
+        # Confirm Firebase Auth account exists using farmer UID
+        try:
+            auth.get_user(farmer_doc.id)
+
+        except auth.UserNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Your account has no valid Firebase "
+                    "Authentication record. Contact support."
+                ),
+            )
+
+    # -----------------------------------------------------
+    # 4. OTP ABUSE PROTECTION
     # -----------------------------------------------------
 
     client_ip = (
@@ -5273,7 +5328,7 @@ def send_otp(
     check_global_otp_limit()
 
     # -----------------------------------------------------
-    # GENERATE OTP
+    # 5. GENERATE OTP
     # -----------------------------------------------------
 
     otp = f"{secrets.randbelow(1_000_000):06d}"
@@ -5288,7 +5343,7 @@ def send_otp(
     )
 
     # -----------------------------------------------------
-    # SEND OTP FIRST
+    # 6. SEND OTP THROUGH 2FACTOR
     # -----------------------------------------------------
 
     url = (
@@ -5307,21 +5362,29 @@ def send_otp(
             response.status_code,
         )
 
-        print(
-            "2FACTOR SMS RESPONSE:",
-            response.text,
-        )
-
         result = response.json()
 
-        if result.get("Status") != "Success":
-            raise Exception(
-                result.get("Details")
-                or "2Factor SMS OTP failed"
+        if (
+            response.status_code != 200
+            or result.get("Status") != "Success"
+        ):
+            print(
+                "2FACTOR SMS ERROR RESPONSE:",
+                result,
             )
 
-    except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    result.get("Details")
+                    or "SMS provider rejected the OTP request."
+                ),
+            )
 
+    except HTTPException:
+        raise
+
+    except Exception as e:
         print(
             "2FACTOR SMS ERROR:",
             str(e),
@@ -5329,11 +5392,11 @@ def send_otp(
 
         raise HTTPException(
             status_code=502,
-            detail="Unable to send OTP",
+            detail="Unable to send OTP. Please try again.",
         )
 
     # -----------------------------------------------------
-    # STORE OTP AFTER SMS PROVIDER ACCEPTS IT
+    # 7. STORE OTP IN FIRESTORE
     # -----------------------------------------------------
 
     doc_id = otp_document_id(
@@ -5356,14 +5419,18 @@ def send_otp(
         "createdAt": firestore.SERVER_TIMESTAMP,
     })
 
+    # -----------------------------------------------------
+    # 8. RESPONSE
+    # -----------------------------------------------------
+
     return {
         "success": True,
-        "message": "OTP sent successfully",
+        "message": "OTP sent successfully.",
         "phone": phone,
         "purpose": purpose,
         "twofactor_status": result.get("Status"),
-        "twofactor_details": result.get("Details"),
     }
+
 
 @app.post("/auth/register-phone")
 def register_farmer_phone(
