@@ -6872,54 +6872,96 @@ def merchant_login_email(
         "userType": "merchant",
     }
 
+
 @app.post("/auth/reset-password")
 def reset_password(
     data: ResetPasswordRequest,
     app_check_claims: dict = Depends(require_firebase_app_check),
 ):
-
+    # 1. Normalize and validate phone
     phone = normalize_phone(data.phone)
 
-    if len(data.new_password) < 6:
+    if not phone:
         raise HTTPException(
             status_code=400,
-            detail="Password must be at least 6 characters",
+            detail="Invalid mobile number",
         )
 
-    # Get OTP record
+    # 2. Validate password on backend
+    password = data.new_password or ""
+
+    if (
+        len(password) < 8
+        or not any(c.isupper() for c in password)
+        or not any(c.islower() for c in password)
+        or not any(c.isdigit() for c in password)
+        or not any(not c.isalnum() for c in password)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Password must contain at least 8 characters, "
+                "uppercase, lowercase, number and special character."
+            ),
+        )
+
+    # 3. Retrieve OTP record
     doc_ref = (
-    db.collection("otp_verifications")
-    .document(
-        otp_document_id(
-            phone,
-            "reset_password",
+        db.collection("otp_verifications")
+        .document(
+            otp_document_id(phone, "reset_password")
         )
     )
-)
 
     doc = doc_ref.get()
 
     if not doc.exists:
         raise HTTPException(
             status_code=400,
-            detail="OTP not found or expired",
+            detail="OTP not found. Please request a new OTP.",
         )
 
-    otp_data = doc.to_dict()
+    otp_data = doc.to_dict() or {}
 
+    # 4. Verify OTP purpose
     if otp_data.get("purpose") != "reset_password":
         raise HTTPException(
             status_code=400,
-            detail="Invalid OTP purpose",
+            detail="Invalid OTP purpose.",
         )
 
+    # 5. Verify OTP status
     if otp_data.get("verified") is not True:
         raise HTTPException(
             status_code=400,
-            detail="OTP not verified",
+            detail="OTP not verified.",
         )
 
-    # Find farmer
+    # 6. Check OTP expiry
+    expires_at = otp_data.get("expiresAt")
+
+    if not expires_at:
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expiry information missing.",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(
+            tzinfo=timezone.utc
+        )
+
+    if now >= expires_at:
+        doc_ref.delete()
+
+        raise HTTPException(
+            status_code=400,
+            detail="OTP expired. Please request a new OTP.",
+        )
+
+    # 7. Find farmer using registered phone
     clean_phone = phone.replace("+91", "")
 
     farmer_query = (
@@ -6933,75 +6975,59 @@ def reset_password(
         .stream()
     )
 
-    farmer_doc = next(
-        farmer_query,
-        None,
-    )
+    farmer_doc = next(farmer_query, None)
 
     if farmer_doc is None:
         raise HTTPException(
             status_code=404,
-            detail="User not found",
+            detail="Farmer account not found.",
         )
 
-    farmer_data = farmer_doc.to_dict()
+    # 8. Firestore farmer document ID = Firebase UID
+    firebase_uid = farmer_doc.id
 
-    personal = farmer_data.get("personal", {})
-    real_email = personal.get("email")
-
-    if not real_email:
-        raise HTTPException(
-            status_code=400,
-            detail="No email associated with this account",
-        )
-
+    # 9. Update Firebase Authentication password
     try:
-    # First try the real email stored in Firestore
-        try:
-            firebase_user = auth.get_user_by_email(real_email)
-
-        except auth.UserNotFoundError:
-        # Fallback for older accounts
-            legacy_email = f"{phone}@kishanseva.com"
-
-            firebase_user = auth.get_user_by_email(
-                legacy_email
-            )
+        firebase_user = auth.get_user(firebase_uid)
 
         auth.update_user(
             firebase_user.uid,
-            password=data.new_password,
+            password=password,
+        )
+
+        print(
+            "PASSWORD RESET SUCCESS:",
+            firebase_uid,
         )
 
     except auth.UserNotFoundError:
         print(
-            "FIREBASE AUTH USER NOT FOUND:",
-            real_email,
-            f"{phone}@kishanseva.com",
+            "PASSWORD RESET FAILED: Firebase UID not found:",
+            firebase_uid,
         )
 
         raise HTTPException(
             status_code=404,
-            detail="Firebase Authentication account not found",
+            detail="Firebase Authentication account not found.",
         )
 
     except Exception as e:
         print(
             "PASSWORD RESET ERROR:",
-            e,
+            str(e),
         )
 
         raise HTTPException(
             status_code=500,
-            detail="Unable to reset password",
+            detail="Unable to update Firebase password.",
         )
 
-    # Delete used OTP
+    # 10. Delete OTP only after successful password update
     doc_ref.delete()
 
     return {
         "success": True,
-        "message": "Password reset successfully",
+        "message": "Password reset successfully.",
     }
 
 # =========================================================
