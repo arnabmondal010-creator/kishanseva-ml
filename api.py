@@ -2269,6 +2269,11 @@ FEATURE_LIMITS = {
         "basic": 30,
         "pro": None,
     },
+    "practice_quiz": {
+    "free": 0,
+    "basic": 60,
+    "pro": None,
+    },
 }
 
 
@@ -2950,6 +2955,9 @@ def start_practice_quiz(
 
     farmer_name = get_or_create_quiz_display_name(uid)
 
+        # Enforce monthly practice quiz subscription limits.
+    usage = enforce_feature_usage(uid, "practice_quiz")
+
     if request.categoryId not in {
         category["id"] for category in QUIZ_CATEGORIES
     }:
@@ -2994,6 +3002,7 @@ def start_practice_quiz(
 
     return {
         "success": True,
+        "usage": usage,
         "attemptId": attempt_id,
         "categoryId": request.categoryId,
         "difficulty": request.difficulty,
