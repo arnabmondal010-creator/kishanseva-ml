@@ -7659,6 +7659,13 @@ def buyer_reset_password(
 def check_account(phone: str):
 
     phone = normalize_phone(phone)
+
+    if not phone:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid mobile number.",
+        )
+
     clean_phone = phone.replace("+91", "")
 
     farmer_query = (
@@ -7674,9 +7681,46 @@ def check_account(phone: str):
 
     farmer_doc = next(farmer_query, None)
 
-    return {
-        "exists": farmer_doc is not None,
-    }
+    if farmer_doc is None:
+        return {
+            "exists": False,
+        }
+
+    firebase_uid = farmer_doc.id
+
+    try:
+        firebase_user = auth.get_user(firebase_uid)
+
+        actual_email = firebase_user.email
+
+        if not actual_email:
+            raise HTTPException(
+                status_code=409,
+                detail="Firebase account has no email address.",
+            )
+
+        return {
+            "exists": True,
+            "uid": firebase_uid,
+            "authEmail": actual_email,
+        }
+
+    except auth.UserNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Firebase Authentication account not found.",
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print("ACCOUNT CHECK ERROR:", str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to verify Firebase account.",
+        )
     
 # ================= RAZORPAY =================
 
