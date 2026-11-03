@@ -17932,7 +17932,84 @@ async def delete_account(
             detail="Invalid authentication token",
         )
 
-    # Delete Firestore data first.
+    # ==================================================
+    # 60-DAY ACCOUNT AGE VALIDATION
+    # ==================================================
+
+    try:
+        firebase_user = auth.get_user(uid)
+
+        creation_timestamp = (
+            firebase_user.user_metadata.creation_timestamp
+        )
+
+        if creation_timestamp is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Unable to verify account creation date.",
+            )
+
+        # Firebase returns creation_timestamp in milliseconds.
+        account_created_at = datetime.fromtimestamp(
+            creation_timestamp / 1000,
+            tz=timezone.utc,
+        )
+
+        now = datetime.now(timezone.utc)
+
+        eligible_deletion_date = (
+            account_created_at + timedelta(days=60)
+        )
+
+        if now < eligible_deletion_date:
+            remaining_seconds = (
+                eligible_deletion_date - now
+            ).total_seconds()
+
+            remaining_days = int(
+                (remaining_seconds + 86399) // 86400
+            )
+
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "success": False,
+                    "code": "ACCOUNT_TOO_NEW",
+                    "message": (
+                        "Account deletion is available only "
+                        "after completing 60 days from registration."
+                    ),
+                    "account_age_days": (
+                        now - account_created_at
+                    ).days,
+                    "remaining_days": remaining_days,
+                    "eligible_deletion_date": (
+                        eligible_deletion_date.isoformat()
+                    ),
+                },
+            )
+
+    except HTTPException:
+        raise
+
+    except auth.UserNotFoundError:
+        # Allow cleanup of leftover Firestore data
+        # if Firebase Authentication was already deleted.
+        pass
+
+    except Exception as e:
+        print(f"ACCOUNT AGE VALIDATION ERROR: {e}")
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=503,
+            detail="Could not verify account eligibility.",
+        )
+
+    # ==================================================
+    # DELETE FIRESTORE DATA
+    # ==================================================
+
     try:
         deleted_records = delete_user_firestore_data(uid)
 
@@ -17949,12 +18026,15 @@ async def delete_account(
             ),
         )
 
-    # Delete Firebase Authentication account.
+    # ==================================================
+    # DELETE FIREBASE AUTHENTICATION ACCOUNT
+    # ==================================================
+
     try:
         auth.delete_user(uid)
 
     except auth.UserNotFoundError:
-        # Safe retry if the Auth account was already deleted.
+        # Safe retry if Auth was already deleted.
         pass
 
     except Exception as e:
