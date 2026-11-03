@@ -17736,73 +17736,234 @@ def smart_alerts(data: dict):
 
     return {"sent": sent}
 
-#=================DELETE ACCOUNT==============================
+# ===================== DELETE ACCOUNT =====================
+
+def _delete_document_tree(document_ref):
+    """
+    Recursively delete a Firestore document and all nested subcollections.
+    """
+    deleted = 0
+
+    for subcollection in document_ref.collections():
+        while True:
+            docs = list(subcollection.limit(400).stream())
+
+            if not docs:
+                break
+
+            for doc in docs:
+                deleted += _delete_document_tree(doc.reference)
+
+            batch = db.batch()
+            for doc in docs:
+                batch.delete(doc.reference)
+
+            batch.commit()
+            deleted += len(docs)
+
+    if document_ref.get().exists:
+        document_ref.delete()
+        deleted += 1
+
+    return deleted
 
 
-from fastapi import Depends, Header
+def _delete_user_collection_records(collection_name, uid, fields):
+    """
+    Delete documents matching the user's UID in known ownership fields.
+    """
+    deleted = 0
+
+    for field in fields:
+        query = db.collection(collection_name).where(
+            field, "==", uid
+        )
+
+        while True:
+            docs = list(query.limit(300).stream())
+
+            if not docs:
+                break
+
+            for doc in docs:
+                deleted += _delete_document_tree(doc.reference)
+
+    return deleted
+
+
+def delete_user_firestore_data(uid):
+    deleted = {}
+
+    # UID-keyed documents
+    uid_collections = [
+        "farmers",
+        "subscriptions",
+        "feature_usage",
+        "farmer_quiz_leaderboard",
+        "farmer_quiz_streaks",
+        "farmer_quiz_achievements",
+        "buyers",
+        "commerce_users",
+        "alerts_state",
+    ]
+
+    for collection in uid_collections:
+        count = _delete_document_tree(
+            db.collection(collection).document(uid)
+        )
+
+        if count:
+            deleted[collection] = count
+
+    # Farmer fields
+    count = _delete_user_collection_records(
+        "farmer_fields",
+        uid,
+        ["farmer_id", "farmerId", "userId", "uid"],
+    )
+
+    if count:
+        deleted["farmer_fields"] = count
+
+    # AI Farm Manager conversations
+    count = _delete_user_collection_records(
+        "ai_farm_conversations",
+        uid,
+        ["owner_uid", "uid", "user_id", "userId"],
+    )
+
+    if count:
+        deleted["ai_farm_conversations"] = count
+
+    # Quiz and activity records
+    quiz_collections = [
+        "quiz_attempts",
+        "quiz_practice_leaderboard_daily",
+        "quiz_practice_leaderboard_monthly",
+        "daily_quiz_responses",
+        "daily_quiz_scores",
+        "daily_quiz_sessions",
+        "quiz_terms_acceptances",
+    ]
+
+    for collection in quiz_collections:
+        count = _delete_user_collection_records(
+            collection,
+            uid,
+            ["uid", "userId", "user_id", "farmer_id"],
+        )
+
+        if count:
+            deleted[collection] = count
+
+    # Marketplace operational records
+    marketplace_collections = {
+        "commerce_notifications": [
+            "userId", "uid", "user_id", "buyerId", "sellerId"
+        ],
+        "commerce_addresses": [
+            "userId", "uid", "user_id", "buyerId", "sellerId"
+        ],
+        "commerce_checkouts": [
+            "buyerId", "userId", "uid", "user_id"
+        ],
+        "commerce_cart": [
+            "buyerId", "userId", "uid", "user_id"
+        ],
+        "commerce_listings": [
+            "sellerId", "userId", "uid", "user_id"
+        ],
+        "commerce_shop_products": [
+            "sellerId", "userId", "uid", "user_id"
+        ],
+        "commerce_bids": [
+            "bidderId", "buyerId", "userId", "uid", "user_id"
+        ],
+        "delivery_settings": [
+            "sellerId", "userId", "uid", "user_id"
+        ],
+    }
+
+    for collection, fields in marketplace_collections.items():
+        count = _delete_user_collection_records(
+            collection, uid, fields
+        )
+
+        if count:
+            deleted[collection] = count
+
+    # OTP and purchase-token records explicitly linked to UID
+    for collection in [
+        "otp_verifications",
+        "otp_rate_limits",
+        "google_play_purchase_tokens",
+    ]:
+        count = _delete_user_collection_records(
+            collection,
+            uid,
+            ["uid", "userId", "user_id", "farmer_id"],
+        )
+
+        if count:
+            deleted[collection] = count
+
+    return deleted
+
 
 @app.delete("/delete-account")
-async def delete_account(authorization: str = Header(...)):
+async def delete_account(
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
 
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
+
+    # Delete Firestore data first.
     try:
-        # 🔐 VERIFY FIREBASE TOKEN
-        token = authorization.replace("Bearer ", "")
-        decoded = auth.verify_id_token(token)
-
-        user_id = decoded["uid"]
-
-        # 🔥 DELETE FIREBASE USER
-        auth.delete_user(user_id)
-
-        # 🔥 DELETE FIRESTORE DATA
-        db.collection("farmers").document(user_id).delete()
-        db.collection("alerts_state").document(user_id).delete()
-
-        # TODO: delete yield history if stored separately
-
-        return {"success": True, "message": "Account deleted"}
+        deleted_records = delete_user_firestore_data(uid)
 
     except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        print(f"ACCOUNT FIRESTORE DELETION ERROR: {e}")
+        traceback.print_exc()
 
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Account data deletion failed. "
+                "Your authentication account has been retained. "
+                "Please retry."
+            ),
+        )
 
-from fastapi.responses import HTMLResponse
+    # Delete Firebase Authentication account.
+    try:
+        auth.delete_user(uid)
 
-@app.get("/delete-account-info", response_class=HTMLResponse)
-async def delete_account_info():
-    return """
-    <html>
-    <head>
-        <title>KishanSeva Account Deletion</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-    </head>
-    <body style="font-family: Arial; padding:20px; background:#F5F7F2;">
+    except auth.UserNotFoundError:
+        # Safe retry if the Auth account was already deleted.
+        pass
 
-        <h2 style="color:#689F38;">KishanSeva Account Deletion</h2>
+    except Exception as e:
+        print(f"FIREBASE AUTH DELETION ERROR: {e}")
+        traceback.print_exc()
 
-        <p>You can delete your account directly inside the app:</p>
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Firestore data was deleted, but Firebase "
+                "Authentication deletion failed."
+            ),
+        )
 
-        <ol>
-            <li>Open KishanSeva</li>
-            <li>Go to Profile</li>
-            <li>Tap <b>"Delete My Account"</b></li>
-        </ol>
-
-        <p>If you cannot access the app, contact support:</p>
-        <p><b>Email:</b> contactkishanseva@gmail.com</p>
-
-        <h4>Data that will be deleted:</h4>
-        <ul>
-            <li>User account</li>
-            <li>Farm field data</li>
-            <li>NDVI and advisory data</li>
-        </ul>
-
-        <p><b>Processing time:</b> Within 7 days</p>
-
-    </body>
-    </html>
-    """
+    return {
+        "success": True,
+        "message": "Account deleted successfully.",
+        "deleted_records": deleted_records,
+    }
 
     
 @app.post("/translate")
