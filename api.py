@@ -17907,6 +17907,16 @@ def delete_user_firestore_data(uid):
         if count:
             deleted[collection] = count
 
+        # Delete phone-number reservation owned by this account.
+        count = _delete_user_collection_records(
+            "registered_farmer_phones",
+            uid,
+            ["uid"],
+        )
+
+        if count:
+            deleted["registered_farmer_phones"] = count
+
     return deleted
 
 
