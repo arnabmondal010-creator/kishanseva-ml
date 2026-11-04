@@ -3719,6 +3719,219 @@ def get_daily_quiz_data(quiz_date):
 
     return quiz_snapshot.to_dict() or {}
 
+
+# ============================================================
+# DAILY QUIZ PUSH REMINDERS
+# 60, 30 and 15 minutes before 8 PM IST
+# ============================================================
+
+from fastapi import Header
+import secrets
+
+QUIZ_REMINDER_OFFSETS = (60, 30, 15)
+
+QUIZ_REMINDER_MESSAGES = {
+    "en": {
+        60: (
+            "🌱 Farmer Quiz starts in 1 hour!",
+            "Get ready! Today's farming quiz starts at 8 PM. Test your knowledge and earn points."
+        ),
+        30: (
+            "⏰ Farmer Quiz starts in 30 minutes!",
+            "Your daily quiz is coming up. Take a short break and join us at 8 PM!"
+        ),
+        15: (
+            "🚀 Just 15 minutes until the Farmer Quiz!",
+            "Almost time! Open KishanSeva and get ready to answer 10 farming questions."
+        ),
+    },
+    "bn": {
+        60: (
+            "🌱 কৃষক কুইজ শুরু হবে ১ ঘণ্টা পরে!",
+            "আজকের কৃষি কুইজ রাত ৮টায় শুরু হবে। প্রস্তুত হন, জ্ঞান যাচাই করুন এবং পয়েন্ট জিতুন।"
+        ),
+        30: (
+            "⏰ কৃষক কুইজ শুরু হতে আর ৩০ মিনিট!",
+            "আপনার দৈনিক কুইজ আসছে। একটু সময় বের করে রাত ৮টায় যোগ দিন!"
+        ),
+        15: (
+            "🚀 কৃষক কুইজ শুরু হতে আর মাত্র ১৫ মিনিট!",
+            "প্রস্তুত হয়ে যান! KishanSeva খুলুন এবং ১০টি কৃষি প্রশ্নের উত্তর দিন।"
+        ),
+    },
+    "hi": {
+        60: (
+            "🌱 किसान क्विज़ 1 घंटे में शुरू होगा!",
+            "आज का कृषि क्विज़ रात 8 बजे शुरू होगा। अपनी जानकारी परखें और अंक जीतें।"
+        ),
+        30: (
+            "⏰ किसान क्विज़ शुरू होने में 30 मिनट बाकी!",
+            "आपका दैनिक क्विज़ जल्द शुरू होगा। रात 8 बजे जुड़ना न भूलें!"
+        ),
+        15: (
+            "🚀 किसान क्विज़ शुरू होने में सिर्फ 15 मिनट!",
+            "तैयार हो जाइए! KishanSeva खोलें और कृषि से जुड़े 10 सवालों के जवाब दें।"
+        ),
+    },
+}
+
+
+@app.post("/quiz/send-reminders")
+def send_quiz_reminders(
+    minutes_before: int,
+    x_quiz_cron_secret: str = Header(
+        ...,
+        alias="X-Quiz-Cron-Secret"
+    ),
+):
+    expected_secret = os.getenv("QUIZ_CRON_SECRET")
+
+    if not expected_secret or not secrets.compare_digest(
+        x_quiz_cron_secret,
+        expected_secret
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
+
+    if minutes_before not in QUIZ_REMINDER_OFFSETS:
+        raise HTTPException(
+            status_code=400,
+            detail="Allowed values: 60, 30, 15"
+        )
+
+    now = get_quiz_current_time()
+    quiz_date = now.date()
+    quiz_start = get_quiz_start_time(quiz_date)
+
+    remaining_seconds = (
+        quiz_start - now
+    ).total_seconds()
+
+    expected_seconds = minutes_before * 60
+
+    # Allow a 5-minute scheduler execution window.
+    if abs(remaining_seconds - expected_seconds) > 300:
+        raise HTTPException(
+            status_code=400,
+            detail="Reminder called outside its scheduled time."
+        )
+
+    # Do not invite farmers if today's quiz is unpublished.
+    quiz_data = get_daily_quiz_data(quiz_date)
+
+    if not quiz_data or quiz_data.get("status") != "published":
+        return {
+            "success": True,
+            "sent": 0,
+            "message": "Today's quiz is not published."
+        }
+
+    sent = 0
+    skipped = 0
+    failed = 0
+
+    farmers = db.collection("farmers").stream()
+
+    for farmer in farmers:
+        uid = farmer.id
+        profile = farmer.to_dict() or {}
+
+        if profile.get("notifications_enabled", True) is not True:
+            skipped += 1
+            continue
+
+        token = str(profile.get("fcm_token") or "").strip()
+
+        if not token:
+            skipped += 1
+            continue
+
+        lang = str(
+            profile.get("lang")
+            or profile.get("language")
+            or "en"
+        ).lower()
+
+        if lang not in QUIZ_REMINDER_MESSAGES:
+            lang = "en"
+
+        title, body = QUIZ_REMINDER_MESSAGES[lang][minutes_before]
+
+        reminder_id = (
+            f"{quiz_date.isoformat()}_{minutes_before}"
+        )
+
+        reminder_ref = (
+            db.collection("quiz_notification_logs")
+            .document(uid)
+            .collection("reminders")
+            .document(reminder_id)
+        )
+
+        # A successful reminder must never be sent twice.
+        if reminder_ref.get().exists:
+            skipped += 1
+            continue
+
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                data={
+                    "type": "daily_quiz_reminder",
+                    "minutesBefore": str(minutes_before),
+                    "quizDate": quiz_date.isoformat(),
+                    "route": "/daily-quiz",
+                },
+                token=token,
+                android=messaging.AndroidConfig(
+                    priority="high"
+                ),
+            )
+
+            fcm_message_id = messaging.send(message)
+
+            reminder_ref.set({
+                "uid": uid,
+                "quizDate": quiz_date.isoformat(),
+                "minutesBefore": minutes_before,
+                "language": lang,
+                "sentAt": firestore.SERVER_TIMESTAMP,
+                "fcmMessageId": fcm_message_id,
+                "status": "sent",
+            })
+
+            sent += 1
+
+        except Exception as exc:
+            failed += 1
+            print(
+                "QUIZ REMINDER ERROR:",
+                uid,
+                minutes_before,
+                str(exc)
+            )
+
+            # Clear an invalid token.
+            if "Requested entity was not found" in str(exc):
+                db.collection("farmers").document(uid).update({
+                    "fcm_token": None
+                })
+
+    return {
+        "success": True,
+        "quizDate": quiz_date.isoformat(),
+        "minutesBefore": minutes_before,
+        "sent": sent,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
 # ============================================================
 # DAILY QUIZ QUESTION VALIDATION
 # ============================================================
@@ -16705,50 +16918,165 @@ def get_weather(lat, lon, lang="en"):
         return ""
 
 
+
 def get_ndvi(lat, lon, user_id=None, field_id="default"):
+    if not user_id:
+        return None
 
-    if user_id:
-        try:
-            doc = db.collection("fields")\
-                .document(user_id)\
-                .collection("user_fields")\
-                .document(field_id)\
-                .get()
+    try:
+        field_doc = (
+            db.collection("farmer_fields")
+            .document(field_id)
+            .get()
+        )
 
-            if doc.exists:
-                data = doc.to_dict()
-                if data.get("ndvi") is not None:
-                    return data.get("ndvi")
+        if field_doc.exists:
+            field_data = field_doc.to_dict() or {}
 
-        except Exception as e:
-            print("NDVI fetch error:", e)
+            if field_data.get("farmer_id") == user_id:
+                return field_data.get("ndvi")
+
+        # Legacy fallback for older field records.
+        legacy_doc = (
+            db.collection("fields")
+            .document(user_id)
+            .collection("user_fields")
+            .document(field_id)
+            .get()
+        )
+
+        if legacy_doc.exists:
+            return (legacy_doc.to_dict() or {}).get("ndvi")
+
+    except Exception as exc:
+        print("NDVI fetch error:", user_id, field_id, exc)
+
+    return None
+
 
 def get_users():
-
     users = db.collection("farmers").stream()
-
     data = []
 
-    for u in users:
-
-        d = u.to_dict()
+    for user_doc in users:
+        farmer = user_doc.to_dict() or {}
 
         data.append({
-            "id": u.id,
-            "token": d.get("fcm_token"),
-            "lat": d.get("lat"),
-            "lon": d.get("lon"),
-            "notifications_enabled": d.get(
-                "notifications_enabled",
-                True
+            "id": user_doc.id,
+            "token": farmer.get("fcm_token"),
+            "lat": farmer.get("lat"),
+            "lon": farmer.get("lon"),
+            "notifications_enabled": farmer.get(
+                "notifications_enabled", True
             ),
-            "field_id": d.get(
-                "field_id",
-                "default"
-            )
         })
 
     return data
+
+def get_farmer_notification_fields(user_id):
+    """
+    Fetch all fields owned by this farmer.
+    Never include another farmer's fields.
+    """
+
+    fields = []
+
+    try:
+        docs = (
+            db.collection("farmer_fields")
+            .where("farmer_id", "==", user_id)
+            .stream()
+        )
+
+        for doc in docs:
+            field = doc.to_dict() or {}
+
+            field_context = {
+                "field_id": doc.id,
+                "name": field.get("name", "Your field"),
+                "crop": (
+                    field.get("crop")
+                    or field.get("crop_name")
+                ),
+                "area": field.get("area"),
+                "growth_stage": (
+                    field.get("growth_stage")
+                    or field.get("cropStage")
+                    or field.get("growthStage")
+                ),
+                "sowing_date": (
+                    field.get("sowing_date")
+                    or field.get("planting_date")
+                ),
+                "expected_harvest_date": field.get(
+                    "expected_harvest_date"
+                ),
+                "ndvi": field.get("ndvi"),
+                "ndwi": field.get("ndwi"),
+                "savi": field.get("savi"),
+                "relative_wetness": field.get(
+                    "relative_wetness"
+                ),
+                "sar": field.get("sar"),
+            }
+
+            # Read recent crop diary entries.
+            diary_docs = (
+                doc.reference
+                .collection("crop_diary")
+                .stream()
+            )
+
+            diary_entries = []
+
+            for diary_doc in diary_docs:
+                entry = diary_doc.to_dict() or {}
+
+                diary_entries.append({
+                    "date": entry.get("date"),
+                    "activity": entry.get("activity"),
+                    "type": entry.get("type"),
+                    "cropStage": entry.get("cropStage"),
+                    "symptoms": entry.get("symptoms"),
+                    "irrigation": entry.get("irrigation"),
+                    "fertilizerType": entry.get(
+                        "fertilizerType"
+                    ),
+                    "notes": entry.get("notes"),
+                })
+
+            field_context["diary"] = diary_entries[-10:]
+
+            fields.append(field_context)
+
+    except Exception as e:
+        print(
+            "FARMER FIELD NOTIFICATION ERROR:",
+            user_id,
+            str(e)
+        )
+
+    return fields
+
+def get_notification_state(user_id):
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    today = now.strftime("%Y-%m-%d")
+
+    ref = db.collection("farmer_notification_state").document(user_id)
+    doc = ref.get()
+    state = doc.to_dict() or {}
+
+    # Reset daily counter when the date changes.
+    if state.get("date") != today:
+        state = {
+            "date": today,
+            "normal_sent_count": 0,
+        }
+        ref.set(state, merge=True)
+
+    return ref, state
+
+
 def get_scheme_alerts(user_id, lang="en"):
 
     alerts = []
@@ -16820,6 +17148,114 @@ def get_scheme_alerts(user_id, lang="en"):
 
     return alerts
 
+def get_farmer_notification_fields(user_id):
+    """
+    Fetch all fields owned by this farmer and their recent diary entries.
+    Uses the canonical farmer_fields collection.
+    """
+
+    fields = []
+
+    try:
+        docs = (
+            db.collection("farmer_fields")
+            .where("farmer_id", "==", user_id)
+            .stream()
+        )
+
+        for doc in docs:
+            field = doc.to_dict() or {}
+
+            field_data = {
+                "field_id": doc.id,
+                "name": field.get("name") or field.get("field_name") or "My Field",
+                "crop": field.get("crop") or field.get("crop_name"),
+                "growth_stage": (
+                    field.get("growth_stage")
+                    or field.get("growthStage")
+                    or field.get("crop_stage")
+                ),
+                "sowing_date": (
+                    field.get("sowing_date")
+                    or field.get("planting_date")
+                ),
+                "expected_harvest_date": field.get(
+                    "expected_harvest_date"
+                ),
+                "ndvi": field.get("ndvi"),
+                "ndwi": field.get("ndwi"),
+                "savi": field.get("savi"),
+                "relative_wetness": field.get("relative_wetness"),
+                "ndvi_history": field.get("ndvi_history") or [],
+                "diary_entries": [],
+            }
+
+            # Read recent diary entries.
+            try:
+                diary_docs = (
+                    db.collection("farmer_fields")
+                    .document(doc.id)
+                    .collection("crop_diary")
+                    .stream()
+                )
+
+                diary_entries = []
+
+                for diary_doc in diary_docs:
+                    entry = diary_doc.to_dict() or {}
+
+                    diary_entries.append({
+                        "date": entry.get("date"),
+                        "created_at": entry.get("created_at"),
+                        "activity": entry.get("activity") or entry.get("title"),
+                        "type": entry.get("type"),
+                        "symptoms": entry.get("symptoms"),
+                        "irrigation": entry.get("irrigation"),
+                        "notes": entry.get("notes"),
+                    })
+
+                # Sort newest first.
+                def diary_sort_key(entry):
+                    value = entry.get("created_at") or entry.get("date")
+
+                    if hasattr(value, "timestamp"):
+                        return value.timestamp()
+
+                    if isinstance(value, str):
+                        try:
+                            return datetime.fromisoformat(
+                                value.replace("Z", "+00:00")
+                            ).timestamp()
+                        except ValueError:
+                            pass
+
+                    return 0
+
+                diary_entries.sort(
+                    key=diary_sort_key,
+                    reverse=True,
+                )
+
+                field_data["diary_entries"] = diary_entries[:10]
+
+            except Exception as diary_error:
+                print(
+                    "Diary fetch failed:",
+                    doc.id,
+                    str(diary_error),
+                )
+
+            fields.append(field_data)
+
+    except Exception as e:
+        print(
+            "Farmer field fetch failed:",
+            user_id,
+            str(e),
+        )
+
+    return fields
+
 def build_24_notifications(
     lang,
     weather,
@@ -16829,681 +17265,280 @@ def build_24_notifications(
     forecast,
     news_list,
     market_price,
+    fields=None,
 ):
 
-    price = market_price
-
     alerts = []
+    fields = fields or []
+
+    now = datetime.now(IST)
 
     def t(en, bn, hi=None):
-
         if lang == "bn":
             return bn
-
-        elif lang == "hi":
+        if lang == "hi":
             return hi if hi else en
-
         return en
 
-    # ================= 1. 🌧 RAIN TIMING =================
-    for item in forecast.get("list", [])[:12]:
+    def add(title_en, title_bn, title_hi,
+            body_en, body_bn, body_hi):
 
-        cond = item.get(
-            "weather",
-            [{}]
-        )[0].get(
-            "main",
-            ""
-        ).lower()
+        alerts.append((
+            t(title_en, title_bn, title_hi),
+            t(body_en, body_bn, body_hi),
+        ))
 
-        if "rain" in cond:
+    def parse_date(value):
+        if isinstance(value, datetime):
+            return value.date()
 
-            ts = item.get("dt_txt")
+        if hasattr(value, "to_date"):
+            return value.to_date()
 
-            dt_utc = datetime.strptime(
-                ts,
-                "%Y-%m-%d %H:%M:%S"
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                ).date()
+            except ValueError:
+                return None
+
+        return None
+
+    # =====================================================
+    # 1. FIELD-SPECIFIC CROP INFORMATION
+    # =====================================================
+
+    for field in fields:
+
+        crop = field.get("crop") or "your crop"
+        field_name = field.get("name") or "your field"
+        stage = field.get("growth_stage")
+
+        # Expected harvest reminder.
+        harvest_date = parse_date(
+            field.get("expected_harvest_date")
+        )
+
+        if harvest_date:
+
+            days_left = (harvest_date - now.date()).days
+
+            if 0 <= days_left <= 7:
+
+                add(
+                    "🌾 Harvest Reminder",
+                    "🌾 ফসল কাটার অনুস্মারক",
+                    "🌾 कटाई अनुस्मारक",
+
+                    f"{crop} in {field_name} is approaching its expected harvest date ({days_left} days left).",
+                    f"{field_name}-এ {crop} কাটার সম্ভাব্য সময় আর {days_left} দিন। প্রস্তুতি নিন।",
+                    f"{field_name} में {crop} की अनुमानित कटाई में {days_left} दिन शेष हैं। तैयारी करें।",
+                )
+
+        # Growth-stage information.
+        if stage:
+
+            add(
+                "🌱 Crop Stage Update",
+                "🌱 ফসলের বৃদ্ধির পর্যায়",
+                "🌱 फसल विकास चरण",
+
+                f"Your {crop} in {field_name} is recorded at the {stage} stage.",
+                f"{field_name}-এ আপনার {crop} বর্তমানে {stage} পর্যায়ে রয়েছে।",
+                f"{field_name} में आपकी {crop} फसल अभी {stage} चरण में है।",
             )
 
-            dt_ist = dt_utc + timedelta(
-                hours=5,
-                minutes=30,
-            )
+        # NDVI trend: compare the latest two valid observations.
+        history = field.get("ndvi_history") or []
 
-            period = get_time_period(
-                dt_ist,
-                lang,
-            )
+        valid_history = []
 
-            time_str = dt_ist.strftime(
-                "%I:%M"
-            )
+        for item in history:
+            if not isinstance(item, dict):
+                continue
 
-            if lang == "bn":
+            value = item.get("ndvi")
 
-                time_str = to_bengali_number(
-                    time_str
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                valid_history.append(float(value))
+
+        if len(valid_history) >= 2:
+
+            previous_ndvi = valid_history[-2]
+            latest_ndvi = valid_history[-1]
+
+            change = latest_ndvi - previous_ndvi
+
+            if change <= -0.10:
+
+                add(
+                    "⚠️ Vegetation Decline",
+                    "⚠️ গাছপালার স্বাস্থ্য কমেছে",
+                    "⚠️ वनस्पति स्वास्थ्य में गिरावट",
+
+                    f"Satellite NDVI for {crop} in {field_name} has declined. Inspect the field for possible crop stress.",
+                    f"{field_name}-এ {crop}-এর স্যাটেলাইট NDVI কমেছে। জমিতে গিয়ে ফসলের অবস্থা পরীক্ষা করুন।",
+                    f"{field_name} में {crop} का सैटेलाइट NDVI घटा है। खेत में जाकर फसल की जांच करें।",
                 )
 
-            elif lang == "hi":
+            elif change >= 0.10:
 
-                time_str = to_hindi_number(
-                    time_str
+                add(
+                    "📈 Crop Growth Improving",
+                    "📈 ফসলের বৃদ্ধি উন্নত হচ্ছে",
+                    "📈 फसल की वृद्धि में सुधार",
+
+                    f"Satellite NDVI for {crop} in {field_name} has improved.",
+                    f"{field_name}-এ {crop}-এর স্যাটেলাইট NDVI উন্নত হয়েছে।",
+                    f"{field_name} में {crop} का सैटेलाइट NDVI बेहतर हुआ है।",
                 )
 
-            today = datetime.utcnow() + timedelta(
-                hours=5,
-                minutes=30,
-            )
+        # Crop diary symptoms.
+        diary = field.get("diary_entries") or []
 
-            if dt_ist.date() == today.date():
+        for entry in diary:
 
-                day_label = (
-                    "আজ"
-                    if lang == "bn"
-                    else "आज"
-                    if lang == "hi"
-                    else "Today"
+            symptoms = entry.get("symptoms")
+
+            if isinstance(symptoms, str) and symptoms.strip():
+
+                add(
+                    "🔎 Crop Observation",
+                    "🔎 ফসল পর্যবেক্ষণ",
+                    "🔎 फसल निरीक्षण",
+
+                    f"You recorded '{symptoms}' for {crop} in {field_name}. Review the field and update your crop diary.",
+                    f"{field_name}-এ {crop} সম্পর্কে '{symptoms}' লিখেছেন। জমি পরীক্ষা করে ডায়েরি আপডেট করুন।",
+                    f"{field_name} में {crop} के लिए आपने '{symptoms}' दर्ज किया है। खेत की जांच करें और डायरी अपडेट करें।",
                 )
-
-            elif dt_ist.date() == (
-                today + timedelta(days=1)
-            ).date():
-
-                day_label = (
-                    "আগামীকাল"
-                    if lang == "bn"
-                    else "कल"
-                    if lang == "hi"
-                    else "Tomorrow"
-                )
-
-            else:
-
-                day_label = (
-                    to_bengali_number(
-                        dt_ist.strftime(
-                            "%d %b"
-                        )
-                    )
-
-                    if lang == "bn"
-
-                    else to_hindi_number(
-                        dt_ist.strftime(
-                            "%d %b"
-                        )
-                    )
-
-                    if lang == "hi"
-
-                    else dt_ist.strftime(
-                        "%d %b"
-                    )
-                )
-
-            alerts.append((
-
-                t(
-                    "🌧 Rain Alert",
-                    "🌧 বৃষ্টি সতর্কতা",
-                    "🌧 बारिश चेतावनी"
-                ),
-
-                t(
-                    f"Rain expected {day_label} {period} around {time_str}",
-                    f"{day_label} {period} {time_str} বৃষ্টি হওয়ার সম্ভাবনা আছে",
-                    f"{day_label} {period} लगभग {time_str} बजे बारिश की संभावना है"
-                )
-            ))
-
-            break
-
-    # ================= 2. 🚨 NDVI / CROP =================
-    if ndvi is not None:
-
-        if ndvi < 0.3:
-
-            alerts.append((
-
-                t(
-                    "🚨 Crop Critical",
-                    "🚨 ফসল ঝুঁকিপূর্ণ",
-                    "🚨 फसल संकट"
-                ),
-
-                t(
-                    "Very low vegetation health",
-                    "ফসলের অবস্থা খুব খারাপ",
-                    "फसल की स्थिति बहुत खराब है"
-                )
-            ))
-
-        elif ndvi < 0.5:
-
-            alerts.append((
-
-                t(
-                    "⚠️ Crop Moderate",
-                    "⚠️ মাঝারি ফসল",
-                    "⚠️ मध्यम फसल"
-                ),
-
-                t(
-                    "Moderate crop condition",
-                    "ফসলের অবস্থা মাঝারি",
-                    "फसल की स्थिति मध्यम है"
-                )
-            ))
-
-        else:
-
-            alerts.append((
-
-                t(
-                    "✅ Healthy Crop",
-                    "✅ ভালো ফসল",
-                    "✅ स्वस्थ फसल"
-                ),
-
-                t(
-                    "Crop health is good",
-                    "ফসলের অবস্থা ভালো",
-                    "फसल की स्थिति अच्छी है"
-                )
-            ))
-
-    # ================= 3. 💧 IRRIGATION =================
-    rain_soon = False
-
-    for item in forecast.get("list", [])[:12]:
-
-        cond = item.get(
-            "weather",
-            [{}]
-        )[0].get(
-            "main",
-            ""
-        ).lower()
-
-        if "rain" in cond:
-
-            ts = item.get("dt_txt")
-
-            dt_utc = datetime.strptime(
-                ts,
-                "%Y-%m-%d %H:%M:%S"
-            )
-
-            dt_ist = dt_utc + timedelta(
-                hours=5,
-                minutes=30,
-            )
-
-            now_ist = datetime.utcnow() + timedelta(
-                hours=5,
-                minutes=30,
-            )
-
-            if dt_ist <= now_ist + timedelta(hours=6):
-
-                rain_soon = True
 
                 break
 
-    irrigation = get_irrigation(
-        temp,
-        humidity,
-        ndvi,
-    )
+    # =====================================================
+    # 2. WEATHER ALERT
+    # =====================================================
 
-    if irrigation is not None:
+    forecast_items = forecast.get("list", []) if isinstance(
+        forecast, dict
+    ) else []
 
-        irrigation_val = round(
-            float(irrigation),
-            1,
+    for item in forecast_items[:12]:
+
+        weather_items = item.get("weather") or [{}]
+        condition = str(
+            weather_items[0].get("main", "")
+        ).lower()
+
+        if "rain" not in condition:
+            continue
+
+        timestamp = item.get("dt")
+
+        if timestamp:
+            rain_time = datetime.fromtimestamp(
+                timestamp,
+                tz=timezone.utc,
+            ).astimezone(IST)
+
+            time_text = rain_time.strftime("%d %b, %I:%M %p")
+
+            add(
+                "🌧 Rain Forecast",
+                "🌧 বৃষ্টির পূর্বাভাস",
+                "🌧 बारिश का पूर्वानुमान",
+
+                f"Rain is forecast around {time_text}. Check your field conditions.",
+                f"{time_text}-এর দিকে বৃষ্টির পূর্বাভাস রয়েছে। জমির অবস্থা পরীক্ষা করুন।",
+                f"{time_text} के आसपास बारिश का पूर्वानुमान है। खेत की स्थिति जांचें।",
+            )
+
+        break
+
+    # =====================================================
+    # 3. TEMPERATURE INFORMATION
+    # =====================================================
+
+    if isinstance(temp, (int, float)) and temp >= 35:
+
+        add(
+            "🌡 High Temperature",
+            "🌡 উচ্চ তাপমাত্রা",
+            "🌡 अधिक तापमान",
+
+            f"Temperature is currently {temp:.1f}°C. Monitor your crops for heat stress.",
+            f"বর্তমান তাপমাত্রা {temp:.1f}°C। ফসলে অতিরিক্ত গরমের প্রভাব পরীক্ষা করুন।",
+            f"वर्तमान तापमान {temp:.1f}°C है। फसल में गर्मी के प्रभाव की जांच करें।",
         )
 
-        if rain_soon:
+    # =====================================================
+    # 4. MARKET INFORMATION
+    # =====================================================
 
-            en_msg = (
-                "Rain expected soon → skip irrigation"
+    if market_price:
+
+        price_text = None
+
+        if isinstance(market_price, str):
+            price_text = market_price
+
+        elif isinstance(market_price, dict):
+            price_text = (
+                market_price.get("message")
+                or market_price.get("summary")
             )
 
-            bn_msg = (
-                "শীঘ্রই বৃষ্টি হবে → সেচ বন্ধ রাখুন"
+        if price_text:
+
+            add(
+                "💰 Market Price Update",
+                "💰 বাজারদরের আপডেট",
+                "💰 बाजार मूल्य अपडेट",
+
+                str(price_text),
+                str(price_text),
+                str(price_text),
             )
 
-            hi_msg = (
-                "जल्द बारिश होगी → सिंचाई रोकें"
-            )
+    # =====================================================
+    # 5. AGRICULTURAL NEWS
+    # =====================================================
 
-        elif irrigation_val < 5:
+    if isinstance(news_list, list):
 
-            en_msg = (
-                "No irrigation needed"
-            )
+        for news in news_list[:1]:
 
-            bn_msg = (
-                "এখন সেচ প্রয়োজন নেই"
-            )
+            if isinstance(news, str) and news.strip():
 
-            hi_msg = (
-                "अभी सिंचाई की आवश्यकता नहीं है"
-            )
+                add(
+                    "📰 Agriculture Update",
+                    "📰 কৃষি আপডেট",
+                    "📰 कृषि अपडेट",
 
-        elif irrigation_val < 15:
-
-            en_msg = (
-                f"Light irrigation: {irrigation_val} mm"
-            )
-
-            bn_msg = (
-                f"হালকা জলসেচ করুন: {irrigation_val} মিমি"
-            )
-
-            hi_msg = (
-                f"हल्की सिंचाई करें: {irrigation_val} मिमी"
-            )
-
-        else:
-
-            en_msg = (
-                f"Apply irrigation: {irrigation_val} mm"
-            )
-
-            bn_msg = (
-                f"{irrigation_val} মিমি জলসেচ করুন"
-            )
-
-            hi_msg = (
-                f"{irrigation_val} मिमी सिंचाई करें"
-            )
-
-        if lang == "bn":
-
-            irrigation_str = to_bengali_number(
-                str(irrigation_val)
-            )
-
-            bn_msg = bn_msg.replace(
-                str(irrigation_val),
-                irrigation_str,
-            )
-
-        elif lang == "hi":
-
-            irrigation_str = to_hindi_number(
-                str(irrigation_val)
-            )
-
-            hi_msg = hi_msg.replace(
-                str(irrigation_val),
-                irrigation_str,
-            )
-
-        alerts.append((
-
-            t(
-                "💧 Irrigation Advice",
-                "💧 সেচ পরামর্শ",
-                "💧 सिंचाई सलाह"
-            ),
-
-            t(
-                en_msg,
-                bn_msg,
-                hi_msg,
-            )
-        ))
-
-    # ================= 4. 🌾 YIELD =================
-    if ndvi is not None:
-
-        yield_est = get_yield_prediction(
-            ndvi,
-            temp,
-            60,
-        )
-
-        if yield_est is not None:
-
-            y = round(
-                float(yield_est),
-                2,
-            )
-
-            if y < 2:
-
-                en_msg = (
-                    f"Low yield expected: {y} t/ha"
+                    news,
+                    news,
+                    news,
                 )
 
-                bn_msg = (
-                    f"কম ফলনের সম্ভাবনা: {y} টন/হেক্টর"
-                )
+    # =====================================================
+    # 6. REMOVE DUPLICATES
+    # =====================================================
 
-                hi_msg = (
-                    f"कम उत्पादन की संभावना: {y} टन/हेक्टेयर"
-                )
+    unique_alerts = []
+    seen = set()
 
-            elif y < 4:
+    for title, body in alerts:
 
-                en_msg = (
-                    f"Moderate yield expected: {y} t/ha"
-                )
+        key = (title.strip(), body.strip())
 
-                bn_msg = (
-                    f"মাঝারি ফলনের সম্ভাবনা: {y} টন/হেক্টর"
-                )
+        if key not in seen:
+            seen.add(key)
+            unique_alerts.append((title, body))
 
-                hi_msg = (
-                    f"मध्यम उत्पादन की संभावना: {y} टन/हेक्टेयर"
-                )
-
-            else:
-
-                en_msg = (
-                    f"Good yield expected: {y} t/ha"
-                )
-
-                bn_msg = (
-                    f"ভালো ফলনের সম্ভাবনা: {y} টন/হেক্টর"
-                )
-
-                hi_msg = (
-                    f"अच्छे उत्पादन की संभावना: {y} टन/हेक्टेयर"
-                )
-
-        alerts.append((
-
-            t(
-                "🌾 Yield Forecast",
-                "🌾 ফলন পূর্বাভাস",
-                "🌾 उत्पादन पूर्वानुमान"
-            ),
-
-            t(
-                en_msg,
-                bn_msg,
-                hi_msg,
-            )
-        ))
-
-   
-
-        temp_str = str(temp)
-
-        if lang == "bn":
-
-            temp_str = to_bengali_number(
-                temp_str
-            )
-        elif lang == "hi":
-
-            temp_str = to_hindi_number(
-                temp_str
-            )
-
-        weather_msg = (
-            f"{weather}, {temp_str}°C"
-        )
-
-        alerts.append((
-
-            t(
-                "🌤 Weather Update",
-                "🌤 আবহাওয়ার আপডেট",
-                "🌤 मौसम अपडेट"
-            ),
-
-            weather_msg
-        ))
-            
-
-
-    alerts.append((
-
-        t(
-            "🌙 Tomorrow Planning",
-            "🌙 আগামী দিনের পরিকল্পনা",
-            "🌙 कल की योजना"
-        ),
-
-        t(
-            "Prepare for tomorrow farming",
-            "আগামীকালের কৃষিকাজের জন্য প্রস্তুতি নিন",
-            "कल की खेती की तैयारी करें"
-        )
-    ))
-
-    # ================= 6. 💰 MARKET =================
-
-    
-    
-    if price:
-
-        if lang == "bn":
-
-            price = to_bengali_number(
-                str(price)
-            )
-
-        elif lang == "hi":
-
-            price = to_hindi_number(
-                str(price)
-            )
-
-            alerts.append((
-
-                t(
-                    "💰 Market Price",
-                    "💰 বাজার মূল্য",
-                    "💰 बाजार मूल्य"
-                ),
-
-                price
-            ))
-
-        alerts.append((
-
-            t(
-                "📈 Sell Opportunity",
-                "📈 বিক্রির সুযোগ",
-                "📈 बिक्री का अवसर"
-            ),
-
-            t(
-                "Prices may increase today",
-                "আজ দাম বাড়তে পারে",
-                "आज कीमत बढ़ सकती है"
-            )
-        ))
-
-    # ================= 7. 📰 NEWS =================
-    if news_list:
-
-        for n in news_list[:2]:
-
-            alerts.append((
-
-                t(
-                    "📰 Agri News",
-                    "📰 কৃষি সংবাদ",
-                    "📰 कृषि समाचार"
-                ),
-
-                n
-            ))
-
-    else:
-
-        alerts.append((
-
-            t(
-                "📰 Agri News",
-                "📰 কৃষি সংবাদ",
-                "📰 कृषि समाचार"
-            ),
-
-            t(
-                "Latest farming updates available",
-                "নতুন কৃষি সংবাদ দেখুন",
-                "नई कृषि जानकारी देखें"
-            )
-        ))
-
-    # ================= 8. 🚨 STRESS =================
-    if ndvi is not None and temp is not None:
-
-        if ndvi < 0.4 and temp > 30:
-
-            alerts.append((
-
-                t(
-                    "🚨 Crop Stress",
-                    "🚨 ফসলের চাপ",
-                    "🚨 फसल तनाव"
-                ),
-
-                t(
-                    "Low NDVI + high temp → irrigate today",
-                    "কম NDVI + বেশি তাপ → আজই জলসেচ করুন",
-                    "कम NDVI + अधिक तापमान → आज सिंचाई करें"
-                )
-            ))
-
-    # ================= 9. 📊 ENGAGEMENT =================
-    alerts += [
-
-        (
-            t(
-                "📊 NDVI Check",
-                "📊 NDVI চেক করুন",
-                "📊 NDVI जांचें"
-            ),
-
-            t(
-                "See your crop health map",
-                "আপনার জমির অবস্থা দেখুন",
-                "अपनी फसल की स्थिति देखें"
-            )
-        ),
-
-        (
-            t(
-                "📱 Open App",
-                "📱 অ্যাপ খুলুন",
-                "📱 ऐप खोलें"
-            ),
-
-            t(
-                "Check farm insights now",
-                "এখনই ফসলের তথ্য দেখুন",
-                "अभी खेती की जानकारी देखें"
-            )
-        ),
-
-        (
-            t(
-                "🧠 Smart Tip",
-                "🧠 স্মার্ট পরামর্শ",
-                "🧠 स्मार्ट सलाह"
-            ),
-
-            t(
-                "AI can improve your yield",
-                "AI ব্যবহার করে ফলন বাড়ান",
-                "AI से उत्पादन बढ़ाएं"
-            )
-        ),
-    ]
-
-    # ================= 10. 🌱 TIPS =================
-    tips = [
-
-        (
-            "Monitor crop daily",
-            "নিয়মিত ফসল দেখুন",
-            "फसल की नियमित निगरानी करें"
-        ),
-
-        (
-            "Check soil moisture",
-            "মাটির আর্দ্রতা পরীক্ষা করুন",
-            "मिट्टी की नमी जांचें"
-        ),
-
-        (
-            "Apply fertilizer if needed",
-            "প্রয়োজনে সার দিন",
-            "जरूरत होने पर उर्वरक दें"
-        ),
-
-        (
-            "Check pest attack",
-            "পোকামাকড় দেখুন",
-            "कीट आक्रमण जांचें"
-        ),
-
-        (
-            "Update farm diary",
-            "ফার্ম ডায়েরি আপডেট করুন",
-            "फार्म डायरी अपडेट करें"
-        ),
-
-        (
-            "Use satellite insights",
-            "স্যাটেলাইট ডাটা ব্যবহার করুন",
-            "सैटेलाइट डेटा का उपयोग करें"
-        ),
-    ]
-
-    for en, bn, hi in tips:
-
-        alerts.append((
-
-            t(
-                "🌱 Tip",
-                "🌱 পরামর্শ",
-                "🌱 सलाह"
-            ),
-
-            t(
-                en,
-                bn,
-                hi,
-            )
-        ))
-
-    # ================= 11. FILL TO 24 =================
-    i = 0
-
-    while len(alerts) < 24:
-
-        en, bn, hi = tips[
-            i % len(tips)
-        ]
-
-        alerts.append((
-
-            t(
-                "🌱 Tip",
-                "🌱 পরামর্শ",
-                "🌱 सलाह"
-            ),
-
-            t(
-                en,
-                bn,
-                hi,
-            )
-        ))
-
-        i += 1
-
-    return alerts[:24]
+    return unique_alerts
 
 @app.get("/get-ndvi")
 def get_ndvi_value(user_id: str, field_id: str):
@@ -17529,257 +17564,521 @@ def get_ndvi_value(user_id: str, field_id: str):
         return {"ndvi": None}
 
 
-    
-    
+
+IST = ZoneInfo("Asia/Kolkata")
+
+NORMAL_DAILY_NOTIFICATION_LIMIT = 3
+URGENT_WEATHER_COOLDOWN_HOURS = 3
+NORMAL_NOTIFICATION_COOLDOWN_MINUTES = 55
+
+def is_urgent_weather_forecast(forecast):
+    """
+    Detect potentially severe forecast conditions using
+    OpenWeatherMap weather condition IDs.
+
+    This is an application-level heuristic, not an
+    official meteorological warning.
+    """
+
+    if not isinstance(forecast, dict):
+        return False
+
+    items = forecast.get("list", [])
+
+    for item in items[:12]:
+
+        weather_items = item.get("weather") or []
+
+        if not weather_items:
+            continue
+
+        weather_id = weather_items[0].get("id")
+
+        if not isinstance(weather_id, int):
+            continue
+
+        # Thunderstorm conditions: 200–232
+        if 200 <= weather_id <= 232:
+            return True
+
+        # Heavy rain conditions
+        if weather_id in (502, 503, 504, 522):
+            return True
+
+    return False
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import secrets
+
+IST = ZoneInfo("Asia/Kolkata")
+NORMAL_DAILY_NOTIFICATION_LIMIT = 3
+URGENT_WEATHER_COOLDOWN_HOURS = 3
+NOTIFICATION_LOCK_MINUTES = 2
+
+
+def claim_notification_slot(user_id: str, notification_type: str, now: datetime):
+    """
+    Reserve one notification send slot.
+    notification_type: 'normal' or 'urgent_weather'
+    """
+    state_ref = db.collection("farmer_notification_state").document(user_id)
+    transaction = db.transaction()
+    reservation_id = secrets.token_urlsafe(16)
+
+    @firestore.transactional
+    def claim(transaction):
+        snapshot = state_ref.get(transaction=transaction)
+        state = snapshot.to_dict() or {}
+
+        today = now.astimezone(IST).strftime("%Y-%m-%d")
+
+        # Reset only the daily counter. Preserve urgent-weather history.
+        normal_count = (
+            int(state.get("normal_sent_count", 0) or 0)
+            if state.get("date") == today else 0
+        )
+
+        # Prevent concurrent sends for the same farmer.
+        lock_until_raw = state.get("send_lock_until")
+        if lock_until_raw:
+            try:
+                lock_until = datetime.fromisoformat(lock_until_raw)
+                if lock_until.tzinfo is None:
+                    lock_until = lock_until.replace(tzinfo=IST)
+
+                if lock_until > now:
+                    return None
+            except (TypeError, ValueError):
+                pass
+
+        if notification_type == "normal":
+            if normal_count >= NORMAL_DAILY_NOTIFICATION_LIMIT:
+                return None
+
+        elif notification_type == "urgent_weather":
+            last_urgent_raw = state.get("last_urgent_weather")
+
+            if last_urgent_raw:
+                try:
+                    last_urgent = datetime.fromisoformat(last_urgent_raw)
+                    if last_urgent.tzinfo is None:
+                        last_urgent = last_urgent.replace(tzinfo=IST)
+
+                    if now - last_urgent < timedelta(
+                        hours=URGENT_WEATHER_COOLDOWN_HOURS
+                    ):
+                        return None
+                except (TypeError, ValueError):
+                    pass
+        else:
+            return None
+
+        transaction.set(state_ref, {
+            "date": today,
+            "normal_sent_count": normal_count,
+            "send_lock_id": reservation_id,
+            "send_lock_until": (
+                now + timedelta(minutes=NOTIFICATION_LOCK_MINUTES)
+            ).isoformat(),
+            "pending_notification_type": notification_type,
+        }, merge=True)
+
+        return reservation_id
+
+    return claim(transaction)
+
+
+def complete_notification_slot(
+    user_id: str,
+    reservation_id: str,
+    notification_type: str,
+    now: datetime,
+    title: str,
+    body: str,
+    last_index=None,
+    ndvi=None,
+):
+    state_ref = db.collection("farmer_notification_state").document(user_id)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def complete(transaction):
+        snapshot = state_ref.get(transaction=transaction)
+        state = snapshot.to_dict() or {}
+
+        # Only the process holding this lock can finalize it.
+        if state.get("send_lock_id") != reservation_id:
+            return False
+
+        today = now.astimezone(IST).strftime("%Y-%m-%d")
+        count = (
+            int(state.get("normal_sent_count", 0) or 0)
+            if state.get("date") == today else 0
+        )
+
+        update = {
+            "date": today,
+            "last_sent": now.isoformat(),
+            "last_alert_title": title,
+            "last_alert_body": body,
+            "send_lock_id": None,
+            "send_lock_until": None,
+            "pending_notification_type": None,
+        }
+
+        if notification_type == "normal":
+            update["normal_sent_count"] = count + 1
+
+        elif notification_type == "urgent_weather":
+            update["last_urgent_weather"] = now.isoformat()
+
+        if last_index is not None:
+            update["last_index"] = last_index
+
+        if ndvi is not None:
+            update["ndvi"] = ndvi
+
+        transaction.set(state_ref, update, merge=True)
+        return True
+
+    return complete(transaction)
+
+
+def release_notification_slot(user_id: str, reservation_id: str):
+    """Release the lock if FCM sending fails."""
+    state_ref = db.collection("farmer_notification_state").document(user_id)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def release(transaction):
+        snapshot = state_ref.get(transaction=transaction)
+        state = snapshot.to_dict() or {}
+
+        if state.get("send_lock_id") != reservation_id:
+            return
+
+        transaction.set(state_ref, {
+            "send_lock_id": None,
+            "send_lock_until": None,
+            "pending_notification_type": None,
+        }, merge=True)
+
+    release(transaction)
+
 
 @app.post("/smart-alerts")
 def smart_alerts(data: dict):
 
     users = get_users()
+
     print("TOTAL USERS:", len(users))
 
-    valid_tokens = sum(
-        1 for u in users
-        if u.get("token")
-    )
-
+    valid_tokens = sum(1 for u in users if u.get("token"))
     print("USERS WITH TOKENS:", valid_tokens)
-    print(users)
+
     sent = 0
-    print("TOTAL USERS:", len(users))
-    #print("USER:", user_id, lat, lon, token)
+    skipped = 0
+
     market_cache = get_market_price()
-    
+    news_cache_by_language = {}
+
     for u in users:
+
+        user_id = None
+        token = None
+
         try:
-            d = u
-            print("USER DATA:", u)
             user_id = (
                 u.get("id")
                 or u.get("user_id")
                 or u.get("uid")
             )
-            notifications_enabled = d.get(
-                "notifications_enabled",
-                True,
-            )
 
             if not user_id:
+                skipped += 1
                 continue
 
-            if not notifications_enabled:
+            if not u.get("notifications_enabled", True):
+                skipped += 1
                 continue
 
-            if not notifications_enabled:
-                continue
-            #print("❌ Missing user_id → skip")
-           # continue
-            lang = get_user_lang(user_id)
-            print(
-                "USER:",
-                user_id,
-                "LANG:",
-                lang,
-            )
-            
-            news_cache = get_agri_news(lang)
-
-            lat = u.get("lat")
-            lon = u.get("lon")
             token = (
                 u.get("token")
                 or u.get("fcm_token")
                 or u.get("device_token")
-            
             )
-            print(
-                "TOKEN EXISTS:",
-                bool(token)
-            )
-            # 🔥 HARD FILTER
+
             if not token:
-
-                print("❌ Missing token")
-
+                skipped += 1
                 continue
 
-            if lat is None or lon is None:
+            now = datetime.now(IST)
+            current_hour = now.hour
+            today = now.strftime("%Y-%m-%d")
 
-                print("⚠️ Missing lat/lon")
+            # No normal notifications between midnight and 4 AM.
+            if current_hour < 4:
+                skipped += 1
+                continue
 
-                weather = ""
-                temp = 30
-                humidity = 60
-                forecast = {}
-                ndvi = None
+            # ================= LANGUAGE =================
 
-            else:
+            lang = get_user_lang(user_id)
 
-                now = datetime.utcnow() + timedelta(hours=5, minutes=30)  # convert to IST
-                hour = now.hour
+            if lang not in news_cache_by_language:
+                news_cache_by_language[lang] = get_agri_news(lang)
 
-            # ================= WEATHER =================
-            key = os.getenv("OPENWEATHER_API_KEY")
+            news_cache = news_cache_by_language[lang]
+
+            # ================= WEATHER INPUTS =================
+
+            lat = u.get("lat")
+            lon = u.get("lon")
 
             weather = ""
             temp = None
             humidity = None
+            forecast = {}
+            ndvi = None
 
-            try:
-                weather_res = requests.get(
-                    f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric",
-                    timeout=5
-                ).json()
+            key = os.getenv("OPENWEATHER_API_KEY")
 
-                weather = weather_res.get("weather", [{}])[0].get("main", "").lower()
-                temp = weather_res.get("main", {}).get("temp")
-                humidity = weather_res.get("main", {}).get("humidity")
+            if lat is not None and lon is not None and key:
 
-            except Exception as e:
-                print("Weather error:", e)
+                # Current weather
+                try:
+                    weather_res = requests.get(
+                        "https://api.openweathermap.org/data/2.5/weather",
+                        params={
+                            "lat": lat,
+                            "lon": lon,
+                            "appid": key,
+                            "units": "metric",
+                        },
+                        timeout=8,
+                    )
 
-            # ================= NDVI =================
-            try:
-                field_id = u.get("field_id", "default")
-                ndvi = get_ndvi(lat, lon, user_id, field_id)
-            except:
-                ndvi = None
+                    weather_res.raise_for_status()
+                    weather_data = weather_res.json()
 
-            # ================= FORECAST =================
-            forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={key}&units=metric"
-            try:
-                forecast = requests.get(forecast_url, timeout=3).json()
-            except:
-                forecast = {}
+                    weather = (
+                        weather_data.get("weather", [{}])[0]
+                        .get("main", "")
+                        .lower()
+                    )
 
-            # ================= ALERTS =================
+                    temp = weather_data.get("main", {}).get("temp")
+                    humidity = weather_data.get("main", {}).get("humidity")
+
+                except Exception as e:
+                    print("Weather fetch failed:", str(e))
+
+                # Forecast
+                try:
+                    forecast_res = requests.get(
+                        "https://api.openweathermap.org/data/2.5/forecast",
+                        params={
+                            "lat": lat,
+                            "lon": lon,
+                            "appid": key,
+                            "units": "metric",
+                        },
+                        timeout=8,
+                    )
+
+                    forecast_res.raise_for_status()
+                    forecast = forecast_res.json()
+
+                except Exception as e:
+                    print("Forecast fetch failed:", str(e))
+
+                # NDVI
+                try:
+                    field_id = u.get("field_id", "default")
+                    ndvi = get_ndvi(
+                        lat,
+                        lon,
+                        user_id,
+                        field_id,
+                    )
+                except Exception as e:
+                    print("NDVI fetch failed:", str(e))
+
+            # ================= BUILD ALERTS =================
+
+            farmer_fields = get_farmer_notification_fields(user_id)
+
             alerts = build_24_notifications(
-                lang, weather, temp, humidity, ndvi, forecast, news_cache, market_cache
+                lang,
+                weather,
+                temp,
+                humidity,
+                ndvi,
+                forecast,
+                news_cache,
+                market_cache,
+                fields=farmer_fields,
             )
+
             scheme_alerts = get_scheme_alerts(
                 user_id,
                 lang,
             )
 
-            alerts.extend(
-                scheme_alerts
-            )
+            if scheme_alerts:
+                alerts.extend(scheme_alerts)
 
-            # ================= COOLDOWN =================
-            user_ref = db.collection("alerts_state").document(token)
-            prev = user_ref.get().to_dict() or {}
-
-            now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-            last_sent = prev.get("last_sent")
-
-            if last_sent:
-                last_time = datetime.fromisoformat(last_sent)
-                if now - last_time < timedelta(minutes=55):
-                    print("⛔ Cooldown active → skip user")
-                    continue
-
-            # ================= SEND =================
             if not alerts:
+                skipped += 1
                 continue
 
-            # 12 AM – 4 AM window
-            if hour < 4:
-                continue
+            # ================= NOTIFICATION STATE =================
 
-            prev_index = prev.get("last_index", -1)
+      
 
-            import random
+            state_ref = db.collection(
+                "farmer_notification_state"
+            ).document(user_id)
 
-# 🔥 ROTATION LOGIC
-            index = (prev_index + 1) % len(alerts)
+            state_doc = state_ref.get()
+            state = state_doc.to_dict() or {}
 
-# 🔥 RANDOM BOOST (30%)
-            if random.random() < 0.3:
-                index = random.randint(0, len(alerts) - 1)
+# ================= SELECT ALERT =================
 
-# 🔥 PRIORITY OVERRIDE
-            priority = [
-
+            valid_alerts = [
                 a for a in alerts
+                if isinstance(a, (list, tuple))
+                and len(a) >= 2
+                and a[0]
+                and a[1]
+            ]
 
-                if (
-                    "Rain" in a[0]
-                    or "বৃষ্টি" in a[0]
-                    or "बारिश" in a[0]
+            if not valid_alerts:
+                skipped += 1
+                continue
+
+            rain_alerts = [
+                a for a in valid_alerts
+                if any(
+                    word in str(a[0]).lower()
+                    for word in ["rain", "বৃষ্টি", "बारिश"]
                 )
             ]
-            last_rain = prev.get("last_rain")
-            last_rain_time = prev.get("last_rain_time")
 
-            send_rain = False
+            urgent_weather = is_urgent_weather_forecast(forecast)
 
-# 🔥 check if new rain alert
-            if priority:
-                current_rain = priority[0][1]
+            selected_alert = None
+            send_urgent = False
+            index = None
 
-                if current_rain != last_rain:
-                    send_rain = True
+# Urgent weather takes priority.
+            if urgent_weather and rain_alerts:
+                selected_alert = rain_alerts[0]
+                send_urgent = True
 
-# 🔥 cooldown (3 hours)
-            if last_rain_time:
-                try:
-                    last_time = datetime.fromisoformat(last_rain_time)
-                    if now - last_time < timedelta(hours=3):
-                        send_rain = False
-                except:
-                    pass
-
-# 🔥 FINAL DECISION
-            if send_rain:
-                title, body = priority[0]
             else:
-                title, body = alerts[index]
+                last_index = int(state.get("last_index", -1))
+                index = (last_index + 1) % len(valid_alerts)
+                selected_alert = valid_alerts[index]
 
-# 🔥 SEND
+            title, body = selected_alert[0], selected_alert[1]
+
+# ================= RESERVE NOTIFICATION SLOT =================
+
+            notification_type = (
+                "urgent_weather" if send_urgent else "normal"
+            )
+
+            reservation_id = claim_notification_slot(
+                user_id=user_id,
+                notification_type=notification_type,
+                now=now,
+            )
+
+            if not reservation_id:
+                skipped += 1
+                continue
+
+           # ================= SEND FCM =================
+
             message = messaging.Message(
-                
                 notification=messaging.Notification(
-                    title=title,
-                    body=body,
+                    title=str(title),
+                    body=str(body),
                 ),
+                data={
+                    "type": (
+                        "urgent_weather"
+                        if send_urgent
+                        else "normal"
+                    ),
+                    "source": "smart_alerts",
+                },
                 token=token,
             )
 
-            messaging.send(message)
-            print("✅ SENT TO:", user_id)
+            try:
+                fcm_message_id = messaging.send(message)
+
+            except Exception:
+                release_notification_slot(
+                    user_id,
+                    reservation_id,
+                )
+                raise
+
+# ================= COMPLETE NOTIFICATION STATE =================
+
+            completed = complete_notification_slot(
+                user_id=user_id,
+                reservation_id=reservation_id,
+                notification_type=notification_type,
+                now=datetime.now(IST),
+                title=str(title),
+                body=str(body),
+                last_index=index,
+                ndvi=ndvi,
+            )
+
+            if not completed:
+                print(
+                    "WARNING: Notification sent but state lock "
+                    "was not finalized:",
+                    user_id,
+                )
+
             sent += 1
 
-# 🔥 SAVE STATE
-            save_data = {
-                "ndvi": ndvi,
-                "last_sent": now.isoformat(),
-                "last_index": index
-}
-
-            # 🔥 save rain memory
-            if send_rain:
-                save_data["last_rain"] = current_rain
-                save_data["last_rain_time"] = now.isoformat()
-
-            user_ref.set(save_data, merge=True)
-
-            # ================= SAVE =================
+            print(
+                "NOTIFICATION SENT:",
+                user_id,
+                "TYPE:",
+                notification_type,
+                "FCM ID:",
+                fcm_message_id,
+            )
 
         except Exception as e:
-            print("FAILED USER:", user_id)
-            print("TOKEN:", token)
-            print("ERROR:", str(e))
 
-            import traceback
+            skipped += 1
 
-            print("❌ Error:", e)
+            print(
+                "SMART ALERT FAILED:",
+                user_id,
+                "ERROR:",
+                str(e),
+            )
 
             traceback.print_exc()
 
             continue
 
-    return {"sent": sent}
-
+    return {
+        "sent": sent,
+        "skipped": skipped,
+        "total_users": len(users),
+    }
 # ===================== DELETE ACCOUNT =====================
 
 def _delete_document_tree(document_ref):
