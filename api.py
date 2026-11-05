@@ -42,6 +42,9 @@ from firebase_admin import (
     messaging,
     app_check,
 )
+import threading
+import time as _time
+from fastapi import Query
 from fastapi import Header
 from zoneinfo import ZoneInfo
 from deep_translator import GoogleTranslator
@@ -2552,7 +2555,7 @@ QUIZ_START_HOUR = 20
 QUIZ_START_MINUTE = 0
 
 QUIZ_TOTAL_QUESTIONS = 10
-QUIZ_QUESTION_DURATION = 16
+QUIZ_QUESTION_DURATION = 15
 QUIZ_POINTS_PER_CORRECT_ANSWER = 2
 
 # ============================================================
@@ -3185,15 +3188,52 @@ def submit_practice_quiz_answer(
         if attempt.get("userId") != uid:
             raise HTTPException(status_code=403, detail="Access denied")
 
-        if attempt.get("status") != "in_progress":
-            raise HTTPException(status_code=400, detail="Quiz already completed")
+        answers = attempt.get("answers", [])
+        expected_index = int(attempt.get("answeredCount", 0) or 0)
+        total_questions = int(
+            attempt.get("totalQuestions", 0) or 0
+        )
 
-        expected_index = attempt.get("answeredCount", 0)
+# Handle retries without awarding points twice.
+        if 0 <= request.questionIndex < len(answers):
+            previous = answers[request.questionIndex] or {}
+
+            if previous.get("selectedOptionId") != request.selectedOptionId:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A different answer was already recorded for this question.",
+                )
+
+            return {
+                "success": True,
+                "alreadySubmitted": True,
+                "isCorrect": bool(previous.get("isCorrect", False)),
+                "correctOptionId": previous.get("correctOptionId"),
+                "explanation": "",
+                "pointsAwarded": int(
+                    previous.get("pointsAwarded", 0) or 0
+                ),
+                "score": int(attempt.get("score", 0) or 0),
+                "answeredCount": expected_index,
+                "totalQuestions": total_questions,
+                "completed": attempt.get("status") == "completed",
+                "nextQuestionIndex": (
+                    expected_index
+                    if attempt.get("status") != "completed"
+                    else None
+                ),
+            }
+
+        if attempt.get("status") != "in_progress":
+            raise HTTPException(
+                status_code=400,
+                detail="Quiz already completed"
+            )
 
         if request.questionIndex != expected_index:
             raise HTTPException(
                 status_code=400,
-                detail="Invalid question sequence or question already answered",
+                detail="Invalid quiz question sequence.",
             )
 
         bank_ref = db.collection("quiz_question_bank").document(
@@ -3510,19 +3550,19 @@ def get_practice_daily_leaderboard(
         docs = (
             db.collection("quiz_practice_leaderboard_daily")
             .where("date", "==", day_id)
+            .order_by(
+                "points",
+                direction=firestore.Query.DESCENDING
+            )
+            .limit(50)
             .stream()
-        )
-
-        rows = [doc.to_dict() or {} for doc in docs]
-
-        rows.sort(
-            key=lambda item: float(item.get("points", 0) or 0),
-            reverse=True,
         )
 
         leaderboard = []
 
-        for rank, data in enumerate(rows[:50], start=1):
+        for rank, doc in enumerate(docs, start=1):
+            data = doc.to_dict() or {}
+
             leaderboard.append({
                 "rank": rank,
                 "farmerName": data.get("farmerName") or "Farmer",
@@ -3556,19 +3596,19 @@ def get_practice_monthly_leaderboard(
         docs = (
             db.collection("quiz_practice_leaderboard_monthly")
             .where("month", "==", month_id)
+            .order_by(
+                "points",
+                direction=firestore.Query.DESCENDING
+            )
+            .limit(50)
             .stream()
-        )
-
-        rows = [doc.to_dict() or {} for doc in docs]
-
-        rows.sort(
-            key=lambda item: float(item.get("points", 0) or 0),
-            reverse=True,
         )
 
         leaderboard = []
 
-        for rank, data in enumerate(rows[:50], start=1):
+        for rank, doc in enumerate(docs, start=1):
+            data = doc.to_dict() or {}
+
             leaderboard.append({
                 "rank": rank,
                 "farmerName": data.get("farmerName") or "Farmer",
@@ -4011,14 +4051,22 @@ def format_daily_quiz_question(question, question_number):
         "options": formatted_options,
     }
 
-# ============================================================
-# DAILY QUIZ STATUS ENDPOINT
-# ============================================================
-
 @app.get("/quiz/today")
 def get_today_quiz(
+    include_my_answer: bool = Query(
+        default=True,
+        alias="includeMyAnswer",
+    ),
     user=Depends(verify_firebase_token),
 ):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="User authentication failed.",
+        )
+
     current_time = get_quiz_current_time()
     quiz_date = current_time.date()
 
@@ -4027,7 +4075,10 @@ def get_today_quiz(
         seconds=QUIZ_TOTAL_DURATION
     )
 
-    # Quiz has not started
+    # --------------------------------------------------------
+    # WAITING
+    # --------------------------------------------------------
+
     if current_time < quiz_start:
         return {
             "status": "waiting",
@@ -4037,7 +4088,10 @@ def get_today_quiz(
             "serverTime": current_time.isoformat(),
         }
 
-    # Quiz has ended
+    # --------------------------------------------------------
+    # COMPLETED
+    # --------------------------------------------------------
+
     if current_time >= quiz_end:
         tomorrow = quiz_date + timedelta(days=1)
         next_start = get_quiz_start_time(tomorrow)
@@ -4049,8 +4103,11 @@ def get_today_quiz(
             "serverTime": current_time.isoformat(),
         }
 
-    # Retrieve today's published quiz
-    quiz_data = get_daily_quiz_data(quiz_date)
+    # --------------------------------------------------------
+    # CACHED QUIZ DATA
+    # --------------------------------------------------------
+
+    quiz_data = get_cached_daily_quiz_data(quiz_date)
 
     if not quiz_data or quiz_data.get("status") != "published":
         return {
@@ -4060,7 +4117,7 @@ def get_today_quiz(
             "serverTime": current_time.isoformat(),
         }
 
-    validate_daily_quiz(quiz_data)
+    questions = quiz_data.get("questions", [])
 
     elapsed_seconds = int(
         (current_time - quiz_start).total_seconds()
@@ -4069,6 +4126,12 @@ def get_today_quiz(
     question_number = (
         elapsed_seconds // QUIZ_QUESTION_DURATION
     ) + 1
+
+    if not 1 <= question_number <= len(questions):
+        raise HTTPException(
+            status_code=503,
+            detail="The published quiz schedule is inconsistent.",
+        )
 
     question_start = quiz_start + timedelta(
         seconds=(question_number - 1) * QUIZ_QUESTION_DURATION
@@ -4081,30 +4144,43 @@ def get_today_quiz(
 
     remaining_seconds = max(
         0,
-        int((question_deadline - current_time).total_seconds())
+        int((question_deadline - current_time).total_seconds()),
     )
 
-    question = quiz_data["questions"][question_number - 1]
-    response_id = (
-        f"{quiz_date.isoformat()}_{user.get('uid')}_q{question_number}"
-    )
+    question = questions[question_number - 1]
 
-    existing_response = db.collection(
-        "daily_quiz_responses"
-    ).document(response_id).get()
-
-    already_answered = existing_response.exists
-
+    already_answered = False
     my_answer = None
 
-    if already_answered:
-        response_data = existing_response.to_dict() or {}
+    # --------------------------------------------------------
+    # PERSONAL ANSWER LOOKUP
+    # --------------------------------------------------------
 
-        my_answer = {
-            "optionId": response_data.get("selectedOptionId"),
-            "isCorrect": response_data.get("isCorrect", False),
-            "pointsAwarded": response_data.get("points", 0),
-        }
+    if include_my_answer:
+        response_id = (
+            f"{quiz_date.isoformat()}_{uid}_q{question_number}"
+        )
+
+        response_ref = db.collection(
+            "daily_quiz_responses"
+        ).document(response_id)
+
+        existing_response = response_ref.get()
+
+        already_answered = existing_response.exists
+
+        if already_answered:
+            response_data = existing_response.to_dict() or {}
+
+            my_answer = {
+                "optionId": response_data.get("selectedOptionId"),
+                "isCorrect": response_data.get("isCorrect", False),
+                "pointsAwarded": response_data.get("points", 0),
+            }
+
+    # --------------------------------------------------------
+    # RESPONSE
+    # --------------------------------------------------------
 
     return {
         "status": "live",
@@ -4123,7 +4199,6 @@ def get_today_quiz(
         "alreadyAnswered": already_answered,
         "myAnswer": my_answer,
     }
-
 # ============================================================
 # QUIZ CATEGORIES API
 # ============================================================
@@ -4136,6 +4211,52 @@ def get_quiz_categories(
         "success": True,
         "categories": QUIZ_CATEGORIES,
     }
+# ============================================================
+# DAILY QUIZ CACHE
+# ============================================================
+
+_DAILY_QUIZ_CACHE = {}
+_DAILY_QUIZ_CACHE_LOCK = threading.RLock()
+
+_DAILY_QUIZ_CACHE_TTL = 300
+_DAILY_QUIZ_MISS_TTL = 2
+
+
+def get_cached_daily_quiz_data(quiz_date):
+    """
+    Cache the shared published quiz in each API worker.
+
+    Published questions are treated as immutable during a session.
+    Missing/unpublished data is cached briefly so a burst of clients
+    does not repeatedly hit Firestore while publication is pending.
+    """
+
+    cache_key = quiz_date.isoformat()
+
+    with _DAILY_QUIZ_CACHE_LOCK:
+        now = _time.monotonic()
+        cached = _DAILY_QUIZ_CACHE.get(cache_key)
+
+        if cached is not None:
+            expires_at, cached_data = cached
+
+            if now < expires_at:
+                return cached_data
+
+        quiz_data = get_daily_quiz_data(quiz_date)
+
+        if quiz_data and quiz_data.get("status") == "published":
+            validate_daily_quiz(quiz_data)
+            ttl = _DAILY_QUIZ_CACHE_TTL
+        else:
+            ttl = _DAILY_QUIZ_MISS_TTL
+
+        _DAILY_QUIZ_CACHE[cache_key] = (
+            _time.monotonic() + ttl,
+            quiz_data,
+        )
+
+        return quiz_data
 
 # ============================================================
 # DAILY QUIZ ANSWER SUBMISSION
@@ -4154,37 +4275,21 @@ def submit_daily_quiz_answer(
             detail="User authentication failed."
         )
 
+    if not 1 <= request.questionNumber <= QUIZ_TOTAL_QUESTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid question number."
+        )
+
     current_time = get_quiz_current_time()
     quiz_date = current_time.date()
     quiz_start = get_quiz_start_time(quiz_date)
 
-    elapsed_seconds = (
-        current_time - quiz_start
-    ).total_seconds()
+    # --------------------------------------------------------
+    # GET CACHED QUIZ
+    # --------------------------------------------------------
 
-    if elapsed_seconds < 0:
-        raise HTTPException(
-            status_code=403,
-            detail="Today's quiz has not started."
-        )
-
-    if elapsed_seconds >= QUIZ_TOTAL_DURATION:
-        raise HTTPException(
-            status_code=403,
-            detail="Today's quiz has ended."
-        )
-
-    active_question_number = (
-        int(elapsed_seconds // QUIZ_QUESTION_DURATION) + 1
-    )
-
-    if request.questionNumber != active_question_number:
-        raise HTTPException(
-            status_code=409,
-            detail="This question is no longer active."
-        )
-
-    quiz_data = get_daily_quiz_data(quiz_date)
+    quiz_data = get_cached_daily_quiz_data(quiz_date)
 
     if not quiz_data or quiz_data.get("status") != "published":
         raise HTTPException(
@@ -4192,11 +4297,19 @@ def submit_daily_quiz_answer(
             detail="Today's quiz is not available."
         )
 
-    validate_daily_quiz(quiz_data)
+    questions = quiz_data.get("questions", [])
 
-    question = quiz_data["questions"][
-        request.questionNumber - 1
-    ]
+    if request.questionNumber > len(questions):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid question number."
+        )
+
+    question = questions[request.questionNumber - 1]
+
+    # --------------------------------------------------------
+    # VALIDATE OPTION
+    # --------------------------------------------------------
 
     valid_option_ids = []
 
@@ -4208,21 +4321,26 @@ def submit_daily_quiz_answer(
                 str(option.get("id", chr(65 + index)))
             )
 
-    if request.selectedOptionId not in valid_option_ids:
+    selected_option = str(request.selectedOptionId)
+
+    if selected_option not in valid_option_ids:
         raise HTTPException(
             status_code=400,
             detail="Invalid answer option."
         )
 
     is_correct = (
-        request.selectedOptionId
-        == str(question["correctOptionId"])
+        selected_option == str(question["correctOptionId"])
     )
 
     points = (
         QUIZ_POINTS_PER_CORRECT_ANSWER
         if is_correct else 0
     )
+
+    # --------------------------------------------------------
+    # FIRESTORE REFERENCES
+    # --------------------------------------------------------
 
     response_id = (
         f"{quiz_date.isoformat()}_{uid}_q{request.questionNumber}"
@@ -4242,26 +4360,85 @@ def submit_daily_quiz_answer(
         "farmer_quiz_leaderboard"
     ).document(uid)
 
-    farmer_name = get_or_create_quiz_display_name(uid)
-    sync_quiz_leaderboard_name(uid, farmer_name)
+    # Do not perform profile reads and leaderboard-name
+    # synchronization in this high-frequency answer endpoint.
+    #
+    # Synchronize quiz display names during profile creation
+    # and profile updates instead.
+    farmer_name = (
+        user.get("quizDisplayName")
+        or user.get("quiz_display_name")
+        or user.get("name")
+        or user.get("displayName")
+    )
+
+    if farmer_name:
+        farmer_name = str(farmer_name).strip() or None
+
+    # --------------------------------------------------------
+    # ATOMIC AND IDEMPOTENT TRANSACTION
+    # --------------------------------------------------------
 
     transaction = db.transaction()
 
     @firestore.transactional
     def save_answer(transaction):
+
+        # Always check for an existing answer FIRST.
+        # This allows a retry to recover an already-committed result,
+        # even after the question deadline has passed.
+
         existing_response = response_ref.get(
             transaction=transaction
         )
 
         if existing_response.exists:
+            existing_data = existing_response.to_dict() or {}
+
+            return {
+                "alreadySubmitted": True,
+                "selectedOptionId": existing_data.get(
+                    "selectedOptionId"
+                ),
+                "isCorrect": bool(
+                    existing_data.get("isCorrect", False)
+                ),
+                "pointsEarned": int(
+                    existing_data.get("points", 0) or 0
+                ),
+            }
+
+        # ----------------------------------------------------
+        # SERVER-SIDE TIME VALIDATION
+        # ----------------------------------------------------
+
+        transaction_time = get_quiz_current_time()
+
+        elapsed_seconds = (
+            transaction_time - quiz_start
+        ).total_seconds()
+
+        if elapsed_seconds < 0:
             raise HTTPException(
-                status_code=409,
-                detail="You have already answered this question."
+                status_code=403,
+                detail="Today's quiz has not started."
             )
 
-        # Recheck the deadline using server time immediately
-        # before committing the answer.
-        transaction_time = get_quiz_current_time()
+        if elapsed_seconds >= QUIZ_TOTAL_DURATION:
+            raise HTTPException(
+                status_code=403,
+                detail="Today's quiz has ended."
+            )
+
+        active_question_number = (
+            int(elapsed_seconds // QUIZ_QUESTION_DURATION) + 1
+        )
+
+        if request.questionNumber != active_question_number:
+            raise HTTPException(
+                status_code=409,
+                detail="This question is no longer active."
+            )
 
         question_start = (
             quiz_start
@@ -4287,47 +4464,132 @@ def submit_daily_quiz_answer(
                 detail="The question time has expired."
             )
 
+        # Read the monthly leaderboard before any transaction writes.
+        existing_leaderboard = {}
+
+        if points > 0:
+            leaderboard_snapshot = leaderboard_ref.get(
+                transaction=transaction
+            )
+
+            existing_leaderboard = (
+                leaderboard_snapshot.to_dict() or {}
+                if leaderboard_snapshot.exists
+                else {}
+            )
+
+        # ----------------------------------------------------
+        # SAVE ANSWER
+        # ----------------------------------------------------
+
         transaction.set(response_ref, {
             "userId": uid,
             "date": quiz_date.isoformat(),
             "questionNumber": request.questionNumber,
-            "selectedOptionId": request.selectedOptionId,
+            "selectedOptionId": selected_option,
             "isCorrect": is_correct,
             "points": points,
             "submittedAt": transaction_time.isoformat(),
         })
 
-        transaction.set(score_ref, {
+        # ----------------------------------------------------
+        # UPDATE PERSONAL DAILY SCORE
+        # ----------------------------------------------------
+
+        score_update = {
             "userId": uid,
             "date": quiz_date.isoformat(),
-            "farmerName": farmer_name,
             "totalPoints": firestore.Increment(points),
             "correctAnswers": firestore.Increment(
                 1 if is_correct else 0
             ),
             "answeredQuestions": firestore.Increment(1),
             "updatedAt": transaction_time.isoformat(),
-        }, merge=True)
+        }
 
-        transaction.set(leaderboard_ref, {
-            "userId": uid,
-            "monthId": month_id,
-            "farmerName": farmer_name,
-            "totalPoints": firestore.Increment(points),
-            "updatedAt": transaction_time.isoformat(),
-        }, merge=True)
+        if farmer_name:
+            score_update["farmerName"] = farmer_name
 
-    save_answer(transaction)
+        transaction.set(
+            score_ref,
+            score_update,
+            merge=True,
+        )
+
+        # ----------------------------------------------------
+        # UPDATE MONTHLY LEADERBOARD
+        # ----------------------------------------------------
+
+        # Incorrect answers cannot increase monthly points.
+        # Avoid an unnecessary leaderboard document write for them.
+
+        if points > 0:
+            previous_month = existing_leaderboard.get("monthId")
+
+            resolved_farmer_name = (
+                farmer_name
+                or existing_leaderboard.get("farmerName")
+            )
+
+            if previous_month == month_id:
+        # Continue accumulating points in the current month.
+                leaderboard_update = {
+                    "userId": uid,
+                    "monthId": month_id,
+                    "totalPoints": firestore.Increment(points),
+                    "updatedAt": transaction_time.isoformat(),
+                }
+
+                if resolved_farmer_name:
+                    leaderboard_update["farmerName"] = resolved_farmer_name
+
+                transaction.set(
+                    leaderboard_ref,
+                    leaderboard_update,
+                    merge=True,
+                )
+
+            else:
+        # New month: start the monthly score from zero.
+                leaderboard_update = {
+                    "userId": uid,
+                    "monthId": month_id,
+                    "totalPoints": points,
+                    "updatedAt": transaction_time.isoformat(),
+                }
+
+                if resolved_farmer_name:
+                    leaderboard_update["farmerName"] = resolved_farmer_name
+
+                transaction.set(
+                    leaderboard_ref,
+                    leaderboard_update,
+                )
+
+        return {
+            "alreadySubmitted": False,
+            "selectedOptionId": selected_option,
+            "isCorrect": is_correct,
+            "pointsEarned": points,
+        }
+
+    result = save_answer(transaction)
 
     return {
         "success": True,
+        "alreadySubmitted": result["alreadySubmitted"],
         "questionNumber": request.questionNumber,
-        "isCorrect": is_correct,
-        "pointsEarned": points,
+        "selectedOptionId": result["selectedOptionId"],
+        "isCorrect": result["isCorrect"],
+        "pointsEarned": result["pointsEarned"],
         "message": (
-            "Correct answer!"
-            if is_correct
-            else "Incorrect answer."
+            "Your previous answer was already recorded."
+            if result["alreadySubmitted"]
+            else (
+                "Correct answer!"
+                if result["isCorrect"]
+                else "Incorrect answer."
+            )
         ),
     }
 # ============================================================
