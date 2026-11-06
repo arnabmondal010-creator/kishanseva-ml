@@ -4360,14 +4360,19 @@ def submit_daily_quiz_answer(
         "farmer_quiz_leaderboard"
     ).document(uid)
 
-    # Do not perform profile reads and leaderboard-name
-    # synchronization in this high-frequency answer endpoint.
-    #
-    # Synchronize quiz display names during profile creation
-    # and profile updates instead.
+    # --------------------------------------------------------
+# GET QUIZ DISPLAY NAME FROM FARMERS COLLECTION
+# --------------------------------------------------------
+
+    farmer_snapshot = db.collection("farmers").document(uid).get()
+    farmer_profile = farmer_snapshot.to_dict() or {}
+
     farmer_name = (
-        user.get("quizDisplayName")
+        farmer_profile.get("quizDisplayName")
+        or user.get("quizDisplayName")
         or user.get("quiz_display_name")
+        or farmer_profile.get("personal", {}).get("name")
+        or farmer_profile.get("name")
         or user.get("name")
         or user.get("displayName")
     )
@@ -4464,19 +4469,15 @@ def submit_daily_quiz_answer(
                 detail="The question time has expired."
             )
 
-        # Read the monthly leaderboard before any transaction writes.
-        existing_leaderboard = {}
+        leaderboard_snapshot = leaderboard_ref.get(
+            transaction=transaction
+        )
 
-        if points > 0:
-            leaderboard_snapshot = leaderboard_ref.get(
-                transaction=transaction
-            )
-
-            existing_leaderboard = (
-                leaderboard_snapshot.to_dict() or {}
-                if leaderboard_snapshot.exists
-                else {}
-            )
+        existing_leaderboard = (
+            leaderboard_snapshot.to_dict() or {}
+            if leaderboard_snapshot.exists
+            else {}
+        )
 
         # ----------------------------------------------------
         # SAVE ANSWER
@@ -4509,6 +4510,7 @@ def submit_daily_quiz_answer(
 
         if farmer_name:
             score_update["farmerName"] = farmer_name
+            score_update["quizDisplayName"] = farmer_name
 
         transaction.set(
             score_ref,
@@ -4520,19 +4522,18 @@ def submit_daily_quiz_answer(
         # UPDATE MONTHLY LEADERBOARD
         # ----------------------------------------------------
 
-        # Incorrect answers cannot increase monthly points.
-        # Avoid an unnecessary leaderboard document write for them.
+        previous_month = existing_leaderboard.get("monthId")
+
+        resolved_farmer_name = (
+            farmer_name
+            or existing_leaderboard.get("quizDisplayName")
+            or existing_leaderboard.get("farmerName")
+        )
 
         if points > 0:
-            previous_month = existing_leaderboard.get("monthId")
-
-            resolved_farmer_name = (
-                farmer_name
-                or existing_leaderboard.get("farmerName")
-            )
 
             if previous_month == month_id:
-        # Continue accumulating points in the current month.
+                # Continue accumulating points in the current month.
                 leaderboard_update = {
                     "userId": uid,
                     "monthId": month_id,
@@ -4542,6 +4543,7 @@ def submit_daily_quiz_answer(
 
                 if resolved_farmer_name:
                     leaderboard_update["farmerName"] = resolved_farmer_name
+                    leaderboard_update["quizDisplayName"] = resolved_farmer_name
 
                 transaction.set(
                     leaderboard_ref,
@@ -4550,7 +4552,7 @@ def submit_daily_quiz_answer(
                 )
 
             else:
-        # New month: start the monthly score from zero.
+                # New month: start the monthly score from zero.
                 leaderboard_update = {
                     "userId": uid,
                     "monthId": month_id,
@@ -4560,11 +4562,25 @@ def submit_daily_quiz_answer(
 
                 if resolved_farmer_name:
                     leaderboard_update["farmerName"] = resolved_farmer_name
+                    leaderboard_update["quizDisplayName"] = resolved_farmer_name
 
                 transaction.set(
                     leaderboard_ref,
                     leaderboard_update,
                 )
+
+        elif leaderboard_snapshot.exists and resolved_farmer_name:
+            # Synchronize the name without changing the existing score.
+            transaction.set(
+                leaderboard_ref,
+                {
+                    "userId": uid,
+                    "farmerName": resolved_farmer_name,
+                    "quizDisplayName": resolved_farmer_name,
+                    "updatedAt": transaction_time.isoformat(),
+                },
+                merge=True,
+            )
 
         return {
             "alreadySubmitted": False,
