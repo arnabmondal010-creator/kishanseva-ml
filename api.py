@@ -4057,9 +4057,9 @@ def get_today_quiz(
         default=True,
         alias="includeMyAnswer",
     ),
-    include_questions: bool = Query(
-        default=True,
-        alias="includeQuestions",
+    include_question_preview: bool = Query(
+        default=False,
+        alias="includeQuestionPreview",
     ),
     user=Depends(verify_firebase_token),
 ):
@@ -4084,32 +4084,36 @@ def get_today_quiz(
     # --------------------------------------------------------
 
     if current_time < quiz_start:
+        first_question = None
 
-        formatted_questions = []
-
-        if include_questions:
+        # Expose only Question 1, and only during the final five seconds
+        # before the session. Do not disclose the complete question set.
+        if (
+            include_question_preview
+            and quiz_start - current_time <= timedelta(seconds=5)
+        ):
             quiz_data = get_cached_daily_quiz_data(quiz_date)
 
             if quiz_data and quiz_data.get("status") == "published":
                 questions = quiz_data.get("questions", [])
 
-                formatted_questions = [
-                    format_daily_quiz_question(question, index + 1)
-                    for index, question in enumerate(
-                        questions[:QUIZ_TOTAL_QUESTIONS]
+                if questions:
+                    first_question = format_daily_quiz_question(
+                        questions[0],
+                        1,
                     )
-                ]
+
+        response_time = get_quiz_current_time()
 
         return {
             "status": "waiting",
             "date": quiz_date.isoformat(),
             "startAt": quiz_start.isoformat(),
             "nextStartAt": quiz_start.isoformat(),
-            "quizStartAt": quiz_start.isoformat(),
+            "serverTime": response_time.isoformat(),
             "questionDurationSeconds": QUIZ_QUESTION_DURATION,
             "totalQuestions": QUIZ_TOTAL_QUESTIONS,
-            "questionsForSession": formatted_questions,
-            "serverTime": current_time.isoformat(),
+            "firstQuestion": first_question,
         }
 
     # --------------------------------------------------------
@@ -4119,12 +4123,13 @@ def get_today_quiz(
     if current_time >= quiz_end:
         tomorrow = quiz_date + timedelta(days=1)
         next_start = get_quiz_start_time(tomorrow)
+        response_time = get_quiz_current_time()
 
         return {
             "status": "completed",
             "date": quiz_date.isoformat(),
             "nextStartAt": next_start.isoformat(),
-            "serverTime": current_time.isoformat(),
+            "serverTime": response_time.isoformat(),
         }
 
     # --------------------------------------------------------
@@ -4134,28 +4139,16 @@ def get_today_quiz(
     quiz_data = get_cached_daily_quiz_data(quiz_date)
 
     if not quiz_data or quiz_data.get("status") != "published":
+        response_time = get_quiz_current_time()
+
         return {
             "status": "not_published",
             "date": quiz_date.isoformat(),
             "message": "Today's quiz is not available yet.",
-            "serverTime": current_time.isoformat(),
+            "serverTime": response_time.isoformat(),
         }
 
     questions = quiz_data.get("questions", [])
-
-    formatted_questions = []
-
-    if include_questions:
-        formatted_questions = [
-            format_daily_quiz_question(question, index + 1)
-            for index, question in enumerate(
-                questions[:QUIZ_TOTAL_QUESTIONS]
-            )
-        ]
-
-    # --------------------------------------------------------
-    # DETERMINE ACTIVE QUESTION
-    # --------------------------------------------------------
 
     elapsed_seconds = int(
         (current_time - quiz_start).total_seconds()
@@ -4190,6 +4183,30 @@ def get_today_quiz(
     question = questions[question_number - 1]
 
     # --------------------------------------------------------
+    # PREVIEW ONLY THE IMMEDIATELY FOLLOWING QUESTION
+    # --------------------------------------------------------
+
+    next_question = None
+    next_question_number = None
+    next_question_starts_at = None
+    next_question_ends_at = None
+
+    if (
+        include_question_preview
+        and question_number < len(questions)
+    ):
+        next_question_number = question_number + 1
+        next_question = format_daily_quiz_question(
+            questions[next_question_number - 1],
+            next_question_number,
+        )
+        next_question_starts_at = question_deadline
+        next_question_ends_at = get_quiz_question_deadline(
+            quiz_start,
+            next_question_number,
+        )
+
+    # --------------------------------------------------------
     # PERSONAL ANSWER LOOKUP
     # --------------------------------------------------------
 
@@ -4218,6 +4235,10 @@ def get_today_quiz(
                 "pointsAwarded": response_data.get("points", 0),
             }
 
+    # Sample the server clock again near response construction. The question
+    # number/deadline above remain tied to the official global schedule.
+    response_time = get_quiz_current_time()
+
     # --------------------------------------------------------
     # RESPONSE
     # --------------------------------------------------------
@@ -4234,15 +4255,25 @@ def get_today_quiz(
             question,
             question_number,
         ),
-        "questionsForSession": formatted_questions,
         "questionStartedAt": question_start.isoformat(),
         "questionEndsAt": question_deadline.isoformat(),
-        "serverTime": current_time.isoformat(),
+        "nextQuestion": next_question,
+        "nextQuestionNumber": next_question_number,
+        "nextQuestionStartsAt": (
+            next_question_starts_at.isoformat()
+            if next_question_starts_at else None
+        ),
+        "nextQuestionEndsAt": (
+            next_question_ends_at.isoformat()
+            if next_question_ends_at else None
+        ),
+        "serverTime": response_time.isoformat(),
         "remainingSeconds": remaining_seconds,
         "remainingMilliseconds": remaining_ms,
         "alreadyAnswered": already_answered,
         "myAnswer": my_answer,
     }
+
 # ============================================================
 # QUIZ CATEGORIES API
 # ============================================================
