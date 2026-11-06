@@ -4057,6 +4057,10 @@ def get_today_quiz(
         default=True,
         alias="includeMyAnswer",
     ),
+    include_questions: bool = Query(
+        default=True,
+        alias="includeQuestions",
+    ),
     user=Depends(verify_firebase_token),
 ):
     uid = user.get("uid")
@@ -4080,11 +4084,31 @@ def get_today_quiz(
     # --------------------------------------------------------
 
     if current_time < quiz_start:
+
+        formatted_questions = []
+
+        if include_questions:
+            quiz_data = get_cached_daily_quiz_data(quiz_date)
+
+            if quiz_data and quiz_data.get("status") == "published":
+                questions = quiz_data.get("questions", [])
+
+                formatted_questions = [
+                    format_daily_quiz_question(question, index + 1)
+                    for index, question in enumerate(
+                        questions[:QUIZ_TOTAL_QUESTIONS]
+                    )
+                ]
+
         return {
             "status": "waiting",
             "date": quiz_date.isoformat(),
             "startAt": quiz_start.isoformat(),
             "nextStartAt": quiz_start.isoformat(),
+            "quizStartAt": quiz_start.isoformat(),
+            "questionDurationSeconds": QUIZ_QUESTION_DURATION,
+            "totalQuestions": QUIZ_TOTAL_QUESTIONS,
+            "questionsForSession": formatted_questions,
             "serverTime": current_time.isoformat(),
         }
 
@@ -4119,6 +4143,20 @@ def get_today_quiz(
 
     questions = quiz_data.get("questions", [])
 
+    formatted_questions = []
+
+    if include_questions:
+        formatted_questions = [
+            format_daily_quiz_question(question, index + 1)
+            for index, question in enumerate(
+                questions[:QUIZ_TOTAL_QUESTIONS]
+            )
+        ]
+
+    # --------------------------------------------------------
+    # DETERMINE ACTIVE QUESTION
+    # --------------------------------------------------------
+
     elapsed_seconds = int(
         (current_time - quiz_start).total_seconds()
     )
@@ -4142,19 +4180,21 @@ def get_today_quiz(
         question_number,
     )
 
-    remaining_seconds = max(
+    remaining_ms = max(
         0,
-        int((question_deadline - current_time).total_seconds()),
+        int((question_deadline - current_time).total_seconds() * 1000),
     )
 
-    question = questions[question_number - 1]
+    remaining_seconds = (remaining_ms + 999) // 1000
 
-    already_answered = False
-    my_answer = None
+    question = questions[question_number - 1]
 
     # --------------------------------------------------------
     # PERSONAL ANSWER LOOKUP
     # --------------------------------------------------------
+
+    already_answered = False
+    my_answer = None
 
     if include_my_answer:
         response_id = (
@@ -4185,17 +4225,21 @@ def get_today_quiz(
     return {
         "status": "live",
         "date": quiz_date.isoformat(),
+        "quizStartAt": quiz_start.isoformat(),
         "questionNumber": question_number,
         "questionIndex": question_number - 1,
         "totalQuestions": QUIZ_TOTAL_QUESTIONS,
+        "questionDurationSeconds": QUIZ_QUESTION_DURATION,
         "question": format_daily_quiz_question(
             question,
             question_number,
         ),
+        "questionsForSession": formatted_questions,
         "questionStartedAt": question_start.isoformat(),
         "questionEndsAt": question_deadline.isoformat(),
         "serverTime": current_time.isoformat(),
         "remainingSeconds": remaining_seconds,
+        "remainingMilliseconds": remaining_ms,
         "alreadyAnswered": already_answered,
         "myAnswer": my_answer,
     }
