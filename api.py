@@ -29,7 +29,7 @@ import traceback
 import random
 from datetime import datetime, timezone
 from fastapi import HTTPException, Depends
-
+from fastapi.responses import HTMLResponse
 
 from limits import can_use, get_user_plan, set_user_plan, mark_used
 from ai_service import analyze_image
@@ -18750,6 +18750,165 @@ async def delete_account(
         "message": "Account deleted successfully.",
         "deleted_records": deleted_records,
     }
+
+@app.get("/delete-account", response_class=HTMLResponse)
+async def delete_account_page():
+
+    return HTMLResponse(content="""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+        <title>KishanSeva - Account and Data Deletion</title>
+
+        <style>
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: Arial, sans-serif;
+                background: #F5F8F2;
+                color: #283528;
+                margin: 0;
+                padding: 20px;
+                line-height: 1.6;
+            }
+
+            .container {
+                max-width: 700px;
+                margin: 35px auto;
+                background: white;
+                padding: 30px;
+                border-radius: 16px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+            }
+
+            h1 {
+                color: #285C24;
+                margin-bottom: 8px;
+            }
+
+            h2 {
+                color: #285C24;
+                font-size: 19px;
+                margin-top: 26px;
+            }
+
+            p, li {
+                font-size: 15px;
+            }
+
+            li {
+                margin-bottom: 8px;
+            }
+
+            .button {
+                display: inline-block;
+                background: #689F38;
+                color: white;
+                padding: 14px 22px;
+                border-radius: 9px;
+                text-decoration: none;
+                font-weight: bold;
+                margin-top: 12px;
+            }
+
+            .notice {
+                background: #FFF5E5;
+                border-left: 4px solid #D99A32;
+                padding: 13px;
+                border-radius: 6px;
+                margin-top: 18px;
+            }
+
+            .footer {
+                margin-top: 30px;
+                padding-top: 18px;
+                border-top: 1px solid #E8EDE5;
+                color: #777;
+                font-size: 13px;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div class="container">
+
+            <h1>KishanSeva</h1>
+            <p><strong>Account and Personal Data Deletion</strong></p>
+
+            <p>
+                KishanSeva Enterprise provides users with a way to request
+                deletion of their KishanSeva account and associated data,
+                without needing to reinstall or access the mobile app.
+            </p>
+
+            <h2>How to request account deletion</h2>
+
+            <ol>
+                <li>Send an email from your registered email address.</li>
+                <li>Use the subject "KishanSeva Account Deletion Request".</li>
+                <li>Include your registered mobile number and account email.</li>
+                <li>Our support team will verify your account and process
+                    the request according to the account deletion procedure.</li>
+            </ol>
+
+            <a class="button"
+               href="mailto:contact@kishanseva.app?subject=KishanSeva%20Account%20Deletion%20Request">
+                Request Account Deletion
+            </a>
+
+            <h2>What data is deleted?</h2>
+
+            <p>
+                The account deletion process removes the user's Firebase
+                Authentication account and associated Firestore records
+                handled by KishanSeva's account cleanup process.
+            </p>
+
+            <p>
+                Depending on the features used, associated records may
+                include account profile, contact, farming and application
+                data.
+            </p>
+
+            <h2>Account deletion eligibility</h2>
+
+            <p>
+                KishanSeva currently applies an account-age eligibility
+                rule. Account deletion through the existing deletion
+                service is available after 60 days from registration.
+                Requests are subject to account verification and this
+                eligibility rule.
+            </p>
+
+            <h2>Data retention</h2>
+
+            <p>
+                Any information that must legally be retained for
+                regulatory compliance, security or fraud prevention
+                will be handled according to applicable requirements
+                and KishanSeva's privacy policy.
+            </p>
+
+            <h2>Contact and support</h2>
+
+            <p>
+                KishanSeva Enterprise<br>
+                Email: contact@kishanseva.app
+            </p>
+
+            <div class="footer">
+                Official KishanSeva account deletion request page.
+            </div>
+
+        </div>
+    </body>
+    </html>
+    """)
 
     
 @app.post("/translate")
