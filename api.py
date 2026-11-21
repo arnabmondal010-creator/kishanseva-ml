@@ -41,6 +41,7 @@ from firebase_admin import (
     credentials as firebase_credentials,
     messaging,
     app_check,
+    storage as firebase_storage,
 )
 import threading
 import time as _time
@@ -2240,6 +2241,16 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(firebase_cred)
 
 print("Firebase initialized successfully")
+
+# ================= FIREBASE STORAGE =================
+
+SOIL_REPORT_BUCKET_NAME = "kishanseva-81375.firebasestorage.app"
+
+soil_report_bucket = firebase_storage.bucket(
+    SOIL_REPORT_BUCKET_NAME
+)
+
+print("Firebase Storage initialized:", soil_report_bucket.name)
 
 
 # ==============================
