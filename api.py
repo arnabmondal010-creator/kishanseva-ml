@@ -22869,6 +22869,98 @@ def _get_owned_crop_lifecycle(
 
     return field_ref, lifecycle_ref, lifecycle_data
 
+    # ============================================================
+# GET ACTIVE CROP LIFECYCLE FOR A FIELD
+# ============================================================
+
+@app.get("/crop-lifecycle/active")
+def get_active_crop_lifecycle(
+    field_id: str = Query(..., min_length=1),
+    user=Depends(verify_firebase_token),
+):
+    uid = user.get("uid")
+
+    if not uid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
+
+    field_ref = (
+        db.collection("farmer_fields")
+        .document(field_id)
+    )
+
+    field_snap = field_ref.get()
+
+    if not field_snap.exists:
+        raise HTTPException(
+            status_code=404,
+            detail="Field not found",
+        )
+
+    field_data = field_snap.to_dict() or {}
+
+    if field_data.get("farmer_id") != uid:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this field",
+        )
+
+    lifecycle_docs = list(
+        field_ref.collection(CROP_LIFECYCLES)
+        .where("farmer_id", "==", uid)
+        .stream()
+    )
+
+    active_lifecycles = []
+
+    for doc in lifecycle_docs:
+        data = doc.to_dict() or {}
+
+        status = str(
+            data.get("status")
+            or data.get("lifecycle_status")
+            or data.get("plan_status")
+            or ""
+        ).lower()
+
+        if status != "active":
+            continue
+
+        active_lifecycles.append({
+            "lifecycle_id": doc.id,
+            "field_id": field_id,
+            "crop": data.get("crop"),
+            "variety": data.get("variety"),
+            "planting_date": data.get("planting_date"),
+            "expected_harvest_date": (
+                data.get("expected_harvest_date")
+            ),
+            "generated_through_crop_day": (
+                data.get("generated_through_crop_day", 0)
+            ),
+            "status": status,
+            "created_at": data.get("created_at"),
+        })
+
+    active_lifecycles.sort(
+        key=lambda item: str(
+            item.get("created_at") or ""
+        ),
+        reverse=True,
+    )
+
+    return {
+        "success": True,
+        "has_active_lifecycle": bool(active_lifecycles),
+        "active_lifecycle": (
+            _lifecycle_json_safe(active_lifecycles[0])
+            if active_lifecycles else None
+        ),
+        "active_lifecycle_count": len(active_lifecycles),
+    }
+
 
 @app.get("/crop-lifecycle/{lifecycle_id}/today")
 def get_crop_lifecycle_daily_guidance(
