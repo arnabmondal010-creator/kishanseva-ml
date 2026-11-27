@@ -1203,11 +1203,20 @@ def satellite_analysis(
                 maxPixels=1e9,
             ).getInfo()
 
-            ndwi_min = float(ndwi_stats.get("NDWI_min", -0.2))
-            ndwi_max = float(ndwi_stats.get("NDWI_max", 0.2))
+            def safe_ee_stat(stats, key, fallback):
+                value = stats.get(key) if isinstance(stats, dict) else None
 
-            savi_min = float(savi_stats.get("SAVI_min", 0))
-            savi_max = float(savi_stats.get("SAVI_max", 1))
+                try:
+                    return float(value) if value is not None else fallback
+                except (TypeError, ValueError):
+                    return fallback
+
+
+            ndwi_min = safe_ee_stat(ndwi_stats, "NDWI_min", -0.2)
+            ndwi_max = safe_ee_stat(ndwi_stats, "NDWI_max", 0.2)
+
+            savi_min = safe_ee_stat(savi_stats, "SAVI_min", 0)
+            savi_max = safe_ee_stat(savi_stats, "SAVI_max", 1)
 
             # ================= VISUALIZATION =================
             # ================= VISUALIZATION =================
@@ -18792,27 +18801,47 @@ def build_24_notifications(
 
 @app.get("/get-ndvi")
 def get_ndvi_value(user_id: str, field_id: str):
-
     try:
-        doc = db.collection("fields")\
-            .document(user_id)\
-            .collection("user_fields")\
-            .document(field_id)\
-            .get()
+        if not user_id.strip() or not field_id.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="user_id and field_id are required."
+            )
 
-        if doc.exists:
-            data = doc.to_dict()
+        doc = (
+            db.collection("farmer_fields")
+            .document(field_id)
+            .get()
+        )
+
+        if not doc.exists:
             return {
-                "ndvi": data.get("ndvi"),
-                "updated": data.get("ndvi_updated")
+                "ndvi": None,
+                "updated": None
             }
 
-        return {"ndvi": None}
+        data = doc.to_dict() or {}
+
+        if data.get("farmer_id") != user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have access to this farm field."
+            )
+
+        return {
+            "ndvi": data.get("ndvi"),
+            "updated": data.get("ndvi_updated")
+        }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         print("NDVI fetch error:", e)
-        return {"ndvi": None}
-
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to fetch NDVI."
+        )
 
 
 IST = ZoneInfo("Asia/Kolkata")
